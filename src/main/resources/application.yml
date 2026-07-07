@@ -1,0 +1,6 @@
+# OAK server — base Spring Boot config.
+# Local development uses the "dev" profile by default.
+# Override per environment with SPRING_PROFILES_ACTIVE (e.g. prod).
+spring:
+  profiles:
+    active: dev

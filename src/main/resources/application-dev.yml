@@ -1,0 +1,58 @@
+# OAK server — local development profile.
+# Targets the peripheral services brought up by env/docker-compose.yml.
+# Defaults below mirror env/.env; override any value via environment variable.
+
+spring:
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:oak}
+    username: ${POSTGRES_USER:oak}
+    password: ${POSTGRES_PASSWORD:oakpass}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    # dev only — in prod use none + a migration tool (Flyway/Liquibase)
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    show-sql: true
+
+  # WebSocket (signaling + text chat). In-memory user registry, no broker needed.
+  # JWT auth is enforced by Spring Security on the WS handshake (see oak-server/CLAUDE.md).
+  # websocket:
+  #   endpoints configured in code (oak.server.config / oak.server.websocket)
+
+# OAK-specific service connections, grouped under the "oak" prefix.
+oak:
+  # MinIO — S3-compatible object storage for media attachments.
+  # oak-server generates presigned URLs; clients upload/download directly.
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}        # server -> MinIO (internal)
+    public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}  # client -> MinIO
+    access-key: ${MINIO_ROOT_USER:oak_minio}
+    secret-key: ${MINIO_ROOT_PASSWORD:oak_minio_secret}
+    bucket: ${MINIO_BUCKET:oak-attachments}  # must exist; create once (see note below)
+
+  # Janus — SFU for 3+ participant voice/video rooms & screen sharing.
+  # oak-server manages rooms via REST; the JavaFX client connects over WebSocket.
+  janus:
+    rest-url: ${JANUS_REST_URL:http://localhost:8088/janus}  # server -> Janus REST
+    ws-url: ${JANUS_WS_URL:ws://localhost:8188}              # client -> Janus WebSocket
+    admin-secret: ${JANUS_ADMIN_SECRET:janus_admin_secret}
+
+  # Coturn — TURN server for P2P fallback (1-on-1 calls behind NAT).
+  # These are handed to WebRTC clients as part of their ICE config.
+  turn:
+    host: ${TURN_HOST:localhost}
+    port: ${TURN_LISTEN_PORT:3478}
+    user: ${TURN_USER:oak}
+    password: ${TURN_PASSWORD:oakturn123}
+    realm: ${TURN_REALM:oak.local}
+
+# Notes:
+#  - MinIO bucket (oak-attachments) is NOT created automatically. Either create it
+#    via the MinIO console (http://localhost:9001) or have oak-server create it on
+#    startup via the MinIO admin SDK.
+#  - Everything here is plain HTTP/WS (no TLS). TLS termination belongs on a reverse
+#    proxy in front of oak-server for non-dev environments.

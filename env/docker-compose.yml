@@ -1,0 +1,125 @@
+# OAK — peripheral services for local development.
+#
+# Brings up everything oak-server talks to:
+#   - PostgreSQL  : relational store (users, guilds, channels, messages)
+#   - MinIO       : S3-compatible object storage for media attachments
+#   - Janus       : SFU for 3+ participant voice/video rooms & screen sharing
+#   - Coturn      : TURN server, P2P fallback for 1-on-1 calls behind NAT
+#
+# Usage:
+#   cd oak-server/env
+#   docker compose up -d
+#   docker compose logs -f janus
+#   docker compose down            # stop, keep data
+#   docker compose down -v         # stop and WIPE all volumes
+#
+# oak-server (Spring Boot) runs on the host, not in this compose file.
+# It connects to these services via localhost + the mapped ports below.
+# JavaFX clients on the same host reach Janus/Coturn the same way.
+#
+# NOTE: this is a dev setup — everything is plain HTTP/WS (no TLS).
+# For production put a reverse proxy (TLS termination) in front and
+# set a real public IP / hostname for Coturn (external-ip) and Janus.
+#
+# Variables are read from the .env file next to this compose file.
+
+services:
+
+  # ───────────────────────────── PostgreSQL ─────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: oak-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - oak-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────── MinIO ──────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: oak-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"     # S3 API  (oak-server talks here)
+      - "${MINIO_CONSOLE_PORT:-9001}:9001" # web console
+    volumes:
+      - oak-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ──────────────────────────────── Janus ──────────────────────────────
+  # SFU for multi-user voice/video (3+) and screen sharing.
+  # oak-server creates rooms via the HTTP REST API (port 8088);
+  # the JavaFX client connects directly via WebSocket (port 8188).
+  # Running on the image defaults: videoroom + websocket transport enabled.
+  janus:
+    image: janusgateway/janus-gateway:latest
+    container_name: oak-janus
+    restart: unless-stopped
+    environment:
+      JANUS_ADMIN_ADMIN_SECRET: ${JANUS_ADMIN_SECRET}
+    ports:
+      - "${JANUS_REST_PORT:-8088}:8088"     # REST API  (oak-server -> Janus)
+      - "${JANUS_WS_PORT:-8188}:8188"       # WebSocket (JavaFX -> Janus)
+      - "${JANUS_ADMIN_PORT:-7088}:7088"    # admin API
+      # RTP media range — must match Janus' media_port_range (default 2000-4000).
+      # Clients on the host use these UDP ports for SRTP media.
+      - "2000-4000:2000-4000/udp"
+    # To shrink the media range, mount a custom janus.jcfg overriding
+    #   media_port_range = "20000-20100"
+    # and update the mapped UDP range above to match.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ──────────────────────────────── Coturn ─────────────────────────────
+  # TURN/STUN server, P2P fallback for 1-on-1 calls behind strict NAT.
+  # Uses static long-term credentials from .env (TURN_USER / TURN_PASSWORD).
+  coturn:
+    image: coturn/coturn:latest
+    container_name: oak-coturn
+    restart: unless-stopped
+    # Coturn config lives in ./coturn/turnserver.conf (realm, creds, relay range).
+    # It reads ${TURN_*} at container start via envsubst in the entrypoint below.
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        envsubst < /etc/coturn/turnserver.conf > /tmp/turnserver.conf && \
+        exec turnserver -c /tmp/turnserver.conf
+    environment:
+      TURN_REALM: ${TURN_REALM}
+      TURN_USER: ${TURN_USER}
+      TURN_PASSWORD: ${TURN_PASSWORD}
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
+      TURN_MIN_PORT: ${TURN_MIN_PORT}
+      TURN_MAX_PORT: ${TURN_MAX_PORT}
+    ports:
+      - "${TURN_LISTEN_PORT:-3478}:3478/tcp"   # TURN/STUN listening
+      - "${TURN_LISTEN_PORT:-3478}:3478/udp"
+      - "${TURN_TLS_PORT:-5349}:5349/tcp"      # TURN over TLS
+      - "${TURN_TLS_PORT:-5349}:5349/udp"
+      # Relay range — must stay in sync with TURN_MIN_PORT/TURN_MAX_PORT.
+      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
+
+volumes:
+  oak-postgres-data:
+  oak-minio-data:
