@@ -25,6 +25,13 @@ spring:
 
 # OAK-specific service connections, grouped under the "oak" prefix.
 oak:
+  # JWT auth. Dev secret only — override JWT_SECRET in real deployments.
+  # Must be >= 256 bits (32+ bytes) for HS256.
+  security:
+    jwt:
+      secret: ${JWT_SECRET:dev-only-jwt-secret-change-me-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+      access-token-expiration: ${JWT_ACCESS_TOKEN_EXPIRATION:8h}  # parsed as Duration
+
   # MinIO — S3-compatible object storage for media attachments.
   # oak-server generates presigned URLs; clients upload/download directly.
   minio:
@@ -45,7 +52,8 @@ oak:
   # These are handed to WebRTC clients as part of their ICE config.
   turn:
     host: ${TURN_HOST:localhost}
-    port: ${TURN_LISTEN_PORT:3478}
+    # 34780 mirrors env/.env: Docker Desktop leaked UDP 3478 on the host.
+    port: ${TURN_LISTEN_PORT:34780}
     user: ${TURN_USER:oak}
     password: ${TURN_PASSWORD:oakturn123}
     realm: ${TURN_REALM:oak.local}

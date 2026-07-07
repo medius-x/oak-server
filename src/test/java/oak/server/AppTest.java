@@ -1,38 +1,19 @@
 package oak.server;
 
-import junit.framework.Test;
-import junit.framework.TestCase;
-import junit.framework.TestSuite;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * Unit test for simple App.
+ * Offline smoke test — does NOT boot the Spring context and does NOT touch
+ * the database, so {@code mvn package} stays green without PostgreSQL running.
+ * End-to-end JPA verification happens via the CommandLineRunner in {@link App}
+ * when the app is actually run against a live database.
  */
-public class AppTest 
-    extends TestCase
-{
-    /**
-     * Create the test case
-     *
-     * @param testName name of the test case
-     */
-    public AppTest( String testName )
-    {
-        super( testName );
-    }
+class AppTest {
 
-    /**
-     * @return the suite of tests being tested
-     */
-    public static Test suite()
-    {
-        return new TestSuite( AppTest.class );
-    }
-
-    /**
-     * Rigourous Test :-)
-     */
-    public void testApp()
-    {
-        assertTrue( true );
+    @Test
+    void junitPlatformIsWiredUp() {
+        assertTrue(true, "JUnit 5 (Jupiter) is available via spring-boot-starter-test");
     }
 }

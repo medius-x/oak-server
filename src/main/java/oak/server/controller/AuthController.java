@@ -1,0 +1,39 @@
+package oak.server.controller;
+
+import jakarta.validation.Valid;
+import oak.server.dto.AuthResponse;
+import oak.server.dto.LoginRequest;
+import oak.server.dto.RegisterRequest;
+import oak.server.dto.UserResponse;
+import oak.server.service.AuthService;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * Public auth endpoints: register a new account and log in to receive a JWT.
+ */
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+
+    private final AuthService authService;
+
+    public AuthController(AuthService authService) {
+        this.authService = authService;
+    }
+
+    @PostMapping("/register")
+    @ResponseStatus(HttpStatus.CREATED)
+    public UserResponse register(@RequestBody @Valid RegisterRequest request) {
+        return authService.register(request);
+    }
+
+    @PostMapping("/login")
+    public AuthResponse login(@RequestBody @Valid LoginRequest request) {
+        return authService.login(request);
+    }
+}

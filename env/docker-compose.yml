@@ -68,13 +68,11 @@ services:
   # SFU for multi-user voice/video (3+) and screen sharing.
   # oak-server creates rooms via the HTTP REST API (port 8088);
   # the JavaFX client connects directly via WebSocket (port 8188).
-  # Running on the image defaults: videoroom + websocket transport enabled.
+  # Running on the canyan image defaults: videoroom + websocket transport enabled.
   janus:
-    image: janusgateway/janus-gateway:latest
+    image: canyan/janus-gateway:latest
     container_name: oak-janus
     restart: unless-stopped
-    environment:
-      JANUS_ADMIN_ADMIN_SECRET: ${JANUS_ADMIN_SECRET}
     ports:
       - "${JANUS_REST_PORT:-8088}:8088"     # REST API  (oak-server -> Janus)
       - "${JANUS_WS_PORT:-8188}:8188"       # WebSocket (JavaFX -> Janus)
@@ -82,43 +80,40 @@ services:
       # RTP media range — must match Janus' media_port_range (default 2000-4000).
       # Clients on the host use these UDP ports for SRTP media.
       - "2000-4000:2000-4000/udp"
-    # To shrink the media range, mount a custom janus.jcfg overriding
-    #   media_port_range = "20000-20100"
-    # and update the mapped UDP range above to match.
-    depends_on:
-      postgres:
-        condition: service_healthy
 
   # ──────────────────────────────── Coturn ─────────────────────────────
   # TURN/STUN server, P2P fallback for 1-on-1 calls behind strict NAT.
-  # Uses static long-term credentials from .env (TURN_USER / TURN_PASSWORD).
+  # No config file: all settings are CLI flags, with values substituted from
+  # .env by Compose at parse time. (The base coturn image ships no envsubst,
+  # so we avoid runtime templating of a config file.)
   coturn:
     image: coturn/coturn:latest
     container_name: oak-coturn
     restart: unless-stopped
-    # Coturn config lives in ./coturn/turnserver.conf (realm, creds, relay range).
-    # It reads ${TURN_*} at container start via envsubst in the entrypoint below.
-    volumes:
-      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
-    entrypoint: ["/bin/sh", "-c"]
+    entrypoint: ["turnserver"]
     command:
-      - |
-        envsubst < /etc/coturn/turnserver.conf > /tmp/turnserver.conf && \
-        exec turnserver -c /tmp/turnserver.conf
-    environment:
-      TURN_REALM: ${TURN_REALM}
-      TURN_USER: ${TURN_USER}
-      TURN_PASSWORD: ${TURN_PASSWORD}
-      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
-      TURN_MIN_PORT: ${TURN_MIN_PORT}
-      TURN_MAX_PORT: ${TURN_MAX_PORT}
+      - --realm=${TURN_REALM}
+      - --server-name=${TURN_REALM}
+      - --listening-ip=0.0.0.0
+      - --external-ip=${TURN_EXTERNAL_IP}
+      - --user=${TURN_USER}:${TURN_PASSWORD}
+      - --min-port=${TURN_MIN_PORT}
+      - --max-port=${TURN_MAX_PORT}
+      - --lt-cred-mech
+      - --fingerprint
+      - --no-multicast-peers
+      - --no-cli
+      - --log-file=stdout
     ports:
-      - "${TURN_LISTEN_PORT:-3478}:3478/tcp"   # TURN/STUN listening
-      - "${TURN_LISTEN_PORT:-3478}:3478/udp"
+      # TURN/STUN listening. Non-standard host port: Docker Desktop leaked
+      # UDP 3478 (stale port-proxy), so we map host 34780 -> container 3478.
+      - "${TURN_LISTEN_PORT:-34780}:3478/tcp"
+      - "${TURN_LISTEN_PORT:-34780}:3478/udp"
       - "${TURN_TLS_PORT:-5349}:5349/tcp"      # TURN over TLS
       - "${TURN_TLS_PORT:-5349}:5349/udp"
-      # Relay range — must stay in sync with TURN_MIN_PORT/TURN_MAX_PORT.
-      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
+      # Relay range — keep in sync with TURN_MIN_PORT/TURN_MAX_PORT.
+      # 55000-55050 avoids Windows' excluded UDP ranges (49152-49451 etc.).
+      - "${TURN_MIN_PORT:-55000}-${TURN_MAX_PORT:-55050}:${TURN_MIN_PORT:-55000}-${TURN_MAX_PORT:-55050}/udp"
 
 volumes:
   oak-postgres-data:
