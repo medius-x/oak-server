@@ -1,5 +1,6 @@
 package oak.server.security;
 
+import lombok.RequiredArgsConstructor;
 import oak.server.entity.User;
 import oak.server.repository.UserRepository;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -12,13 +13,10 @@ import org.springframework.stereotype.Service;
  * Every registered account currently has the {@code ROLE_USER} authority.
  */
 @Service
+@RequiredArgsConstructor
 public class JpaUserDetailsService implements UserDetailsService {
 
     private final UserRepository userRepository;
-
-    public JpaUserDetailsService(UserRepository userRepository) {
-        this.userRepository = userRepository;
-    }
 
     @Override
     public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {

@@ -1,5 +1,6 @@
 package oak.server.config;
 
+import lombok.RequiredArgsConstructor;
 import oak.server.security.JwtAuthenticationFilter;
 import oak.server.security.JwtProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -31,13 +32,10 @@ import java.util.List;
 @Configuration
 @EnableWebSecurity
 @EnableConfigurationProperties(JwtProperties.class)
+@RequiredArgsConstructor
 public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
-
-    public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter) {
-        this.jwtAuthenticationFilter = jwtAuthenticationFilter;
-    }
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {

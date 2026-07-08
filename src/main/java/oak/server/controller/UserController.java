@@ -1,5 +1,6 @@
 package oak.server.controller;
 
+import lombok.RequiredArgsConstructor;
 import oak.server.dto.UserResponse;
 import oak.server.repository.UserRepository;
 import org.springframework.http.HttpStatus;
@@ -16,13 +17,10 @@ import org.springframework.web.server.ResponseStatusException;
  */
 @RestController
 @RequestMapping("/api/users")
+@RequiredArgsConstructor
 public class UserController {
 
     private final UserRepository userRepository;
-
-    public UserController(UserRepository userRepository) {
-        this.userRepository = userRepository;
-    }
 
     @GetMapping("/me")
     public UserResponse currentUser(@AuthenticationPrincipal UserDetails principal) {

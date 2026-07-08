@@ -1,6 +1,7 @@
 package oak.server.controller;
 
 import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.LoginRequest;
 import oak.server.dto.RegisterRequest;
@@ -18,13 +19,10 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/api/auth")
+@RequiredArgsConstructor
 public class AuthController {
 
     private final AuthService authService;
-
-    public AuthController(AuthService authService) {
-        this.authService = authService;
-    }
 
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)

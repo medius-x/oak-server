@@ -1,9 +1,8 @@
 package oak.server;
 
+import lombok.extern.slf4j.Slf4j;
 import oak.server.entity.User;
 import oak.server.repository.UserRepository;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -19,10 +18,9 @@ import java.util.List;
  * successful boot therefore proves the datasource + Hibernate wiring
  * end-to-end (schema creation via ddl-auto=update + a real read query).
  */
+@Slf4j
 @SpringBootApplication
 public class App {
-
-    private static final Logger log = LoggerFactory.getLogger(App.class);
 
     public static void main(String[] args) {
         SpringApplication.run(App.class, args);

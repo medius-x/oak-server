@@ -1,5 +1,6 @@
 package oak.server.service;
 
+import lombok.RequiredArgsConstructor;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.LoginRequest;
 import oak.server.dto.RegisterRequest;
@@ -22,22 +23,13 @@ import org.springframework.web.server.ResponseStatusException;
  * returns a signed JWT access token.
  */
 @Service
+@RequiredArgsConstructor
 public class AuthService {
 
     private final UserRepository userRepository;
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
     private final JwtTokenProvider tokenProvider;
-
-    public AuthService(UserRepository userRepository,
-                       PasswordEncoder passwordEncoder,
-                       AuthenticationManager authenticationManager,
-                       JwtTokenProvider tokenProvider) {
-        this.userRepository = userRepository;
-        this.passwordEncoder = passwordEncoder;
-        this.authenticationManager = authenticationManager;
-        this.tokenProvider = tokenProvider;
-    }
 
     @Transactional
     public UserResponse register(RegisterRequest request) {

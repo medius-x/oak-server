@@ -29,11 +29,12 @@
 
 Бутстрап завершён: `org.example:oak-server`, Java 17, Maven, **Spring Boot 4.1.0**.
 
-- `pom.xml`: spring-boot-starter-web, -security, -data-jpa, -validation, postgresql (runtime), jjwt 0.12.6, spring-boot-starter-test.
+- `pom.xml`: spring-boot-starter-web/-security/-data-jpa/-validation, postgresql, jjwt 0.12.6, lombok; test-scope: h2, spring-boot-webmvc-test, spring-boot-starter-test.
 - `App.java` — `@SpringBootApplication` + `CommandLineRunner`, проверяющий соединение с БД.
 - `entity/User` + `repository/UserRepository` — первая JPA-сущность (`@Table("users")`).
 - JPA → PostgreSQL проверено end-to-end (Hibernate создаёт таблицу `users`, проба логирует счётчик строк).
 - Security: stateless JWT-авторизация (JJWT HS256, BCrypt). Эндпоинты `/api/auth/register`, `/api/auth/login`, `/api/users/me`; публично только `/api/auth/**`. Auth-флоу проверен end-to-end (201/409/400/200/401).
+- Тесты: `AuthFlowIntegrationTest` (MockMvc, профиль `test` с in-memory H2 — без Docker), `JwtTokenProviderTest` (unit), `AppTest`. `mvn test` — 12 тестов, всё зелёное.
 - Периферия (`env/docker-compose.yml`): postgres, minio, janus (`canyan/janus-gateway`), coturn — поднимаются и проверены.
 
 На очереди: REST API каналов/сообщений, WebSocket-сигналинг (с JWT-рукопожатием), интеграции MinIO/Janus.
@@ -104,6 +105,8 @@ oak.server
 
 - **Java 17**, сборка Maven (`mvn clean package`, `mvn spring-boot:run`).
 - Пакеты: `oak.server.*`. Соответствие директорий и пакетов — обязательно.
+- **Lombok** убирает бойлерплейт: `@RequiredArgsConstructor` (DI), `@Getter/@Setter/@NoArgsConstructor(access = PROTECTED)` на JPA-сущностях, `@Slf4j` (логирование). На сущностях **без** `@Data`/`@ToString`/`@EqualsAndHashCode` (ленивые ассоциации, нестабильный hashcode). IDE: нужен Lombok-плагин + включённая annotation processing.
+- **Тесты**: интеграционные через `@SpringBootTest + MockMvc` на профиле `test` (in-memory H2, без Docker/Postgres); `mvn test` самодостаточен и изолирован.
 - Real-time состояние подключённых пользователей — **только in-memory** (коллекции), не в БД.
 - Медиа-файлы — **только** presigned-URL в MinIO, не хранить BLOB'ы в PostgreSQL.
 - Сервер **не** терминирует медиа-трафик; только сигналинг + оркестрация Janus/MinIO.

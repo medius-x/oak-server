@@ -1,0 +1,23 @@
+# Test profile: in-memory H2, no Docker/PostgreSQL required, fast and isolated.
+# Activated via @ActiveProfiles("test") on tests (overrides the dev profile).
+spring:
+  datasource:
+    url: jdbc:h2:mem:oak-test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.H2Dialect
+    show-sql: false
+    open-in-view: false
+
+# JWT config for tests (the dev profile's oak.security.jwt is not loaded here).
+oak:
+  security:
+    jwt:
+      secret: test-jwt-secret-test-jwt-secret-test-jwt-secret-test-jwt-secret-0123456789
+      access-token-expiration: 1h
