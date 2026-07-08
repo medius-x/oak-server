@@ -34,10 +34,11 @@
 - `entity/User` + `repository/UserRepository` — первая JPA-сущность (`@Table("users")`).
 - JPA → PostgreSQL проверено end-to-end (Hibernate создаёт таблицу `users`, проба логирует счётчик строк).
 - Security: stateless JWT-авторизация (JJWT HS256, BCrypt). Эндпоинты `/api/auth/register`, `/api/auth/login`, `/api/users/me`; публично только `/api/auth/**`. Auth-флоу проверен end-to-end (201/409/400/200/401).
-- Тесты: `AuthFlowIntegrationTest` (MockMvc, профиль `test` с in-memory H2 — без Docker), `JwtTokenProviderTest` (unit), `AppTest`. `mvn test` — 12 тестов, всё зелёное.
+- REST каналов/сообщений: `entity/{Channel,ChannelType,Message}` + репозитории, `service/{ChannelService,MessageService}`, `controller/{ChannelController,MessageController}`, DTO. Эндпоинты `GET/POST /api/channels`, `GET/POST /api/channels/{id}/messages`. Запись — REST (вариант A); real-time пуш подключённым клиентам — в шаге WebSocket.
+- Тесты: `AuthFlowIntegrationTest`, `ChannelMessageFlowIntegrationTest` (MockMvc, профиль `test` с in-memory H2 — без Docker), `JwtTokenProviderTest` (unit), `AppTest`. `mvn test` — 13 тестов, всё зелёное.
 - Периферия (`env/docker-compose.yml`): postgres, minio, janus (`canyan/janus-gateway`), coturn — поднимаются и проверены.
 
-На очереди: REST API каналов/сообщений, WebSocket-сигналинг (с JWT-рукопожатием), интеграции MinIO/Janus.
+На очереди: WebSocket (с JWT-рукопожатием) + пуш новых сообщений подключённым клиентам, интеграции MinIO/Janus.
 
 ## Архитектура и потоки связи (роль сервера)
 
@@ -96,7 +97,7 @@ oak.server
 - [x] Бутстрап `@SpringBootApplication` (замена `App.main`).
 - [x] Слой security: регистрация/логин, выдача и валидация JWT (`JwtTokenProvider`, `JwtAuthenticationFilter`, `JpaUserDetailsService`, `SecurityConfig`; эндпоинты `/api/auth/{register,login}`, `/api/users/me`). Проверено end-to-end.
 - [x] JPA: `User` + `UserRepository` (Channel/Message — по мере реализации).
-- [ ] REST API: каналы/сообщения (auth-эндпоинты уже готовы в `controller/AuthController`).
+- [x] REST API: каналы/сообщения (`Channel`/`Message` + эндпоинты `/api/channels`, `/api/channels/{id}/messages`; real-time пуш — в WebSocket-шаге).
 - [ ] WebSocket config с JWT-аутентификацией; in-memory реестр подключённых пользователей.
 - [ ] Интеграция с MinIO: генерация presigned-URL.
 - [ ] Интеграция с Janus: создание/управление SFU-комнатами через HTTP REST.
