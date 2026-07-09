@@ -31,6 +31,12 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- WebSocket (STOMP) for real-time message push -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+        </dependency>
+
         <!-- Database ORM: Spring Data JPA / Hibernate -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
