@@ -36,10 +36,11 @@
 - Security: stateless JWT-авторизация (JJWT HS256, BCrypt). Эндпоинты `/api/auth/register`, `/api/auth/login`, `/api/users/me`; публично только `/api/auth/**`. Auth-флоу проверен end-to-end (201/409/400/200/401).
 - REST каналов/сообщений: `entity/{Channel,ChannelType,Message}` + репозитории, `service/{ChannelService,MessageService}`, `controller/{ChannelController,MessageController}`, DTO. Эндпоинты `GET/POST /api/channels`, `GET/POST /api/channels/{id}/messages`. Запись — REST (вариант A); real-time пуш подключённым клиентам — в шаге WebSocket.
 - WebSocket (STOMP): `config/WebSocketConfig` (endpoint `/ws`, broker `/topic`, prefix `/app`), `security/AuthChannelInterceptor` (Bearer-JWT на STOMP CONNECT). `MessageService.create` пушит новое сообщение в `/topic/channel.{id}` — замыкает вариант A: REST-write → WS-delivery.
-- Тесты: `AuthFlowIntegrationTest`, `ChannelMessageFlowIntegrationTest` (MockMvc), `AuthChannelInterceptorTest`, `MessageServiceTest` (Mockito, пуш), `JwtTokenProviderTest`, `AppTest`. `mvn test` — 18 тестов, всё зелёное.
+- Presence: `websocket/PresenceTracker` — in-memory реестр STOMP-сессий на `SessionConnectEvent`/`SessionDisconnectEvent` (идемпотентный по `sessionId` против дублей disconnect; пуш дельт `{username, ONLINE|OFFLINE}` в `/topic/presence` на переходах 0↔1). `controller/PresenceController` (`GET /api/presence` — снимок онлайн), `GET /api/users` — ростер `UserSummary` (без email). Без правок `WebSocketConfig`/`SecurityConfig` (`/topic/presence` уже покрыт simple-broker, эндпоинты авто-защищены).
+- Тесты: `AuthFlowIntegrationTest`, `ChannelMessageFlowIntegrationTest`, `UsersPresenceIntegrationTest` (MockMvc), `AuthChannelInterceptorTest`, `MessageServiceTest` (Mockito, пуш), `PresenceTrackerTest` (Mockito, идемпотентность дубля disconnect), `JwtTokenProviderTest`, `AppTest`. `mvn test` — 24 теста, всё зелёное.
 - Периферия (`env/docker-compose.yml`): postgres, minio, janus (`canyan/janus-gateway`), coturn — поднимаются и проверены.
 
-На очереди: клиентский WS (`oak-client` — подписка/приём пуша), presence (in-memory реестр подключённых), интеграции MinIO/Janus.
+На очереди: интеграции MinIO (presigned-URL) и Janus (SFU-комнаты); heartbeat STOMP на обеих сторонах (для оперативного offline-детекта при обрыве соединения).
 
 ## Архитектура и потоки связи (роль сервера)
 
@@ -99,7 +100,9 @@ oak.server
 - [x] Слой security: регистрация/логин, выдача и валидация JWT (`JwtTokenProvider`, `JwtAuthenticationFilter`, `JpaUserDetailsService`, `SecurityConfig`; эндпоинты `/api/auth/{register,login}`, `/api/users/me`). Проверено end-to-end.
 - [x] JPA: `User` + `UserRepository` (Channel/Message — по мере реализации).
 - [x] REST API: каналы/сообщения (`Channel`/`Message` + эндпоинты `/api/channels`, `/api/channels/{id}/messages`; real-time пуш — в WebSocket-шаге).
-- [x] WebSocket (STOMP): JWT на CONNECT, пуш новых сообщений в `/topic/channel.{id}`. In-memory реестр/presence — отдельным шагом.
+- [x] WebSocket (STOMP): JWT на CONNECT, пуш новых сообщений в `/topic/channel.{id}`.
+- [x] Presence: in-memory реестр подключённых (`PresenceTracker`), пуш дельт в `/topic/presence`, `GET /api/presence` + `GET /api/users`.
+- [ ] STOMP heartbeat (обе стороны): server `setHeartbeatValue + TaskScheduler`, клиент — исходящие `\n` + read-watchdog. Оперативный offline-детект при аварийных обрывах (сейчас — только явный `DISCONNECT` клиента или TCP-таймаут).
 - [ ] Интеграция с MinIO: генерация presigned-URL.
 - [ ] Интеграция с Janus: создание/управление SFU-комнатами через HTTP REST.
 
@@ -123,6 +126,7 @@ oak.server
 - **STOMP native-заголовки чувствительны к регистру** (Spring сопоставляет по точному ключу, а не по case-insensitive-спеке). `AuthChannelInterceptor` поэтому проверяет и `Authorization`, и `authorization`. Клиент (`oak-client` `StompClient`) шлёт `Authorization` с большой буквы — держите регистр согласованно между клиентом и сервером.
 - **`Page.getContent()` неизменяем.** `Collections.reverse(page.getContent())` → `UnsupportedOperationException` при ≥2 элементах (при 1 — no-op, поэтому тест с одним сообщением баг пропускает). Копируйте: `new ArrayList<>(...)`. «Последние N по возрастанию» = `DESC + LIMIT` + reverse (ASC + LIMIT дало бы старейшие N, а не новейшие).
 - WS-рукопожатие и cross-client доставка **не покрываются `MockMvc`-тестами** (это интеграционный уровень). В dev включён DEBUG-лог `org.springframework.web.socket` / `org.springframework.messaging.simp` для видимости.
+- **`SessionDisconnectEvent` может прийти >1 раза за сессию** (Spring так и делает — компоненты должны быть идемпотентны к повторным disconnect). Поэтому в `PresenceTracker` удаление ключится по `sessionId` (`sessionToUsername.remove(session)` возвращает null на дубликате → no-op), а не по голому счётчику username — иначе дубль даёт under-count/уход в минус и ложный `OFFLINE`. Граничные решения (0↔1) сериализованы одним локом — это заодно исключает гонку порядка online/offline при одновременном реконнекте одного юзера. Principal на сессии: `StompHeaderAccessor.wrap(event.getMessage()).getUser().getName()` (его кладёт `AuthChannelInterceptor` в `preSend` ещё до публикации события).
 
 ## Ссылки
 
