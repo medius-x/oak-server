@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -53,9 +54,12 @@ public class MessageService {
         if (!channelRepository.existsById(channelId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found");
         }
-        List<Message> messages = messageRepository
+        // Order DESC + limit to fetch the NEWEST N, then reverse into chronological order.
+        // (ASC + LIMIT would return the oldest N, not the newest.) Page.getContent() is
+        // unmodifiable, so reverse a mutable copy.
+        List<Message> messages = new ArrayList<>(messageRepository
                 .findByChannelIdOrderByIdDesc(channelId, PageRequest.of(0, clamp(limit)))
-                .getContent();
+                .getContent());
         Collections.reverse(messages);
         return messages.stream().map(MessageResponse::from).toList();
     }

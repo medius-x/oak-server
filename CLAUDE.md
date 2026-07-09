@@ -115,6 +115,15 @@ oak.server
 - Секреты (JWT-секрет, креды БД/MinIO/Janus) — через конфиг/переменные окружения, не в коде.
 - All endpoints (REST и WebSocket) защищены Spring Security + JWT.
 
+## Грабли и интеграционный контракт
+
+Уроки из пойманных багов (не воспроизводить):
+
+- **`/ws` должен быть `permitAll` в `SecurityConfig`.** Рукопожатие WebSocket — это HTTP-запрос, и оно проходит через Spring Security; JWT при этом ещё нет (он в STOMP-фрейме `CONNECT`, а не в заголовках рукопожатия). Поэтому эндпоинт `/ws` разрешаем явно, а аутентификацию делаем на STOMP-уровне в `AuthChannelInterceptor` (читает JWT из заголовка `CONNECT`). Не «закрывайте» `/ws` требованием аутентификации — рукопожатие упадёт в 401, и WS вообще не поднимется.
+- **STOMP native-заголовки чувствительны к регистру** (Spring сопоставляет по точному ключу, а не по case-insensitive-спеке). `AuthChannelInterceptor` поэтому проверяет и `Authorization`, и `authorization`. Клиент (`oak-client` `StompClient`) шлёт `Authorization` с большой буквы — держите регистр согласованно между клиентом и сервером.
+- **`Page.getContent()` неизменяем.** `Collections.reverse(page.getContent())` → `UnsupportedOperationException` при ≥2 элементах (при 1 — no-op, поэтому тест с одним сообщением баг пропускает). Копируйте: `new ArrayList<>(...)`. «Последние N по возрастанию» = `DESC + LIMIT` + reverse (ASC + LIMIT дало бы старейшие N, а не новейшие).
+- WS-рукопожатие и cross-client доставка **не покрываются `MockMvc`-тестами** (это интеграционный уровень). В dev включён DEBUG-лог `org.springframework.web.socket` / `org.springframework.messaging.simp` для видимости.
+
 ## Ссылки
 
 - Блюпринт проекта (стек + архитектура): `../oak.txt`

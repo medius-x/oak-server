@@ -53,6 +53,18 @@ class AuthChannelInterceptorTest {
         assertDoesNotThrow(() -> interceptor.preSend(subscribe, null));
     }
 
+    @Test
+    void connectWithLowercaseAuthorizationHeaderIsAccepted() {
+        // Mirrors what the oak-client StompClient sends (STOMP convention: lowercase header names).
+        String token = tokenProvider.generateToken("alice");
+        Message<?> result = interceptor.preSend(stompMessage(StompCommand.CONNECT,
+                Map.of("authorization", "Bearer " + token)), null);
+
+        StompHeaderAccessor accessor = StompHeaderAccessor.wrap(result);
+        assertNotNull(accessor.getUser());
+        assertEquals("alice", accessor.getUser().getName());
+    }
+
     private static Message<?> stompMessage(StompCommand command, Map<String, String> headers) {
         StompHeaderAccessor accessor = StompHeaderAccessor.create(command);
         accessor.setLeaveMutable(true); // keep headers mutable so preSend can setUser()

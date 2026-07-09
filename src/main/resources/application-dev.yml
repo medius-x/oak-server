@@ -2,6 +2,12 @@
 # Targets the peripheral services brought up by env/docker-compose.yml.
 # Defaults below mirror env/.env; override any value via environment variable.
 
+# Verbose WebSocket/STOMP logging in dev — shows handshakes, CONNECT, SUBSCRIBE, MESSAGE routing.
+logging:
+  level:
+    org.springframework.web.socket: DEBUG
+    org.springframework.messaging.simp: DEBUG
+
 spring:
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:oak}

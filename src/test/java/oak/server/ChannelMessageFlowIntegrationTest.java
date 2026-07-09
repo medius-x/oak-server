@@ -42,7 +42,7 @@ class ChannelMessageFlowIntegrationTest {
                 .andExpect(jsonPath("$[0].name").value("general"))
                 .andExpect(jsonPath("$[0].type").value("TEXT"));
 
-        // post a message as alice
+        // post two messages as alice (two rows exercise the history-ordering path)
         mockMvc.perform(post("/api/channels/" + channelId + "/messages")
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
@@ -51,13 +51,18 @@ class ChannelMessageFlowIntegrationTest {
                 .andExpect(jsonPath("$.content").value("hello world"))
                 .andExpect(jsonPath("$.authorUsername").value("alice"))
                 .andExpect(jsonPath("$.channelId").value(channelId));
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"second one\"}"))
+                .andExpect(status().isCreated());
 
-        // message appears in the channel history
+        // history returns the newest N messages in chronological order (oldest-first)
         mockMvc.perform(get("/api/channels/" + channelId + "/messages")
                         .header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].content").value("hello world"))
-                .andExpect(jsonPath("$[0].authorUsername").value("alice"));
+                .andExpect(jsonPath("$[1].content").value("second one"));
 
         // posting without a token -> 401
         mockMvc.perform(post("/api/channels/" + channelId + "/messages")

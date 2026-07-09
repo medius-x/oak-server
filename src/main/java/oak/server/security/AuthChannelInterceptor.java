@@ -49,6 +49,10 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
 
     private String extractToken(StompHeaderAccessor accessor) {
         String header = accessor.getFirstNativeHeader(HttpHeaders.AUTHORIZATION);
+        if (header == null) {
+            // STOMP header names are case-insensitive per spec; some clients send lowercase
+            header = accessor.getFirstNativeHeader("authorization");
+        }
         if (header != null && header.startsWith(BEARER_PREFIX)) {
             return header.substring(BEARER_PREFIX.length());
         }
