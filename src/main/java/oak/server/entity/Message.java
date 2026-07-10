@@ -18,8 +18,9 @@ import org.hibernate.annotations.CreationTimestamp;
 import java.time.Instant;
 
 /**
- * A chat message: belongs to a {@link Channel}, authored by a {@link User}.
- * Immutable for now (no edit/delete) — attachments land with the MinIO integration.
+ * A chat message: belongs to a {@link Channel}, authored by a {@link User}. May carry an
+ * attachment stored in MinIO (referenced by object key + display name) — a message has content,
+ * an attachment, or both. Immutable for now (no edit/delete).
  */
 @Entity
 @Table(name = "messages")
@@ -40,8 +41,14 @@ public class Message {
     @JoinColumn(name = "author_id", nullable = false)
     private User author;
 
-    @Column(nullable = false, length = 4000)
-    private String content;
+    @Column(length = 4000)
+    private String content;   // nullable: an attachment-only message has no text
+
+    @Column(name = "attachment_key", length = 512)
+    private String attachmentKey;       // MinIO object key, null when there is no attachment
+
+    @Column(name = "attachment_file_name", length = 255)
+    private String attachmentFileName;  // original file name, for display
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -51,5 +58,13 @@ public class Message {
         this.channel = channel;
         this.author = author;
         this.content = content;
+    }
+
+    public Message(Channel channel, User author, String content, String attachmentKey, String attachmentFileName) {
+        this.channel = channel;
+        this.author = author;
+        this.content = content;
+        this.attachmentKey = attachmentKey;
+        this.attachmentFileName = attachmentFileName;
     }
 }

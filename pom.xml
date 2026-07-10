@@ -83,6 +83,13 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- MinIO client (S3-compatible object storage for chat attachments) -->
+        <dependency>
+            <groupId>io.minio</groupId>
+            <artifactId>minio</artifactId>
+            <version>8.5.14</version>
+        </dependency>
+
         <!-- H2 in-memory DB for tests (no Docker/Postgres required) -->
         <dependency>
             <groupId>com.h2database</groupId>

@@ -37,10 +37,11 @@
 - REST каналов/сообщений: `entity/{Channel,ChannelType,Message}` + репозитории, `service/{ChannelService,MessageService}`, `controller/{ChannelController,MessageController}`, DTO. Эндпоинты `GET/POST /api/channels`, `GET/POST /api/channels/{id}/messages`. Запись — REST (вариант A); real-time пуш подключённым клиентам — в шаге WebSocket.
 - WebSocket (STOMP): `config/WebSocketConfig` (endpoint `/ws`, broker `/topic`, prefix `/app`), `security/AuthChannelInterceptor` (Bearer-JWT на STOMP CONNECT). `MessageService.create` пушит новое сообщение в `/topic/channel.{id}` — замыкает вариант A: REST-write → WS-delivery. STOMP-heartbeat включён (`HEARTBEAT_MS = 10_000`, simple-broker + inline `ThreadPoolTaskScheduler`) — сервер закрывает зависшие сессии, и `PresenceTracker` оперативно публикует OFFLINE.
 - Presence: `websocket/PresenceTracker` — in-memory реестр STOMP-сессий на `SessionConnectEvent`/`SessionDisconnectEvent` (идемпотентный по `sessionId` против дублей disconnect; пуш дельт `{username, ONLINE|OFFLINE}` в `/topic/presence` на переходах 0↔1). `controller/PresenceController` (`GET /api/presence` — снимок онлайн), `GET /api/users` — ростер `UserSummary` (без email). Без правок `WebSocketConfig`/`SecurityConfig` (`/topic/presence` уже покрыт simple-broker, эндпоинты авто-защищены).
-- Тесты: `AuthFlowIntegrationTest`, `ChannelMessageFlowIntegrationTest`, `UsersPresenceIntegrationTest` (MockMvc), `AuthChannelInterceptorTest`, `MessageServiceTest` (Mockito, пуш), `PresenceTrackerTest` (Mockito, идемпотентность дубля disconnect), `JwtTokenProviderTest`, `AppTest`. `mvn test` — 24 теста, всё зелёное.
+- MinIO (вложения): `config/{MinioProperties,MinioConfig}` (один `MinioClient` на `publicEndpoint`), `service/{AttachmentUrlSigner,MinioAttachmentService,NoopAttachmentUrlSigner}` (presigned PUT/GET, `newKey`, bucket-create в `@PostConstruct`), `controller/AttachmentController` (`POST /api/attachments` → ключ + presigned PUT). `Message` += `attachmentKey`/`attachmentFileName`; presigned GET перевыписывается в `MessageService.toResponse`. В test-профиле MinIO выключен (`oak.minio.enabled=false`), стоит noop-подписчик.
+- Тесты: `AuthFlowIntegrationTest`, `ChannelMessageFlowIntegrationTest`, `UsersPresenceIntegrationTest`, `AttachmentIntegrationTest` (MockMvc), `AuthChannelInterceptorTest`, `MessageServiceTest` (Mockito, пуш + валидация content-или-attachment), `PresenceTrackerTest`, `JwtTokenProviderTest`, `AppTest`. `mvn test` — 27 тестов, всё зелёное.
 - Периферия (`env/docker-compose.yml`): postgres, minio, janus (`canyan/janus-gateway`), coturn — поднимаются и проверены.
 
-На очереди: интеграции MinIO (presigned-URL) и Janus (SFU-комнаты).
+На очереди: интеграция Janus (SFU-комнаты) — создание/управление голосовыми/видео-комнатами через HTTP REST.
 
 ## Архитектура и потоки связи (роль сервера)
 
@@ -103,7 +104,7 @@ oak.server
 - [x] WebSocket (STOMP): JWT на CONNECT, пуш новых сообщений в `/topic/channel.{id}`.
 - [x] Presence: in-memory реестр подключённых (`PresenceTracker`), пуш дельт в `/topic/presence`, `GET /api/presence` + `GET /api/users`.
 - [x] STOMP heartbeat (обе стороны): server `setHeartbeatValue + TaskScheduler` (`WebSocketConfig`), клиент — согласование STOMP 1.2 + исходящие `\n` + read-watchdog (`StompClient`). Оперативный offline-детект при аварийных обрывах.
-- [ ] Интеграция с MinIO: генерация presigned-URL.
+- [x] Интеграция с MinIO: presigned-URL (`MinioAttachmentService`), `POST /api/attachments`, bucket-create при старте, `Message` + вложения.
 - [ ] Интеграция с Janus: создание/управление SFU-комнатами через HTTP REST.
 
 ## Конвенции разработки
@@ -128,6 +129,8 @@ oak.server
 - WS-рукопожатие и cross-client доставка **не покрываются `MockMvc`-тестами** (это интеграционный уровень). В dev включён DEBUG-лог `org.springframework.web.socket` / `org.springframework.messaging.simp` для видимости.
 - **`SessionDisconnectEvent` может прийти >1 раза за сессию** (Spring так и делает — компоненты должны быть идемпотентны к повторным disconnect). Поэтому в `PresenceTracker` удаление ключится по `sessionId` (`sessionToUsername.remove(session)` возвращает null на дубликате → no-op), а не по голому счётчику username — иначе дубль даёт under-count/уход в минус и ложный `OFFLINE`. Граничные решения (0↔1) сериализованы одним локом — это заодно исключает гонку порядка online/offline при одновременном реконнекте одного юзера. Principal на сессии: `StompHeaderAccessor.wrap(event.getMessage()).getUser().getName()` (его кладёт `AuthChannelInterceptor` в `preSend` ещё до публикации события).
 - **`setHeartbeatValue` требует `TaskScheduler`** — без него Spring падает с `IllegalArgumentException` при старте брокера. В `WebSocketConfig` планировщик создаётся inline (`ThreadPoolTaskScheduler`, daemon, `initialize()`) и передаётся в `enableSimpleBroker(...).setTaskScheduler(...)`. Heartbeat согласуется с клиентом по STOMP 1.2 (клиент шлёт `heart-beat:10000,10000` в CONNECT); при пропадании трафика в пределах интервала сервер закрывает сессию → `SessionDisconnectEvent` → `PresenceTracker` OFFLINE.
+- **Presigned-URL печатаются на `publicEndpoint`**, не на внутреннем `endpoint` — иначе клиент не дойдёт до MinIO. MinIO-SDK: класс `io.minio.GetPresignedObjectUrlArgs`, метод `getPresignedObjectUrl` (возвращает `String`); класса `GetPresignedUrlArgs` **нет** (частая опечатка). В test-профиле MinIO выключен (`oak.minio.enabled=false`), и `NoopAttachmentUrlSigner` (`@ConditionalOnProperty havingValue=false`) подменяет подписчика — иначе контекст без MinIO не поднялся бы.
+- **«Unauthorized: missing or invalid JWT on STOMP CONNECT» — обычно протухший токен, а не баг сервера.** `JwtTokenProvider.isValid` возвращает false для истёкших (8 ч, `oak.security.jwt.access-token-expiration`), и `AuthChannelInterceptor` отбрасывает `CONNECT`. Клиент (`oak-client`) переиспользует токен из `connections.json` и не обновляет; симптом — REST 401 («Cannot load channels») + этот STOMP-fail. Лечится ре-логином. Follow-up на клиенте: re-login на 401 (см. `../oak-client/CLAUDE.md`).
 
 ## Ссылки
 

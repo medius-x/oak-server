@@ -34,15 +34,22 @@ public class MessageService {
     private final ChannelRepository channelRepository;
     private final UserRepository userRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AttachmentUrlSigner attachmentUrlSigner;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
+        String content = request.content();
+        String attachmentKey = request.attachmentKey();
+        if (isBlank(content) && isBlank(attachmentKey)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message must have content or an attachment");
+        }
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
         User author = userRepository.findByUsername(authorUsername)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
-        Message message = messageRepository.save(new Message(channel, author, request.content()));
-        MessageResponse response = MessageResponse.from(message);
+        Message message = messageRepository.save(
+                new Message(channel, author, content, attachmentKey, request.attachmentFileName()));
+        MessageResponse response = toResponse(message);
         // Variant A: written via REST, then broadcast to everyone subscribed to this channel.
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId, response);
         return response;
@@ -54,14 +61,30 @@ public class MessageService {
         if (!channelRepository.existsById(channelId)) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found");
         }
-        // Order DESC + limit to fetch the NEWEST N, then reverse into chronological order.
-        // (ASC + LIMIT would return the oldest N, not the newest.) Page.getContent() is
-        // unmodifiable, so reverse a mutable copy.
         List<Message> messages = new ArrayList<>(messageRepository
                 .findByChannelIdOrderByIdDesc(channelId, PageRequest.of(0, clamp(limit)))
                 .getContent());
         Collections.reverse(messages);
-        return messages.stream().map(MessageResponse::from).toList();
+        return messages.stream().map(this::toResponse).toList();
+    }
+
+    /** Builds the response view, signing a fresh GET URL when the message has an attachment. */
+    private MessageResponse toResponse(Message message) {
+        String attachmentKey = message.getAttachmentKey();
+        String attachmentUrl = isBlank(attachmentKey) ? null : attachmentUrlSigner.presignedGetUrl(attachmentKey);
+        return new MessageResponse(
+                message.getId(),
+                message.getChannel().getId(),
+                message.getAuthor().getId(),
+                message.getAuthor().getUsername(),
+                message.getContent(),
+                message.getCreatedAt(),
+                message.getAttachmentFileName(),
+                attachmentUrl);
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     private static int clamp(Integer limit) {

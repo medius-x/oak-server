@@ -41,11 +41,12 @@ oak:
   # MinIO — S3-compatible object storage for media attachments.
   # oak-server generates presigned URLs; clients upload/download directly.
   minio:
+    enabled: ${MINIO_ENABLED:true}                           # false in tests (noop signer)
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}        # server -> MinIO (internal)
-    public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}  # client -> MinIO
+    public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}  # client -> MinIO (baked into presigned URLs)
     access-key: ${MINIO_ROOT_USER:oak_minio}
     secret-key: ${MINIO_ROOT_PASSWORD:oak_minio_secret}
-    bucket: ${MINIO_BUCKET:oak-attachments}  # must exist; create once (see note below)
+    bucket: ${MINIO_BUCKET:oak-attachments}  # created by oak-server at startup if missing
 
   # Janus — SFU for 3+ participant voice/video rooms & screen sharing.
   # oak-server manages rooms via REST; the JavaFX client connects over WebSocket.
