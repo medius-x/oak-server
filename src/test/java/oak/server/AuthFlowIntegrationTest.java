@@ -12,6 +12,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -117,6 +118,47 @@ class AuthFlowIntegrationTest {
                 .andExpect(status().isUnauthorized());
     }
 
+    @Test
+    void refresh_rotatesToken_issuesNewPair_andRejectsReuse() throws Exception {
+        register("alice", "alice@oak.local", "supersecret");
+        MvcResult loginResult = mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(loginBody("alice", "supersecret")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.refreshToken").isString())
+                .andReturn();
+        String loginBody = loginResult.getResponse().getContentAsString();
+        String accessToken = JsonPath.read(loginBody, "$.token");
+        String refreshToken = JsonPath.read(loginBody, "$.refreshToken");
+
+        // refresh succeeds and issues a NEW access + NEW refresh
+        MvcResult refreshResult = mockMvc.perform(post("/api/auth/refresh").contentType(JSON)
+                        .content(refreshBody(refreshToken)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.token").isString())
+                .andExpect(jsonPath("$.refreshToken").isString())
+                .andReturn();
+        String refreshedBody = refreshResult.getResponse().getContentAsString();
+        String newAccess = JsonPath.read(refreshedBody, "$.token");
+        String newRefresh = JsonPath.read(refreshedBody, "$.refreshToken");
+
+        assertNotEquals(refreshToken, newRefresh, "refresh rotates the refresh token");
+
+        // the new access token is valid against a protected endpoint
+        mockMvc.perform(get("/api/users/me").header("Authorization", "Bearer " + newAccess))
+                .andExpect(status().isOk());
+
+        // the OLD refresh token is now revoked (rotation) -> 401 on reuse
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody(refreshToken)))
+                .andExpect(status().isUnauthorized());
+
+        // a bogus refresh token -> 401
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody("not-a-real-token")))
+                .andExpect(status().isUnauthorized());
+
+        // sanity: the original access token is unaffected by refresh (still structurally valid JWT)
+        assertEquals(3, accessToken.split("\\.").length);
+    }
+
     // --- helpers ---
 
     private void register(String username, String email, String password) throws Exception {
@@ -139,5 +181,9 @@ class AuthFlowIntegrationTest {
 
     private static String loginBody(String username, String password) {
         return String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password);
+    }
+
+    private static String refreshBody(String refreshToken) {
+        return String.format("{\"refreshToken\":\"%s\"}", refreshToken);
     }
 }

@@ -21,5 +21,6 @@ oak:
     jwt:
       secret: test-jwt-secret-test-jwt-secret-test-jwt-secret-test-jwt-secret-0123456789
       access-token-expiration: 1h
+      refresh-token-expiration: 720h
   minio:
     enabled: false   # no MinIO in tests; a noop signer backs the message service

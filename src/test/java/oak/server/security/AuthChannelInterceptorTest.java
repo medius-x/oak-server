@@ -20,7 +20,7 @@ class AuthChannelInterceptorTest {
 
     private static final String SECRET = "test-secret-test-secret-test-secret-test-secret-0123456789";
 
-    private final JwtTokenProvider tokenProvider = new JwtTokenProvider(new JwtProperties(SECRET, Duration.ofHours(1)));
+    private final JwtTokenProvider tokenProvider = new JwtTokenProvider(new JwtProperties(SECRET, Duration.ofHours(1), Duration.ofDays(30)));
     private final AuthChannelInterceptor interceptor = new AuthChannelInterceptor(tokenProvider);
 
     @Test

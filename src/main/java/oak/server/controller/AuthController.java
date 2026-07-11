@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.LoginRequest;
+import oak.server.dto.RefreshRequest;
 import oak.server.dto.RegisterRequest;
 import oak.server.dto.UserResponse;
 import oak.server.service.AuthService;
@@ -33,5 +34,11 @@ public class AuthController {
     @PostMapping("/login")
     public AuthResponse login(@RequestBody @Valid LoginRequest request) {
         return authService.login(request);
+    }
+
+    @PostMapping("/refresh")
+    public AuthResponse refresh(@RequestBody RefreshRequest request) {
+        // Public (under /api/auth/**); the refresh token itself is the credential. Rotates it.
+        return authService.refresh(request.refreshToken());
     }
 }
