@@ -41,7 +41,7 @@
 - Тесты: `AuthFlowIntegrationTest` (вкл. refresh/ротацию/переиспользование), `ChannelMessageFlowIntegrationTest`, `UsersPresenceIntegrationTest`, `AttachmentIntegrationTest` (MockMvc), `AuthChannelInterceptorTest`, `MessageServiceTest` (Mockito, пуш + валидация content-или-attachment), `PresenceTrackerTest`, `JwtTokenProviderTest`, `AppTest`. `mvn test` — 28 тестов, всё зелёное.
 - Периферия (`env/docker-compose.yml`): postgres, minio, janus (`canyan/janus-gateway`), coturn — поднимаются и проверены.
 
-На очереди: интеграция Janus (SFU-комнаты) — создание/управление голосовыми/видео-комнатами через HTTP REST. Auth-hardening follow-up: reuse-detection для refresh-токенов (семья + авто-отзыв при переиспользовании отозванного); периодическая чистка истёкших/отозванных `refresh_tokens`.
+На очереди: WebRTC сигналинг-relay для звонков 1-на-1 (Phase 1; клиент сейчас на Phase 0 — спайк `webrtc-java`). Далее интеграция Janus (SFU-комнаты) — создание/управление голосовыми/видео-комнатами через HTTP REST. Auth-hardening follow-up: reuse-detection для refresh-токенов (семья + авто-отзыв при переиспользовании отозванного); периодическая чистка истёкших/отозванных `refresh_tokens`.
 
 ## Архитектура и потоки связи (роль сервера)
 
@@ -106,6 +106,7 @@ oak.server
 - [x] STOMP heartbeat (обе стороны): server `setHeartbeatValue + TaskScheduler` (`WebSocketConfig`), клиент — согласование STOMP 1.2 + исходящие `\n` + read-watchdog (`StompClient`). Оперативный offline-детект при аварийных обрывах.
 - [x] Интеграция с MinIO: presigned-URL (`MinioAttachmentService`), `POST /api/attachments`, bucket-create при старте, `Message` + вложения.
 - [ ] Интеграция с Janus: создание/управление SFU-комнатами через HTTP REST.
+- [ ] WebRTC сигналинг-relay (1-на-1, Phase 1): `@MessageMapping("/app/call.signal")` → `convertAndSendToUser(to, "/queue/call.signal", …)`; брокер += `/queue` (для `/user/queue/...`); `GET /api/call/config` → ICE/TURN из `oak.turn.*`.
 - [ ] Refresh-token reuse-detection: семья (`familyId`) + авто-отзыв всей семьи при переиспользовании отозванного refresh-токена (сейчас reuse просто даёт 401).
 - [ ] Чистка истёкших/отозванных `refresh_tokens` (планировщик по расписанию — иначе таблица растёт).
 
@@ -133,6 +134,7 @@ oak.server
 - **`setHeartbeatValue` требует `TaskScheduler`** — без него Spring падает с `IllegalArgumentException` при старте брокера. В `WebSocketConfig` планировщик создаётся inline (`ThreadPoolTaskScheduler`, daemon, `initialize()`) и передаётся в `enableSimpleBroker(...).setTaskScheduler(...)`. Heartbeat согласуется с клиентом по STOMP 1.2 (клиент шлёт `heart-beat:10000,10000` в CONNECT); при пропадании трафика в пределах интервала сервер закрывает сессию → `SessionDisconnectEvent` → `PresenceTracker` OFFLINE.
 - **Presigned-URL печатаются на `publicEndpoint`**, не на внутреннем `endpoint` — иначе клиент не дойдёт до MinIO. MinIO-SDK: класс `io.minio.GetPresignedObjectUrlArgs`, метод `getPresignedObjectUrl` (возвращает `String`); класса `GetPresignedUrlArgs` **нет** (частая опечатка). В test-профиле MinIO выключен (`oak.minio.enabled=false`), и `NoopAttachmentUrlSigner` (`@ConditionalOnProperty havingValue=false`) подменяет подписчика — иначе контекст без MinIO не поднялся бы.
 - **Истёкший access-JWT на STOMP `CONNECT` — теперь обрабатывается клиентом.** `JwtTokenProvider.isValid` возвращает false для истёкших (8 ч, `oak.security.jwt.access-token-expiration`), и `AuthChannelInterceptor` отбрасывает `CONNECT`. Клиент (`oak-client`) при REST 401 silent-refresh'ит access через `POST /api/auth/refresh` (refresh-токен, ротация) и поднимает WS уже со свежим токеном — симптом «Cannot load channels»/STOMP auth-fail более не требует ручного ре-логина (см. `../oak-client/CLAUDE.md`). На сервере без изменений: поведение 401 корректно.
+- **`@MessageMapping` сканируется только на `@Controller`-бинах.** `SimpAnnotationMethodMessageHandler.isHandler` проверяет именно `@Controller`; бин с `@Component`/`@Service` метод не найдёт — в логе будет «No matching message handler methods» при SEND на `/app/...`. Ставьте `@Controller` на обработчик сигналинга (`CallSignalingHandler`).
 
 ## Ссылки
 

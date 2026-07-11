@@ -24,3 +24,9 @@ oak:
       refresh-token-expiration: 720h
   minio:
     enabled: false   # no MinIO in tests; a noop signer backs the message service
+  turn:              # Coturn ICE/STUN/TURN config for WebRTC (test values)
+    host: localhost
+    port: 3478
+    user: oak
+    password: test-secret
+    realm: oak.local
