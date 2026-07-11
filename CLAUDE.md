@@ -41,6 +41,8 @@
 - Тесты: `AuthFlowIntegrationTest` (вкл. refresh/ротацию/переиспользование), `ChannelMessageFlowIntegrationTest`, `UsersPresenceIntegrationTest`, `AttachmentIntegrationTest` (MockMvc), `AuthChannelInterceptorTest`, `MessageServiceTest` (Mockito, пуш + валидация content-или-attachment), `PresenceTrackerTest`, `JwtTokenProviderTest`, `AppTest`. `mvn test` — 28 тестов, всё зелёное.
 - Периферия (`env/docker-compose.yml`): postgres, minio, janus (`canyan/janus-gateway`), coturn — поднимаются и проверены.
 
+- **`TURN_EXTERNAL_IP` в `env/.env` должен быть LAN-IP машины** (например `192.168.0.78`), не `127.0.0.1` и не публичный IP. Coturn в Docker рекламирует relay-кандидаты с этим IP; клиент (на хосте) должен до них достучаться. Изначально стоял `127.0.0.1` — не работал для TURN-relay.
+
 На очереди: WebRTC сигналинг-relay для звонков 1-на-1 (Phase 1; клиент сейчас на Phase 0 — спайк `webrtc-java`). Далее интеграция Janus (SFU-комнаты) — создание/управление голосовыми/видео-комнатами через HTTP REST. Auth-hardening follow-up: reuse-detection для refresh-токенов (семья + авто-отзыв при переиспользовании отозванного); периодическая чистка истёкших/отозванных `refresh_tokens`.
 
 ## Архитектура и потоки связи (роль сервера)
@@ -105,7 +107,7 @@ oak.server
 - [x] Presence: in-memory реестр подключённых (`PresenceTracker`), пуш дельт в `/topic/presence`, `GET /api/presence` + `GET /api/users`.
 - [x] STOMP heartbeat (обе стороны): server `setHeartbeatValue + TaskScheduler` (`WebSocketConfig`), клиент — согласование STOMP 1.2 + исходящие `\n` + read-watchdog (`StompClient`). Оперативный offline-детект при аварийных обрывах.
 - [x] Интеграция с MinIO: presigned-URL (`MinioAttachmentService`), `POST /api/attachments`, bucket-create при старте, `Message` + вложения.
-- [ ] Интеграция с Janus: создание/управление SFU-комнатами через HTTP REST.
+- [ ] Интеграция с Janus: `GET /api/channels/{id}/room` → `{janusWsUrl, roomId}` (JanusProperties; клиент говорит с Janus напрямую по WS — сервер не управляет сессиями).
 - [ ] WebRTC сигналинг-relay (1-на-1, Phase 1): `@MessageMapping("/app/call.signal")` → `convertAndSendToUser(to, "/queue/call.signal", …)`; брокер += `/queue` (для `/user/queue/...`); `GET /api/call/config` → ICE/TURN из `oak.turn.*`.
 - [ ] Refresh-token reuse-detection: семья (`familyId`) + авто-отзыв всей семьи при переиспользовании отозванного refresh-токена (сейчас reuse просто даёт 401).
 - [ ] Чистка истёкших/отозванных `refresh_tokens` (планировщик по расписанию — иначе таблица растёт).
