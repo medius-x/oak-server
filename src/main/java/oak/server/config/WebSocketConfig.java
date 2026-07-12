@@ -28,7 +28,7 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
  */
 @Configuration
 @EnableWebSocketMessageBroker
-@EnableConfigurationProperties(TurnProperties.class)
+@EnableConfigurationProperties({TurnProperties.class, JanusProperties.class})
 @RequiredArgsConstructor
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
