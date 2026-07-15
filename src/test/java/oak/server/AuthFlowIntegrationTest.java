@@ -1,6 +1,11 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import oak.server.entity.RefreshToken;
+import oak.server.entity.User;
+import oak.server.repository.RefreshTokenRepository;
+import oak.server.repository.UserRepository;
+import oak.server.service.RefreshTokenCleanup;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -11,8 +16,16 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.HexFormat;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -35,6 +48,15 @@ class AuthFlowIntegrationTest {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private RefreshTokenRepository refreshTokenRepository;
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private RefreshTokenCleanup refreshTokenCleanup;
 
     @Test
     void register_returnsCreatedUserWithoutPasswordHash() throws Exception {
@@ -159,6 +181,59 @@ class AuthFlowIntegrationTest {
         assertEquals(3, accessToken.split("\\.").length);
     }
 
+    @Test
+    void refresh_reuse_revokesEntireFamily() throws Exception {
+        register("alice", "alice@oak.local", "supersecret");
+        String firstRefresh = loginRefresh("alice", "supersecret");  // T1
+        String secondRefresh = refreshAndGet(firstRefresh);          // T2 (T1 revoked)
+        String thirdRefresh = refreshAndGet(secondRefresh);          // T3 (T2 revoked; the live one)
+
+        // Reusing the already-rotated T1 is a theft signal -> 401 ...
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody(firstRefresh)))
+                .andExpect(status().isUnauthorized());
+
+        // ... and it kills the WHOLE family, so the still-live T3 no longer works either.
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody(thirdRefresh)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void refresh_expired_doesNotRevokeFamily() throws Exception {
+        register("alice", "alice@oak.local", "supersecret");
+        User alice = userRepository.findByUsername("alice").orElseThrow();
+        String family = "family-expiry-test";
+        // A live sibling and an expired sibling in the SAME family.
+        persistToken(alice, "live-secret", family, Instant.now().plus(Duration.ofHours(1)));
+        persistToken(alice, "expired-secret", family, Instant.now().minus(Duration.ofHours(1)));
+
+        // Refreshing the expired one -> 401, but expiry is NOT theft...
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody("expired-secret")))
+                .andExpect(status().isUnauthorized());
+
+        // ... so the live sibling in the same family still refreshes fine.
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody("live-secret")))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void cleanup_purgesExpiredTokens_keepsLive() throws Exception {
+        register("alice", "alice@oak.local", "supersecret");
+        User alice = userRepository.findByUsername("alice").orElseThrow();
+        String family = "family-cleanup";
+        persistToken(alice, "expired", family, Instant.now().minus(Duration.ofHours(1)));
+        persistToken(alice, "live", family, Instant.now().plus(Duration.ofHours(1)));
+
+        long before = refreshTokenRepository.count();
+        long deleted = refreshTokenCleanup.purgeExpired();
+        long after = refreshTokenRepository.count();
+
+        assertEquals(2L, before, "two tokens seeded");
+        assertEquals(1L, deleted, "only the expired token is purged");
+        assertEquals(1L, after, "the live token remains");
+        assertTrue(refreshTokenRepository.findByTokenHash(sha256hex("live")).isPresent(),
+                "the live token survives the purge");
+    }
+
     // --- helpers ---
 
     private void register(String username, String email, String password) throws Exception {
@@ -173,6 +248,40 @@ class AuthFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andReturn();
         return JsonPath.read(result.getResponse().getContentAsString(), "$.token");
+    }
+
+    /** Login and return the refresh token (not the access JWT). */
+    private String loginRefresh(String username, String password) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(loginBody(username, password)))
+                .andExpect(status().isOk())
+                .andReturn();
+        return JsonPath.read(result.getResponse().getContentAsString(), "$.refreshToken");
+    }
+
+    /** Refresh successfully and return the newly issued refresh token. */
+    private String refreshAndGet(String refreshToken) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/auth/refresh").contentType(JSON)
+                        .content(refreshBody(refreshToken)))
+                .andExpect(status().isOk())
+                .andReturn();
+        return JsonPath.read(result.getResponse().getContentAsString(), "$.refreshToken");
+    }
+
+    /** Inserts a refresh token row with a known raw secret, family and expiry (hashed like the server does). */
+    private void persistToken(User user, String rawSecret, String family, Instant expiresAt) {
+        refreshTokenRepository.save(new RefreshToken(user, sha256hex(rawSecret), expiresAt, family));
+    }
+
+    /** SHA-256 hex of the raw token — mirrors AuthService.hashToken so lookups match. */
+    private static String sha256hex(String rawToken) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(rawToken.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException("SHA-256 not available", unavailable);
+        }
     }
 
     private static String regBody(String username, String email, String password) {

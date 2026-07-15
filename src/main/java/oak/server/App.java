@@ -7,6 +7,7 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.List;
 
@@ -17,9 +18,13 @@ import java.util.List;
  * connection through JPA by counting rows in the {@code users} table. A
  * successful boot therefore proves the datasource + Hibernate wiring
  * end-to-end (schema creation via ddl-auto=update + a real read query).
+ *
+ * <p>{@link EnableScheduling} enables the periodic refresh-token cleanup
+ * (see {@link oak.server.service.RefreshTokenCleanup}).
  */
 @Slf4j
 @SpringBootApplication
+@EnableScheduling
 public class App {
 
     public static void main(String[] args) {

@@ -38,6 +38,8 @@ oak:
       secret: ${JWT_SECRET:dev-only-jwt-secret-change-me-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
       access-token-expiration: ${JWT_ACCESS_TOKEN_EXPIRATION:8h}  # parsed as Duration
       refresh-token-expiration: ${JWT_REFRESH_TOKEN_EXPIRATION:720h}  # 30 days
+    # How often expired refresh tokens are purged (parsed as Duration).
+    refresh-cleanup-interval: ${OAK_REFRESH_CLEANUP_INTERVAL:PT6H}
 
   # MinIO — S3-compatible object storage for media attachments.
   # oak-server generates presigned URLs; clients upload/download directly.

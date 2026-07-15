@@ -22,6 +22,13 @@ import java.time.Instant;
  * token). Revocable and rotated on each use: a login or refresh issues a new one, and a refresh
  * revokes the presented one — so a leaked refresh is usable at most once. The raw token is handed
  * to the client exactly once.
+ *
+ * <p>Tokens are grouped into a <b>family</b> ({@code familyId}): a login starts a new family and
+ * every refresh of it continues the same family. Re-presenting an <i>already revoked</i> token is
+ * a theft signal — the whole family is then revoked so the attacker's stolen copy and every
+ * downstream token die together (reuse-detection). {@code familyId} is mapped nullable only so
+ * {@code ddl-auto=update} can add the column to a dev DB with leftover rows; the code always sets
+ * it for new tokens, and a null family (legacy row) simply skips family-wide revocation.
  */
 @Entity
 @Table(name = "refresh_tokens")
@@ -47,14 +54,19 @@ public class RefreshToken {
     @Column(nullable = false)
     private boolean revoked;
 
+    /** Groups a login's refresh lineage so reuse of a revoked token revokes the whole chain. */
+    @Column(name = "family_id", length = 36)
+    private String familyId;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
-    public RefreshToken(User user, String tokenHash, Instant expiresAt) {
+    public RefreshToken(User user, String tokenHash, Instant expiresAt, String familyId) {
         this.user = user;
         this.tokenHash = tokenHash;
         this.expiresAt = expiresAt;
         this.revoked = false;
+        this.familyId = familyId;
     }
 }
