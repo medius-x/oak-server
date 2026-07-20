@@ -52,19 +52,15 @@ public class AuthService {
         if (userRepository.existsByUsername(request.username())) {
             throw conflict("Username already taken: " + request.username());
         }
-        if (userRepository.existsByEmail(request.email())) {
-            throw conflict("Email already registered: " + request.email());
-        }
         User user = new User(
                 request.username(),
-                request.email(),
                 passwordEncoder.encode(request.password()));
         try {
             user = userRepository.save(user);
         } catch (DataIntegrityViolationException e) {
-            // Guards against the rare race between the exists-checks and the INSERT
-            // (the unique constraints are the real authority).
-            throw conflict("Username or email already exists");
+            // Guards against the rare race between the exists-check and the INSERT
+            // (the unique constraint is the real authority).
+            throw conflict("Username already exists");
         }
         return UserResponse.from(user);
     }

@@ -38,7 +38,7 @@ class RoomControllerIntegrationTest {
 
     @Test
     void roomReturnsJanusUrlAndRoomId() throws Exception {
-        String token = registerAndLogin("alice", "alice@oak.local", "supersecret");
+        String token = registerAndLogin("alice", "supersecret");
         Long channelId = createVoiceChannel(token);
 
         mockMvc.perform(get("/api/channels/" + channelId + "/room").header("Authorization", "Bearer " + token))
@@ -49,15 +49,15 @@ class RoomControllerIntegrationTest {
 
     @Test
     void roomNotFoundForMissingChannel() throws Exception {
-        String token = registerAndLogin("bob", "bob@oak.local", "supersecret");
+        String token = registerAndLogin("bob", "supersecret");
 
         mockMvc.perform(get("/api/channels/999999/room").header("Authorization", "Bearer " + token))
                 .andExpect(status().isNotFound());
     }
 
-    private String registerAndLogin(String username, String email, String password) throws Exception {
+    private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"email\":\"%s\",\"password\":\"%s\"}", username, email, password)))
+                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))

@@ -36,9 +36,6 @@ public class User {
     @Column(nullable = false, unique = true)
     private String username;
 
-    @Column(nullable = false, unique = true)
-    private String email;
-
     @Column(name = "password_hash", nullable = false)
     private String passwordHash;
 
@@ -50,9 +47,8 @@ public class User {
     @Column(name = "updated_at")
     private Instant updatedAt;
 
-    public User(String username, String email, String passwordHash) {
+    public User(String username, String passwordHash) {
         this.username = username;
-        this.email = email;
         this.passwordHash = passwordHash;
     }
 }

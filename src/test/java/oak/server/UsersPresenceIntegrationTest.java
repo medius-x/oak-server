@@ -37,16 +37,15 @@ class UsersPresenceIntegrationTest {
     private MockMvc mockMvc;
 
     @Test
-    void listUsersReturnsRosterWithoutEmails() throws Exception {
-        registerAndLogin("alice", "alice@oak.local", "supersecret");
-        registerAndLogin("bob", "bob@oak.local", "supersecret");
-        String token = registerAndLogin("carol", "carol@oak.local", "supersecret");
+    void listUsersReturnsRoster() throws Exception {
+        registerAndLogin("alice", "supersecret");
+        registerAndLogin("bob", "supersecret");
+        String token = registerAndLogin("carol", "supersecret");
 
         mockMvc.perform(get("/api/users").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$").isArray())
-                .andExpect(jsonPath("$[*].username", Matchers.hasItems("alice", "bob", "carol")))
-                .andExpect(jsonPath("$[0].email").doesNotExist()); // UserSummary leaks no email
+                .andExpect(jsonPath("$[*].username", Matchers.hasItems("alice", "bob", "carol")));
 
         // listing without a token -> 401
         mockMvc.perform(get("/api/users")).andExpect(status().isUnauthorized());
@@ -54,16 +53,16 @@ class UsersPresenceIntegrationTest {
 
     @Test
     void presenceSnapshotIsEmptyWithoutWsSessions() throws Exception {
-        String token = registerAndLogin("alice", "alice@oak.local", "supersecret");
+        String token = registerAndLogin("alice", "supersecret");
 
         mockMvc.perform(get("/api/presence").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(0));
     }
 
-    private String registerAndLogin(String username, String email, String password) throws Exception {
+    private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"email\":\"%s\",\"password\":\"%s\"}", username, email, password)))
+                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))

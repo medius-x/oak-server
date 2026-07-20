@@ -61,35 +61,35 @@ class AuthFlowIntegrationTest {
     @Test
     void register_returnsCreatedUserWithoutPasswordHash() throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(regBody("alice", "alice@oak.local", "supersecret")))
+                        .content(regBody("alice", "supersecret")))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.username").value("alice"))
-                .andExpect(jsonPath("$.email").value("alice@oak.local"))
                 .andExpect(jsonPath("$.id").isNumber())
                 .andExpect(jsonPath("$.passwordHash").doesNotExist());
     }
 
     @Test
     void register_duplicateUsername_returns409() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
 
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(regBody("alice", "alice2@oak.local", "supersecret")))
+                        .content(regBody("alice", "supersecret")))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.status").value(409));
     }
 
     @Test
     void register_invalidBody_returns400() throws Exception {
+        // username too short (@Size min 3) and password too short (@Size min 8) -> bean validation 400
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(regBody("ab", "not-an-email", "123")))
+                        .content(regBody("ab", "123")))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.status").value(400));
     }
 
     @Test
     void login_validCredentials_returnsBearerToken() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
 
         MvcResult result = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(loginBody("alice", "supersecret")))
@@ -105,7 +105,7 @@ class AuthFlowIntegrationTest {
 
     @Test
     void login_wrongPassword_returns401() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
 
         mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(loginBody("alice", "wrong-password")))
@@ -121,19 +121,18 @@ class AuthFlowIntegrationTest {
 
     @Test
     void me_withValidToken_returnsProfile() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
         String token = login("alice", "supersecret");
 
         mockMvc.perform(get("/api/users/me").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.username").value("alice"))
-                .andExpect(jsonPath("$.email").value("alice@oak.local"))
                 .andExpect(jsonPath("$.passwordHash").doesNotExist());
     }
 
     @Test
     void me_withTamperedToken_returns401() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
         String token = login("alice", "supersecret");
 
         mockMvc.perform(get("/api/users/me").header("Authorization", "Bearer " + token + "XYZ"))
@@ -142,7 +141,7 @@ class AuthFlowIntegrationTest {
 
     @Test
     void refresh_rotatesToken_issuesNewPair_andRejectsReuse() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
         MvcResult loginResult = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(loginBody("alice", "supersecret")))
                 .andExpect(status().isOk())
@@ -183,7 +182,7 @@ class AuthFlowIntegrationTest {
 
     @Test
     void refresh_reuse_revokesEntireFamily() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
         String firstRefresh = loginRefresh("alice", "supersecret");  // T1
         String secondRefresh = refreshAndGet(firstRefresh);          // T2 (T1 revoked)
         String thirdRefresh = refreshAndGet(secondRefresh);          // T3 (T2 revoked; the live one)
@@ -199,7 +198,7 @@ class AuthFlowIntegrationTest {
 
     @Test
     void refresh_expired_doesNotRevokeFamily() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
         User alice = userRepository.findByUsername("alice").orElseThrow();
         String family = "family-expiry-test";
         // A live sibling and an expired sibling in the SAME family.
@@ -217,7 +216,7 @@ class AuthFlowIntegrationTest {
 
     @Test
     void cleanup_purgesExpiredTokens_keepsLive() throws Exception {
-        register("alice", "alice@oak.local", "supersecret");
+        register("alice", "supersecret");
         User alice = userRepository.findByUsername("alice").orElseThrow();
         String family = "family-cleanup";
         persistToken(alice, "expired", family, Instant.now().minus(Duration.ofHours(1)));
@@ -236,9 +235,9 @@ class AuthFlowIntegrationTest {
 
     // --- helpers ---
 
-    private void register(String username, String email, String password) throws Exception {
+    private void register(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(regBody(username, email, password)))
+                        .content(regBody(username, password)))
                 .andExpect(status().isCreated());
     }
 
@@ -284,8 +283,8 @@ class AuthFlowIntegrationTest {
         }
     }
 
-    private static String regBody(String username, String email, String password) {
-        return String.format("{\"username\":\"%s\",\"email\":\"%s\",\"password\":\"%s\"}", username, email, password);
+    private static String regBody(String username, String password) {
+        return String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password);
     }
 
     private static String loginBody(String username, String password) {

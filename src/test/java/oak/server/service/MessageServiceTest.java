@@ -54,7 +54,7 @@ class MessageServiceTest {
         Long channelId = 7L;
         Channel channel = new Channel("general", ChannelType.TEXT);
         channel.setId(channelId);
-        User author = new User("alice", "alice@oak.local", "hash");
+        User author = new User("alice", "hash");
         Message saved = new Message(channel, author, "hello");
         saved.setId(100L);
 
@@ -84,7 +84,7 @@ class MessageServiceTest {
         Long channelId = 7L;
         Channel channel = new Channel("general", ChannelType.TEXT);
         channel.setId(channelId);
-        User author = new User("alice", "alice@oak.local", "hash");
+        User author = new User("alice", "hash");
         Message saved = new Message(channel, author, null, "attachments/abc/pic.png", "pic.png");
         saved.setId(101L);
 

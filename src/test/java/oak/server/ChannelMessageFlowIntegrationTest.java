@@ -33,7 +33,7 @@ class ChannelMessageFlowIntegrationTest {
 
     @Test
     void createChannel_postMessage_listMessages_thenGuards() throws Exception {
-        String token = registerAndLogin("alice", "alice@oak.local", "supersecret");
+        String token = registerAndLogin("alice", "supersecret");
         Long channelId = createChannel(token, "general", "TEXT");
 
         // channel appears in the list
@@ -87,9 +87,9 @@ class ChannelMessageFlowIntegrationTest {
 
     // --- helpers ---
 
-    private String registerAndLogin(String username, String email, String password) throws Exception {
+    private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"email\":\"%s\",\"password\":\"%s\"}", username, email, password)))
+                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))

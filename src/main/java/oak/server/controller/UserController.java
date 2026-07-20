@@ -26,9 +26,8 @@ public class UserController {
     private final UserRepository userRepository;
 
     /**
-     * All users of this instance as a compact roster. Returns {@link UserSummary} (no
-     * email) — the public members list must not expose emails; the full profile stays
-     * on {@code /api/users/me}.
+     * All users of this instance as a compact roster. Returns {@link UserSummary};
+     * the full profile stays on {@code /api/users/me}.
      */
     @GetMapping
     public List<UserSummary> list() {

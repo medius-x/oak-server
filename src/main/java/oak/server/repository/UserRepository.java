@@ -18,8 +18,6 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     boolean existsByUsername(String username);
 
-    boolean existsByEmail(String email);
-
     /** All users in username order — backs the public roster ({@code GET /api/users}). */
     List<User> findAllByOrderByUsernameAsc();
 }
