@@ -4,7 +4,8 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.AttachmentUploadRequest;
 import oak.server.dto.AttachmentUploadResponse;
-import oak.server.dto.AvatarKeyRequest;
+import oak.server.dto.AvatarKeysRequest;
+import oak.server.dto.AvatarOriginalResponse;
 import oak.server.dto.UserResponse;
 import oak.server.dto.UserSummary;
 import oak.server.entity.User;
@@ -28,7 +29,7 @@ import java.util.Locale;
 
 /**
  * User lookups — the roster (list) and the current-user profile — plus avatar management (a
- * two-phase upload: mint a MinIO slot, then confirm the key after the PUT). All endpoints require
+ * two-phase upload: mint MinIO slots, then confirm the keys after the PUTs). All endpoints require
  * a valid JWT (only {@code /api/auth/**} is public).
  */
 @RestController
@@ -62,11 +63,10 @@ public class UserController {
     }
 
     /**
-     * Mints a MinIO upload slot for a new avatar: object key + short-lived presigned PUT URL. The
-     * client uploads the bytes directly to MinIO, then calls {@code /me/avatar/confirm} with the key
-     * to bind it to the account. Only image extensions are accepted — the server never sees the
-     * bytes, so this name check is the only server-side type gate (the client also filters by
-     * extension in its file picker).
+     * Mints a MinIO upload slot for a new avatar (the cropped 256px image). The client uploads the
+     * bytes directly to MinIO, then confirms both keys via {@code /me/avatar/confirm}. Only image
+     * extensions are accepted — the server never sees the bytes, so this name check is the only
+     * server-side type gate (the client also filters by extension in its picker).
      */
     @PostMapping("/me/avatar")
     public AttachmentUploadResponse requestAvatarUpload(@AuthenticationPrincipal UserDetails principal,
@@ -76,37 +76,70 @@ public class UserController {
         return new AttachmentUploadResponse(key, attachmentUrlSigner.presignedPutUrl(key));
     }
 
+    /** Mints a MinIO upload slot for the original (pre-crop) avatar image (kept for re-cropping). */
+    @PostMapping("/me/avatar/original")
+    public AttachmentUploadResponse requestOriginalUpload(@AuthenticationPrincipal UserDetails principal,
+                                                          @RequestBody @Valid AttachmentUploadRequest request) {
+        requireImageExtension(request.fileName());
+        String key = attachmentUrlSigner.newOriginalKey(request.fileName());
+        return new AttachmentUploadResponse(key, attachmentUrlSigner.presignedPutUrl(key));
+    }
+
     /**
-     * Binds a freshly-uploaded avatar object to the current user. Called by the client after the
-     * MinIO PUT succeeds, so a failed upload never leaves a dangling key on the account.
+     * Binds freshly-uploaded avatar objects to the current user, called by the client after the MinIO
+     * PUTs succeed (so a failed upload never leaves dangling keys). {@code originalKey} is optional —
+     * null on a re-crop keeps the existing original.
      */
     @PostMapping("/me/avatar/confirm")
     @Transactional
     public UserResponse confirmAvatar(@AuthenticationPrincipal UserDetails principal,
-                                      @RequestBody @Valid AvatarKeyRequest request) {
+                                      @RequestBody @Valid AvatarKeysRequest request) {
         User user = requireUser(principal);
-        String previousKey = user.getAvatarKey();
-        user.setAvatarKey(request.key());
+        String previousAvatarKey = user.getAvatarKey();
+        user.setAvatarKey(request.avatarKey());
+        String previousOriginalKey = null;
+        if (request.originalKey() != null) {
+            previousOriginalKey = user.getAvatarOriginalKey();
+            user.setAvatarOriginalKey(request.originalKey());
+        }
         userRepository.save(user);
-        deleteIfReplaced(previousKey, request.key());
+        deleteIfReplaced(previousAvatarKey, request.avatarKey());
+        deleteIfReplaced(previousOriginalKey, request.originalKey());
         publishUserUpdate(user);
         return UserResponse.from(user, attachmentUrlSigner);
     }
 
-    /** Clears the current user's avatar and deletes the old MinIO object. */
+    /** Clears the current user's avatar (both keys) and deletes the old MinIO objects. */
     @DeleteMapping("/me/avatar")
     @Transactional
     public UserResponse removeAvatar(@AuthenticationPrincipal UserDetails principal) {
         User user = requireUser(principal);
-        String previousKey = user.getAvatarKey();
+        String previousAvatarKey = user.getAvatarKey();
+        String previousOriginalKey = user.getAvatarOriginalKey();
         user.setAvatarKey(null);
+        user.setAvatarOriginalKey(null);
         userRepository.save(user);
-        deleteIfReplaced(previousKey, null);
+        deleteIfReplaced(previousAvatarKey, null);
+        deleteIfReplaced(previousOriginalKey, null);
         publishUserUpdate(user);
         return UserResponse.from(user, attachmentUrlSigner);
     }
 
-    /** Deletes the previous avatar object from MinIO when the key actually changed (replace/remove). */
+    /**
+     * Lazy: the pre-crop original for the re-crop editor. Returns a freshly-signed presigned GET URL,
+     * or 404 when the user has no original (e.g. avatar set before this feature existed).
+     */
+    @GetMapping("/me/avatar/original")
+    public AvatarOriginalResponse originalAvatarUrl(@AuthenticationPrincipal UserDetails principal) {
+        User user = requireUser(principal);
+        String originalKey = user.getAvatarOriginalKey();
+        if (originalKey == null || originalKey.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No avatar original");
+        }
+        return new AvatarOriginalResponse(attachmentUrlSigner.presignedGetUrl(originalKey));
+    }
+
+    /** Deletes the previous object from MinIO when the key actually changed (replace/remove). */
     private void deleteIfReplaced(String previousKey, String newKey) {
         if (previousKey != null && !previousKey.equals(newKey)) {
             attachmentUrlSigner.delete(previousKey);

@@ -58,6 +58,11 @@ public class MinioAttachmentService implements AttachmentUrlSigner {
         return key("avatars", fileName);
     }
 
+    @Override
+    public String newOriginalKey(String fileName) {
+        return key("avatars/originals", fileName);
+    }
+
     private static String key(String prefix, String fileName) {
         return prefix + "/" + UUID.randomUUID() + "/" + safeName(fileName);
     }

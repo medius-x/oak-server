@@ -51,6 +51,11 @@ public class User {
     @Column(name = "avatar_key", length = 512)
     private String avatarKey;
 
+    /** MinIO object key of the original (pre-crop) image used for the avatar — lets the user re-crop
+     *  without re-selecting a file. Loaded lazily via {@code GET /api/users/me/avatar/original}. */
+    @Column(name = "avatar_original_key", length = 512)
+    private String avatarOriginalKey;
+
     public User(String username, String passwordHash) {
         this.username = username;
         this.passwordHash = passwordHash;
