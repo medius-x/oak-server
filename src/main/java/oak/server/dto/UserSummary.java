@@ -4,25 +4,25 @@ import oak.server.entity.User;
 import oak.server.service.AttachmentUrlSigner;
 
 /**
- * Compact public view of a user for roster-style listings (e.g. the members panel). The full
- * {@link UserResponse} stays for a user's own profile ({@code /api/users/me}). {@code avatarUrl} is
- * a freshly-signed presigned GET URL when the user has an avatar; see {@link UserResponse}.
+ * Compact public view of a user for roster-style listings (e.g. the members panel) and for live
+ * {@code /topic/users} updates. Mirrors {@link UserResponse}: {@code avatarKey} is the stable MinIO
+ * object key (client disk-cache key); {@code avatarUrl} is a freshly-signed presigned GET URL.
  */
-public record UserSummary(Long id, String username, String avatarUrl) {
+public record UserSummary(Long id, String username, String avatarKey, String avatarUrl) {
 
     public static UserSummary from(User user) {
-        return new UserSummary(user.getId(), user.getUsername(), null);
+        return new UserSummary(user.getId(), user.getUsername(), user.getAvatarKey(), null);
     }
 
     public static UserSummary from(User user, AttachmentUrlSigner signer) {
-        return new UserSummary(user.getId(), user.getUsername(), avatarUrl(user, signer));
+        return new UserSummary(user.getId(), user.getUsername(),
+                user.getAvatarKey(), avatarUrl(user.getAvatarKey(), signer));
     }
 
-    private static String avatarUrl(User user, AttachmentUrlSigner signer) {
-        if (signer == null) {
+    private static String avatarUrl(String avatarKey, AttachmentUrlSigner signer) {
+        if (signer == null || avatarKey == null || avatarKey.isBlank()) {
             return null;
         }
-        String key = user.getAvatarKey();
-        return (key == null || key.isBlank()) ? null : signer.presignedGetUrl(key);
+        return signer.presignedGetUrl(avatarKey);
     }
 }

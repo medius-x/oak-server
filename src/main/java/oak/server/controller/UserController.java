@@ -11,6 +11,7 @@ import oak.server.entity.User;
 import oak.server.repository.UserRepository;
 import oak.server.service.AttachmentUrlSigner;
 import org.springframework.http.HttpStatus;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.transaction.annotation.Transactional;
@@ -37,6 +38,10 @@ public class UserController {
 
     private final UserRepository userRepository;
     private final AttachmentUrlSigner attachmentUrlSigner;
+    private final SimpMessagingTemplate messagingTemplate;
+
+    /** STOMP topic a live user update (e.g. an avatar change) is pushed to: {@code /topic/users}. */
+    public static final String USERS_TOPIC = "/topic/users";
 
     /**
      * All users of this instance as a compact roster. Returns {@link UserSummary} with each user's
@@ -80,19 +85,37 @@ public class UserController {
     public UserResponse confirmAvatar(@AuthenticationPrincipal UserDetails principal,
                                       @RequestBody @Valid AvatarKeyRequest request) {
         User user = requireUser(principal);
+        String previousKey = user.getAvatarKey();
         user.setAvatarKey(request.key());
         userRepository.save(user);
+        deleteIfReplaced(previousKey, request.key());
+        publishUserUpdate(user);
         return UserResponse.from(user, attachmentUrlSigner);
     }
 
-    /** Clears the current user's avatar (the MinIO object itself is left as an orphan). */
+    /** Clears the current user's avatar and deletes the old MinIO object. */
     @DeleteMapping("/me/avatar")
     @Transactional
     public UserResponse removeAvatar(@AuthenticationPrincipal UserDetails principal) {
         User user = requireUser(principal);
+        String previousKey = user.getAvatarKey();
         user.setAvatarKey(null);
         userRepository.save(user);
+        deleteIfReplaced(previousKey, null);
+        publishUserUpdate(user);
         return UserResponse.from(user, attachmentUrlSigner);
+    }
+
+    /** Deletes the previous avatar object from MinIO when the key actually changed (replace/remove). */
+    private void deleteIfReplaced(String previousKey, String newKey) {
+        if (previousKey != null && !previousKey.equals(newKey)) {
+            attachmentUrlSigner.delete(previousKey);
+        }
+    }
+
+    /** Broadcasts a compact user view so connected clients repaint the avatar/roster live. */
+    private void publishUserUpdate(User user) {
+        messagingTemplate.convertAndSend(USERS_TOPIC, UserSummary.from(user, attachmentUrlSigner));
     }
 
     private User requireUser(UserDetails principal) {

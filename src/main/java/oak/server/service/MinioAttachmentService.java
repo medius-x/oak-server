@@ -4,6 +4,7 @@ import io.minio.BucketExistsArgs;
 import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
+import io.minio.RemoveObjectArgs;
 import io.minio.http.Method;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -69,6 +70,19 @@ public class MinioAttachmentService implements AttachmentUrlSigner {
     @Override
     public String presignedGetUrl(String key) {
         return sign(Method.GET, key, GET_EXPIRY);
+    }
+
+    @Override
+    public void delete(String key) {
+        try {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(properties.bucket())
+                    .object(key)
+                    .build());
+        } catch (Exception minioError) {
+            // Best-effort: a leftover orphan object is harmless, but log it so it's visible.
+            log.warn("[MinIO] Could not delete object '{}': {}", key, minioError.getMessage());
+        }
     }
 
     private String sign(Method method, String key, Duration expiry) {

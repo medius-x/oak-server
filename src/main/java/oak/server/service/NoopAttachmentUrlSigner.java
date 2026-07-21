@@ -38,4 +38,9 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner {
     public String presignedGetUrl(String key) {
         return null;
     }
+
+    @Override
+    public void delete(String key) {
+        // No-op: nothing is actually stored under the noop signer.
+    }
 }

@@ -18,4 +18,10 @@ public interface AttachmentUrlSigner {
 
     /** Presigned GET URL for downloading {@code key}; re-signed on each call so it never ages out. */
     String presignedGetUrl(String key);
+
+    /**
+     * Deletes the object at {@code key} (best-effort — a leftover orphan is harmless). Used to clean
+     * up a previous avatar object when a user replaces or removes their avatar.
+     */
+    void delete(String key);
 }
