@@ -47,6 +47,10 @@ public class User {
     @Column(name = "updated_at")
     private Instant updatedAt;
 
+    /** MinIO object key of the user's avatar, or null when none is set (presigned GET is signed per request). */
+    @Column(name = "avatar_key", length = 512)
+    private String avatarKey;
+
     public User(String username, String passwordHash) {
         this.username = username;
         this.passwordHash = passwordHash;
