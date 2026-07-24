@@ -45,6 +45,8 @@ class MessageServiceTest {
     private SimpMessagingTemplate messagingTemplate;
     @Mock
     private AttachmentUrlSigner attachmentUrlSigner;
+    @Mock
+    private AuthorizationService auth;
 
     @InjectMocks
     private MessageService messageService;

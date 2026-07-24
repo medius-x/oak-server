@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Server logging. Reuses Spring Boot's default console appender (colored, same pattern/levels as
+  before — the `logging.level.*` overrides in application-dev.yml are still applied by Spring Boot on
+  top of this config) and adds a single FILE appender for reading startup failures / stack traces
+  that are too large for the terminal.
+
+  The server is the only instance (no PID suffix, no per-run disambiguation), so the file is a fixed
+  path with append=false: every fresh start OVERWRITES the previous file — the newest run's log is all
+  we ever read. Scoped out of the `test` profile so `mvn test` does not clobber the real run's log.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
+
+    <springProfile name="!test">
+        <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+            <file>${user.home}/.oak-server/oak-server.log</file>
+            <append>false</append>
+            <encoder>
+                <pattern>${FILE_LOG_PATTERN}</pattern>
+            </encoder>
+        </appender>
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+            <appender-ref ref="FILE"/>
+        </root>
+    </springProfile>
+
+    <springProfile name="test">
+        <root level="INFO">
+            <appender-ref ref="CONSOLE"/>
+        </root>
+    </springProfile>
+</configuration>

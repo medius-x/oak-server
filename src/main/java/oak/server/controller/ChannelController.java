@@ -6,6 +6,8 @@ import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.service.ChannelService;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -17,6 +19,7 @@ import java.util.List;
 
 /**
  * Channel CRUD. All endpoints require a valid JWT (only {@code /api/auth/**} is public).
+ * Creating a channel requires {@code MANAGE_CHANNELS} (enforced in {@link ChannelService}).
  */
 @RestController
 @RequestMapping("/api/channels")
@@ -32,7 +35,8 @@ public class ChannelController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public ChannelResponse create(@RequestBody @Valid CreateChannelRequest request) {
-        return channelService.create(request);
+    public ChannelResponse create(@RequestBody @Valid CreateChannelRequest request,
+                                  @AuthenticationPrincipal UserDetails principal) {
+        return channelService.create(request, principal.getUsername());
     }
 }

@@ -5,6 +5,7 @@ import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.MessageResponse;
 import oak.server.entity.Channel;
 import oak.server.entity.Message;
+import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.MessageRepository;
@@ -35,6 +36,7 @@ public class MessageService {
     private final UserRepository userRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AttachmentUrlSigner attachmentUrlSigner;
+    private final AuthorizationService auth;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
@@ -47,6 +49,8 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
         User author = userRepository.findByUsername(authorUsername)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
+        // Channel-scoped SEND_MESSAGES (respects overrides; OWNER/ADMINISTRATOR bypass).
+        auth.requireInChannel(author, channel, Permission.SEND_MESSAGES);
         Message message = messageRepository.save(
                 new Message(channel, author, content, attachmentKey, request.attachmentFileName()));
         MessageResponse response = toResponse(message);
@@ -57,10 +61,10 @@ public class MessageService {
 
     /** Returns the most recent {@code limit} messages of a channel, in chronological order. */
     @Transactional(readOnly = true)
-    public List<MessageResponse> listByChannel(Long channelId, Integer limit) {
-        if (!channelRepository.existsById(channelId)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found");
-        }
+    public List<MessageResponse> listByChannel(Long channelId, Integer limit, String viewerUsername) {
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        auth.requireInChannel(auth.requireUser(viewerUsername), channel, Permission.READ_MESSAGE_HISTORY);
         List<Message> messages = new ArrayList<>(messageRepository
                 .findByChannelIdOrderByIdDesc(channelId, PageRequest.of(0, clamp(limit)))
                 .getContent());

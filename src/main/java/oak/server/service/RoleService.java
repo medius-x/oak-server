@@ -1,0 +1,168 @@
+package oak.server.service;
+
+import lombok.RequiredArgsConstructor;
+import oak.server.dto.CreateRoleRequest;
+import oak.server.dto.ReorderRolesRequest;
+import oak.server.dto.RoleEvent;
+import oak.server.dto.RoleResponse;
+import oak.server.dto.UpdateRoleRequest;
+import oak.server.entity.Permission;
+import oak.server.entity.Permissions;
+import oak.server.entity.Role;
+import oak.server.entity.RoleKind;
+import oak.server.entity.User;
+import oak.server.repository.RoleRepository;
+import oak.server.repository.UserRepository;
+import org.springframework.http.HttpStatus;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Role CRUD + reorder, all gated by {@link Permission#MANAGE_ROLES} and role hierarchy. Custom roles
+ * have dense integer positions managed by {@link #reorder}; a newly created role is placed at the top
+ * of the custom ones. The {@code @everyone} and {@code OWNER} built-ins are protected (cannot be
+ * deleted/renamed; {@code @everyone}'s permissions may be edited, {@code OWNER} is immutable). Every
+ * mutation broadcasts a {@link RoleEvent} so connected clients refetch.
+ */
+@Service
+@RequiredArgsConstructor
+public class RoleService {
+
+    /** STOMP topic role changes are pushed to: {@code /topic/roles}. */
+    public static final String ROLES_TOPIC = "/topic/roles";
+
+    private final RoleRepository roleRepository;
+    private final UserRepository userRepository;
+    private final AuthorizationService auth;
+    private final SimpMessagingTemplate messagingTemplate;
+
+    @Transactional(readOnly = true)
+    public List<RoleResponse> list() {
+        return roleRepository.findAllByOrderByPositionDesc().stream()
+                .map(RoleResponse::from)
+                .toList();
+    }
+
+    @Transactional
+    public RoleResponse create(CreateRoleRequest request, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.MANAGE_ROLES);
+        if (roleRepository.existsByName(request.name())) {
+            throw conflict("Role name already taken");
+        }
+        long permissions = Permissions.fromNames(request.permissions());
+        boolean mentionable = Boolean.TRUE.equals(request.mentionable());
+        boolean hoist = Boolean.TRUE.equals(request.hoist());
+        Role role = new Role(request.name(), nextCustomPosition(), permissions, mentionable, hoist, RoleKind.CUSTOM);
+        role.setColor(request.color());
+        role = roleRepository.save(role);
+        publish("created", role.getId());
+        return RoleResponse.from(role);
+    }
+
+    @Transactional
+    public RoleResponse update(Long roleId, UpdateRoleRequest request, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.MANAGE_ROLES);
+        Role role = roleRepository.findById(roleId)
+                .orElseThrow(() -> notFound("Role not found"));
+        if (role.getKind() == RoleKind.OWNER) {
+            throw forbidden("The OWNER role cannot be edited");
+        }
+        if (role.getKind() == RoleKind.CUSTOM) {
+            // cannot edit a role at or above your own level
+            auth.requireCanAssignRole(actor, role);
+            if (request.name() != null) {
+                if (!role.getName().equals(request.name()) && roleRepository.existsByName(request.name())) {
+                    throw conflict("Role name already taken");
+                }
+                role.setName(request.name());
+            }
+            if (request.color() != null) {
+                role.setColor(request.color());
+            }
+            if (request.hoist() != null) {
+                role.setHoist(request.hoist());
+            }
+        }
+        // @everyone: only permissions (and mentionable) are editable, never name/color/hoist
+        if (request.permissions() != null) {
+            role.setPermissions(Permissions.fromNames(request.permissions()));
+        }
+        if (request.mentionable() != null) {
+            role.setMentionable(request.mentionable());
+        }
+        role = roleRepository.save(role);
+        publish("updated", role.getId());
+        return RoleResponse.from(role);
+    }
+
+    @Transactional
+    public void delete(Long roleId, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.MANAGE_ROLES);
+        Role role = roleRepository.findById(roleId)
+                .orElseThrow(() -> notFound("Role not found"));
+        if (role.getKind() != RoleKind.CUSTOM) {
+            throw forbidden("Built-in roles cannot be deleted");
+        }
+        auth.requireCanAssignRole(actor, role);
+        // user_roles has no ON DELETE CASCADE — clear assignments first
+        for (User holder : userRepository.findUsersByRoleId(roleId)) {
+            holder.getRoles().removeIf(assigned -> roleId.equals(assigned.getId()));
+            userRepository.save(holder);
+        }
+        roleRepository.delete(role);
+        publish("deleted", roleId);
+    }
+
+    @Transactional
+    public void reorder(ReorderRolesRequest request, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.MANAGE_ROLES);
+        List<Role> ordered = new ArrayList<>();
+        for (Long roleId : request.roleIds()) {
+            Role role = roleRepository.findById(roleId)
+                    .orElseThrow(() -> notFound("Role not found: " + roleId));
+            if (role.getKind() != RoleKind.CUSTOM) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Only custom roles can be reordered");
+            }
+            ordered.add(role);
+        }
+        int position = ordered.size(); // first listed = highest position
+        for (Role role : ordered) {
+            role.setPosition(position);
+            position--;
+        }
+        roleRepository.saveAll(ordered);
+        publish("reordered", null);
+    }
+
+    /** Highest custom position + 1 (customs live far below OWNER_POSITION, so no collision). */
+    private int nextCustomPosition() {
+        List<Role> customs = roleRepository.findByKindOrderByPositionDesc(RoleKind.CUSTOM);
+        return customs.isEmpty() ? 1 : customs.get(0).getPosition() + 1;
+    }
+
+    private void publish(String type, Long roleId) {
+        messagingTemplate.convertAndSend(ROLES_TOPIC, new RoleEvent(type, roleId));
+    }
+
+    private static ResponseStatusException conflict(String reason) {
+        return new ResponseStatusException(HttpStatus.CONFLICT, reason);
+    }
+
+    private static ResponseStatusException notFound(String reason) {
+        return new ResponseStatusException(HttpStatus.NOT_FOUND, reason);
+    }
+
+    private static ResponseStatusException forbidden(String reason) {
+        return new ResponseStatusException(HttpStatus.FORBIDDEN, reason);
+    }
+}

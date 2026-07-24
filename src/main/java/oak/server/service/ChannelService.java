@@ -5,6 +5,7 @@ import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
+import oak.server.entity.Permission;
 import oak.server.repository.ChannelRepository;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ public class ChannelService {
 
     private final ChannelRepository channelRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AuthorizationService auth;
 
     @Transactional(readOnly = true)
     public List<ChannelResponse> list() {
@@ -32,7 +34,9 @@ public class ChannelService {
     }
 
     @Transactional
-    public ChannelResponse create(CreateChannelRequest request) {
+    public ChannelResponse create(CreateChannelRequest request, String actorUsername) {
+        // Only members with MANAGE_CHANNELS may create channels (the OWNER/ADMIN short-circuit applies).
+        auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         ChannelType type = request.type() != null ? request.type() : ChannelType.TEXT;
         Channel channel = channelRepository.save(new Channel(request.name(), type));
         ChannelResponse response = ChannelResponse.from(channel);

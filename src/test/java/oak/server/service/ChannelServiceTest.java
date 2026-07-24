@@ -31,6 +31,8 @@ class ChannelServiceTest {
     private ChannelRepository channelRepository;
     @Mock
     private SimpMessagingTemplate messagingTemplate;
+    @Mock
+    private AuthorizationService auth;
 
     @InjectMocks
     private ChannelService channelService;
@@ -41,7 +43,7 @@ class ChannelServiceTest {
         saved.setId(42L);
         when(channelRepository.save(any(Channel.class))).thenReturn(saved);
 
-        ChannelResponse response = channelService.create(new CreateChannelRequest("general", ChannelType.TEXT));
+        ChannelResponse response = channelService.create(new CreateChannelRequest("general", ChannelType.TEXT), "alice");
 
         assertEquals(42L, response.id());
         assertEquals("general", response.name());
@@ -55,7 +57,7 @@ class ChannelServiceTest {
         saved.setId(7L);
         when(channelRepository.save(any(Channel.class))).thenReturn(saved);
 
-        channelService.create(new CreateChannelRequest("lounge", null));
+        channelService.create(new CreateChannelRequest("lounge", null), "alice");
 
         ArgumentCaptor<ChannelResponse> captor = ArgumentCaptor.forClass(ChannelResponse.class);
         verify(messagingTemplate).convertAndSend(eq(ChannelService.CHANNELS_TOPIC), captor.capture());

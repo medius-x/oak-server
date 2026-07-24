@@ -33,8 +33,9 @@ public class MessageController {
 
     @GetMapping
     public List<MessageResponse> list(@PathVariable Long channelId,
-                                      @RequestParam(required = false) Integer limit) {
-        return messageService.listByChannel(channelId, limit);
+                                      @RequestParam(required = false) Integer limit,
+                                      @AuthenticationPrincipal UserDetails principal) {
+        return messageService.listByChannel(channelId, limit, principal.getUsername());
     }
 
     @PostMapping

@@ -6,11 +6,14 @@ import oak.server.dto.AttachmentUploadRequest;
 import oak.server.dto.AttachmentUploadResponse;
 import oak.server.dto.AvatarKeysRequest;
 import oak.server.dto.AvatarOriginalResponse;
+import oak.server.dto.MyPermissions;
 import oak.server.dto.UserResponse;
 import oak.server.dto.UserSummary;
+import oak.server.entity.Permissions;
 import oak.server.entity.User;
 import oak.server.repository.UserRepository;
 import oak.server.service.AttachmentUrlSigner;
+import oak.server.service.AuthorizationService;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -40,6 +43,7 @@ public class UserController {
     private final UserRepository userRepository;
     private final AttachmentUrlSigner attachmentUrlSigner;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AuthorizationService auth;
 
     /** STOMP topic a live user update (e.g. an avatar change) is pushed to: {@code /topic/users}. */
     public static final String USERS_TOPIC = "/topic/users";
@@ -60,6 +64,17 @@ public class UserController {
         return userRepository.findByUsername(principal.getUsername())
                 .map(user -> UserResponse.from(user, attachmentUrlSigner))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+    }
+
+    /**
+     * The caller's effective server-wide permissions (names) + OWNER flag — the client gates its UI
+     * from this (hide the channel "+" without {@code MANAGE_CHANNELS}, etc.). Channel-scoped checks
+     * are resolved server-side at the action.
+     */
+    @GetMapping("/me/permissions")
+    public MyPermissions myPermissions(@AuthenticationPrincipal UserDetails principal) {
+        User user = requireUser(principal);
+        return new MyPermissions(Permissions.names(auth.effectiveBase(user)), auth.isOwner(user));
     }
 
     /**

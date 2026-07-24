@@ -6,8 +6,11 @@ import oak.server.dto.LoginRequest;
 import oak.server.dto.RegisterRequest;
 import oak.server.dto.UserResponse;
 import oak.server.entity.RefreshToken;
+import oak.server.entity.Role;
+import oak.server.entity.RoleKind;
 import oak.server.entity.User;
 import oak.server.repository.RefreshTokenRepository;
+import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.security.JwtProperties;
 import oak.server.security.JwtTokenProvider;
@@ -46,23 +49,38 @@ public class AuthService {
     private final JwtTokenProvider tokenProvider;
     private final RefreshTokenRepository refreshTokenRepository;
     private final JwtProperties jwtProperties;
+    private final RoleRepository roleRepository;
 
     @Transactional
     public UserResponse register(RegisterRequest request) {
         if (userRepository.existsByUsername(request.username())) {
             throw conflict("Username already taken: " + request.username());
         }
+        // The first member of a fresh instance becomes the OWNER (the superuser); later members get
+        // only @everyone by default. (RoleSeeder ensures the OWNER role already exists at startup.)
+        boolean firstUser = userRepository.count() == 0;
         User user = new User(
                 request.username(),
                 passwordEncoder.encode(request.password()));
+        User saved;
         try {
-            user = userRepository.save(user);
+            saved = userRepository.save(user);
         } catch (DataIntegrityViolationException e) {
             // Guards against the rare race between the exists-check and the INSERT
             // (the unique constraint is the real authority).
             throw conflict("Username already exists");
         }
-        return UserResponse.from(user);
+        if (firstUser) {
+            // saved is effectively final here, so the lambda can capture it.
+            roleRepository.findByKind(RoleKind.OWNER).ifPresent(ownerRole -> grantOwner(saved, ownerRole));
+        }
+        return UserResponse.from(saved);
+    }
+
+    /** Assigns the OWNER role to the first member (writes the user_roles join row). */
+    private void grantOwner(User user, Role ownerRole) {
+        user.getRoles().add(ownerRole);
+        userRepository.save(user);
     }
 
     @Transactional
@@ -72,6 +90,9 @@ public class AuthService {
                     new UsernamePasswordAuthenticationToken(request.username(), request.password()));
             User user = userRepository.findByUsername(authentication.getName())
                     .orElseThrow(() -> unauthorized("Invalid username or password"));
+            if (user.isBanned()) {
+                throw forbidden("This account is banned");
+            }
             return issueTokens(user, newFamilyId());
         } catch (BadCredentialsException e) {
             throw unauthorized("Invalid username or password");
@@ -152,5 +173,9 @@ public class AuthService {
 
     private static ResponseStatusException unauthorized(String reason) {
         return new ResponseStatusException(HttpStatus.UNAUTHORIZED, reason);
+    }
+
+    private static ResponseStatusException forbidden(String reason) {
+        return new ResponseStatusException(HttpStatus.FORBIDDEN, reason);
     }
 }
