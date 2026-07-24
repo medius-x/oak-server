@@ -19,6 +19,12 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     Optional<User> findByUsername(String username);
 
+    /** Like {@link #findByUsername} but eager-fetches the member's roles (JOIN FETCH), so permission
+     *  resolution can read {@code user.getRoles()} on threads with no Hibernate session (STOMP
+     *  {@code clientInboundChannel} has no OpenEntityManagerInView, unlike HTTP requests). */
+    @Query("select u from User u left join fetch u.roles where u.username = :username")
+    Optional<User> findByUsernameWithRoles(@Param("username") String username);
+
     boolean existsByUsername(String username);
 
     /** All users in username order — backs the public roster ({@code GET /api/users}). */

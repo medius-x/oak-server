@@ -51,7 +51,9 @@ public class AuthorizationService {
         if (username == null) {
             return Optional.empty();
         }
-        return userRepository.findByUsername(username);
+        // Eager-fetch roles: permission resolution reads user.getRoles(), which must work on threads
+        // without a Hibernate session (STOMP clientInboundChannel has no OpenEntityManagerInView).
+        return userRepository.findByUsernameWithRoles(username);
     }
 
     /** Loads the actor or rejects with 401-ish "not found" (authenticated principal must resolve). */

@@ -20,6 +20,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -159,11 +160,102 @@ class RbacIntegrationTest {
                 .andExpect(status().isForbidden());
 
         // owner unbans; bob can log in again
-        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
-                        .delete("/api/members/" + bobId + "/ban").header("Authorization", "Bearer " + ownerToken))
+        mockMvc.perform(delete("/api/members/" + bobId + "/ban").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk());
         mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(loginBody("bob", "supersecret")))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void channelOverrideCrud_roundTripsViaRest() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(ownerToken, "override-room", "TEXT");
+        Long everyoneId = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow().getId();
+
+        // no overrides initially
+        mockMvc.perform(get("/api/channels/" + channelId + "/overrides").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+
+        // PUT upserts (deny SEND_MESSAGES, allow MANAGE_MESSAGES for @everyone)
+        mockMvc.perform(put("/api/channels/" + channelId + "/overrides/" + everyoneId)
+                        .header("Authorization", "Bearer " + ownerToken).contentType(JSON)
+                        .content("{\"allow\":[\"MANAGE_MESSAGES\"],\"deny\":[\"SEND_MESSAGES\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.roleId").value(everyoneId))
+                .andExpect(jsonPath("$.deny[0]").value("SEND_MESSAGES"));
+
+        // GET list now has one
+        mockMvc.perform(get("/api/channels/" + channelId + "/overrides").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1));
+
+        // a non-manager (bob, @everyone only) cannot edit overrides -> 403
+        String bobToken = registerAndLogin("bob", "supersecret");
+        mockMvc.perform(put("/api/channels/" + channelId + "/overrides/" + everyoneId)
+                        .header("Authorization", "Bearer " + bobToken).contentType(JSON)
+                        .content("{\"allow\":[],\"deny\":[]}"))
+                .andExpect(status().isForbidden());
+
+        // DELETE removes it (as owner)
+        mockMvc.perform(delete("/api/channels/" + channelId + "/overrides/" + everyoneId)
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isNoContent());
+        mockMvc.perform(get("/api/channels/" + channelId + "/overrides").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    void attachFiles_isChannelScoped() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long channelId = createChannel(ownerToken, "media", "TEXT");
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+
+        // @everyone grants ATTACH_FILES by default -> bob can post WITH an attachment
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages").header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"pic\",\"attachmentKey\":\"attachments/x/y.png\",\"attachmentFileName\":\"y.png\"}"))
+                .andExpect(status().isCreated());
+
+        // deny ATTACH_FILES for @everyone on this channel
+        channelRoleOverrideRepository.saveAndFlush(new ChannelRoleOverride(
+                channelRepository.findById(channelId).orElseThrow(), everyone, 0L, Permission.ATTACH_FILES.bit));
+
+        // bob can no longer post with an attachment -> 403 ...
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages").header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"pic2\",\"attachmentKey\":\"attachments/x/z.png\",\"attachmentFileName\":\"z.png\"}"))
+                .andExpect(status().isForbidden());
+
+        // ... but text-only still works (SEND_MESSAGES still granted)
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages").header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON).content("{\"content\":\"just text\"}"))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    void connect_gatesVoiceRoomEndpoint() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long voiceId = createChannel(ownerToken, "lounge", "VOICE");
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+
+        // @everyone grants CONNECT by default -> bob gets room info
+        mockMvc.perform(get("/api/channels/" + voiceId + "/room").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk());
+
+        // deny CONNECT for @everyone
+        channelRoleOverrideRepository.saveAndFlush(new ChannelRoleOverride(
+                channelRepository.findById(voiceId).orElseThrow(), everyone, 0L, Permission.CONNECT.bit));
+
+        // bob now denied -> 403 ...
+        mockMvc.perform(get("/api/channels/" + voiceId + "/room").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isForbidden());
+
+        // ... owner bypasses (ADMINISTRATOR) -> 200
+        mockMvc.perform(get("/api/channels/" + voiceId + "/room").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk());
     }
 

@@ -51,6 +51,10 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
         // Channel-scoped SEND_MESSAGES (respects overrides; OWNER/ADMINISTRATOR bypass).
         auth.requireInChannel(author, channel, Permission.SEND_MESSAGES);
+        // Posting a message that carries an attachment additionally requires ATTACH_FILES (channel-scoped).
+        if (!isBlank(attachmentKey)) {
+            auth.requireInChannel(author, channel, Permission.ATTACH_FILES);
+        }
         Message message = messageRepository.save(
                 new Message(channel, author, content, attachmentKey, request.attachmentFileName()));
         MessageResponse response = toResponse(message);
