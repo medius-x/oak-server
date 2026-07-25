@@ -12,4 +12,9 @@ public interface ChannelRoleOverrideRepository extends JpaRepository<ChannelRole
     List<ChannelRoleOverride> findByChannelId(Long channelId);
 
     Optional<ChannelRoleOverride> findByChannelIdAndRoleId(Long channelId, Long roleId);
+
+    /** Every override referencing a role — loaded (not bulk-deleted) so {@code RoleService} can
+     *  {@code deleteAll} them, which keeps the persistence context consistent (a bulk JPQL delete
+     *  would leave stale managed entities pointing at the role). */
+    List<ChannelRoleOverride> findByRole_Id(Long roleId);
 }

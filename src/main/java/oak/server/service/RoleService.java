@@ -11,6 +11,7 @@ import oak.server.entity.Permissions;
 import oak.server.entity.Role;
 import oak.server.entity.RoleKind;
 import oak.server.entity.User;
+import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import org.springframework.http.HttpStatus;
@@ -40,6 +41,7 @@ public class RoleService {
     private final UserRepository userRepository;
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
+    private final ChannelRoleOverrideRepository channelRoleOverrideRepository;
 
     @Transactional(readOnly = true)
     public List<RoleResponse> list() {
@@ -117,6 +119,11 @@ public class RoleService {
             holder.getRoles().removeIf(assigned -> roleId.equals(assigned.getId()));
             userRepository.save(holder);
         }
+        // channel_role_overrides.role_id has no ON DELETE CASCADE either — load + deleteAll (not a bulk
+        // JPQL delete: that would leave stale managed overrides pointing at the role). Flush so the
+        // override DELETEs reach the DB before the role DELETE, satisfying the FK.
+        channelRoleOverrideRepository.deleteAll(channelRoleOverrideRepository.findByRole_Id(roleId));
+        channelRoleOverrideRepository.flush();
         roleRepository.delete(role);
         publish("deleted", roleId);
     }

@@ -259,6 +259,28 @@ class RbacIntegrationTest {
                 .andExpect(status().isOk());
     }
 
+    @Test
+    void deleteRole_clearsItsOverridesAndAssignments() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(ownerToken, "ov-room", "TEXT");
+        Long roleId = createRole(ownerToken, "Doomed", "MANAGE_MESSAGES");
+
+        // give the role a channel override (this is what used to make delete fail with an FK violation)
+        mockMvc.perform(put("/api/channels/" + channelId + "/overrides/" + roleId)
+                        .header("Authorization", "Bearer " + ownerToken).contentType(JSON)
+                        .content("{\"allow\":[],\"deny\":[\"SEND_MESSAGES\"]}"))
+                .andExpect(status().isOk());
+
+        // deleting the role must clear its override + assignments, not 500
+        mockMvc.perform(delete("/api/roles/" + roleId).header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isNoContent());
+
+        // the override is gone too
+        mockMvc.perform(get("/api/channels/" + channelId + "/overrides").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
     // --- helpers ---
 
     private String registerAndLogin(String username, String password) throws Exception {
