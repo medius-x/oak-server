@@ -1,6 +1,7 @@
 package oak.server.websocket;
 
 import oak.server.dto.VoiceChannelMembersDto;
+import oak.server.dto.VoiceControlState;
 import oak.server.dto.VoiceMemberEvent;
 import oak.server.dto.VoiceMemberStatus;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,7 @@ import java.util.Comparator;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -36,6 +38,7 @@ import static org.mockito.Mockito.verify;
 class VoiceMembershipTrackerTest {
 
     private static final String VOICE_TOPIC = VoiceMembershipTracker.VOICE_TOPIC;
+    private static final String VOICE_STATE_TOPIC = VoiceMembershipTracker.VOICE_STATE_TOPIC;
     private static final Long CHANNEL_A = 10L;
     private static final Long CHANNEL_B = 20L;
 
@@ -130,11 +133,53 @@ class VoiceMembershipTrackerTest {
                 new VoiceChannelMembersDto(CHANNEL_B, List.of("bob"))), snapshot);
     }
 
+    @Test
+    void setMutedPublishesStateAndReflectsFlag() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "alice", false);
+
+        List<VoiceControlState> states = captureStates(2);
+        assertEquals("alice", states.get(0).username());
+        assertEquals(CHANNEL_A, states.get(0).channelId());
+        assertTrue(states.get(0).muted());
+        assertFalse(states.get(0).deafened());
+        assertFalse(states.get(1).muted());
+    }
+
+    @Test
+    void kickExitsTheTargetsSessionsOnly() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.enter("s2", "bob", CHANNEL_A);
+
+        tracker.kick(CHANNEL_A, "alice"); // alice removed, bob stays
+
+        assertEquals(List.of("bob"), usernamesIn(CHANNEL_A));
+        List<VoiceMemberEvent> events = captureEvents(3); // JOINED alice, JOINED bob, LEFT alice
+        VoiceMemberEvent left = events.get(2);
+        assertEquals(VoiceMemberStatus.LEFT, left.status());
+        assertEquals("alice", left.username());
+    }
+
+    @Test
+    void leavingDropsMuteState() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setMuted(CHANNEL_A, "alice", true);
+        tracker.exit("s1");
+        assertFalse(tracker.isMuted(CHANNEL_A, "alice"));
+    }
+
     // --- helpers ---
 
     private List<VoiceMemberEvent> captureEvents(int expectedCount) {
         ArgumentCaptor<VoiceMemberEvent> captor = ArgumentCaptor.forClass(VoiceMemberEvent.class);
         verify(messagingTemplate, times(expectedCount)).convertAndSend(eq(VOICE_TOPIC), captor.capture());
+        return captor.getAllValues();
+    }
+
+    private List<VoiceControlState> captureStates(int expectedCount) {
+        ArgumentCaptor<VoiceControlState> captor = ArgumentCaptor.forClass(VoiceControlState.class);
+        verify(messagingTemplate, times(expectedCount)).convertAndSend(eq(VOICE_STATE_TOPIC), captor.capture());
         return captor.getAllValues();
     }
 
