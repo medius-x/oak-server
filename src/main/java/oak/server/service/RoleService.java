@@ -85,9 +85,10 @@ public class RoleService {
                 }
                 role.setName(request.name());
             }
-            if (request.color() != null) {
-                role.setColor(request.color());
-            }
+            // colour is applied unconditionally (null = clear to the default/no colour). name above stays
+            // partial-update (null = don't touch), but colour's null is meaningful: the role editor's
+            // "Default Color" sends null to reset, so guarding it with != null would drop the reset.
+            role.setColor(request.color());
             if (request.hoist() != null) {
                 role.setHoist(request.hoist());
             }
