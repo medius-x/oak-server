@@ -72,7 +72,11 @@ public class MemberService {
             Role role = roleRepository.findById(roleId)
                     .orElseThrow(() -> notFound("Role not found: " + roleId));
             if (role.getKind() == RoleKind.OWNER) {
-                throw forbidden("The OWNER role is transferred, not assigned");
+                // OWNER can't be assigned here (only transferred). Skip it rather than rejecting: the
+                // client sends a member's full role set, so an OWNER-holder's request always carries
+                // their OWNER id — rejecting would break re-assigning ANY other role to an owner. If the
+                // target already holds OWNER it's re-added below; a non-owner can't gain it this way.
+                continue;
             }
             auth.requireCanAssignRole(actor, role);
             newRoles.add(role);
