@@ -72,10 +72,13 @@ public class MemberService {
             Role role = roleRepository.findById(roleId)
                     .orElseThrow(() -> notFound("Role not found: " + roleId));
             if (role.getKind() == RoleKind.OWNER) {
-                // OWNER can't be assigned here (only transferred). Skip it rather than rejecting: the
-                // client sends a member's full role set, so an OWNER-holder's request always carries
-                // their OWNER id — rejecting would break re-assigning ANY other role to an owner. If the
-                // target already holds OWNER it's re-added below; a non-owner can't gain it this way.
+                // OWNER can't be gained via this endpoint (only transferred). The client sends a
+                // member's full role set, so an OWNER-holder's request always carries their OWNER id —
+                // that's a keep (skip; it's re-added below). But OWNER in the request for a non-owner IS
+                // an assign attempt — reject it, so the protection is explicit, not silent.
+                if (!auth.isOwner(target)) {
+                    throw forbidden("The OWNER role is transferred, not assigned");
+                }
                 continue;
             }
             auth.requireCanAssignRole(actor, role);

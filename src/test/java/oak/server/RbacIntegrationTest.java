@@ -281,6 +281,32 @@ class RbacIntegrationTest {
                 .andExpect(jsonPath("$.length()").value(0));
     }
 
+    @Test
+    void ownerRoleCannotBeAssignedOnlyKeptForHolder() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        Long bobId = userRepository.findByUsername("bob").orElseThrow().getId();
+        Long ownerId = userRepository.findByUsername("alice").orElseThrow().getId();
+        Long ownerRoleId = roleRepository.findByKind(RoleKind.OWNER).orElseThrow().getId();
+
+        // assigning OWNER to a non-owner (bob) is rejected — OWNER is transfer-only, not assignable
+        mockMvc.perform(put("/api/members/" + bobId + "/roles").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"roleIds\":[" + ownerRoleId + "]}"))
+                .andExpect(status().isForbidden());
+
+        // but re-assigning the owner's own roles (the request carries their OWNER id) succeeds — the
+        // OWNER id is treated as a keep, not an assign
+        Long extraRoleId = createRole(ownerToken, "Extra", "MANAGE_MESSAGES");
+        mockMvc.perform(put("/api/members/" + ownerId + "/roles").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"roleIds\":[" + ownerRoleId + "," + extraRoleId + "]}"))
+                .andExpect(status().isOk());
+
+        // the owner still holds OWNER (the re-assign kept it)
+        mockMvc.perform(get("/api/users/me/permissions").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.owner").value(true));
+    }
+
     // --- helpers ---
 
     private String registerAndLogin(String username, String password) throws Exception {
