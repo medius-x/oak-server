@@ -16,7 +16,9 @@ public enum Permission {
 
     // --- General (server-wide authority) ---
     ADMINISTRATOR(Group.GENERAL),          // bypasses every permission check (except hierarchy vs OWNER)
-    MANAGE_SERVER(Group.GENERAL),          // edit instance-level settings
+    MANAGE_SERVER(Group.GENERAL),          // future: edit instance-level settings (name/icon/prune) —
+                                           // no enforcement yet; Server Settings access is gated per chapter
+                                           // (MANAGE_ROLES/MEMBERS/KICK/BAN/CHANNELS), not by this flag
     MANAGE_ROLES(Group.GENERAL),           // create/edit/delete/reorder roles
     MANAGE_CHANNELS(Group.GENERAL),        // create/edit/delete channels
     MANAGE_MEMBERS(Group.GENERAL),         // assign roles to members
