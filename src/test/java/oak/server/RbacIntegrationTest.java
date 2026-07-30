@@ -286,6 +286,32 @@ class RbacIntegrationTest {
     }
 
     @Test
+    void channelMyPermissions_reflectsSendOverride() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long channelId = createChannel(ownerToken, "room", "TEXT");
+
+        // bob has SEND_MESSAGES + ATTACH_FILES via @everyone by default
+        mockMvc.perform(get("/api/channels/" + channelId + "/permissions/me").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sendMessages").value(true))
+                .andExpect(jsonPath("$.attachFiles").value(true));
+
+        // deny SEND_MESSAGES for @everyone on this channel
+        Channel channel = channelRepository.findById(channelId).orElseThrow();
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(channel, everyone, 0L, Permission.SEND_MESSAGES.bit));
+
+        // bob can no longer send here → sendMessages=false (attach still true). This is what the client
+        // uses to hide the composer, so it must reflect the per-channel override, not just @everyone.
+        mockMvc.perform(get("/api/channels/" + channelId + "/permissions/me").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sendMessages").value(false))
+                .andExpect(jsonPath("$.attachFiles").value(true));
+    }
+
+    @Test
     void deleteRole_clearsItsOverridesAndAssignments() throws Exception {
         String ownerToken = registerAndLogin("alice", "supersecret");
         Long channelId = createChannel(ownerToken, "ov-room", "TEXT");

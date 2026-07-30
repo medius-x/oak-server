@@ -2,6 +2,7 @@ package oak.server.controller;
 
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import oak.server.dto.ChannelMyPermissions;
 import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.service.ChannelService;
@@ -9,6 +10,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -38,5 +40,13 @@ public class ChannelController {
     public ChannelResponse create(@RequestBody @Valid CreateChannelRequest request,
                                   @AuthenticationPrincipal UserDetails principal) {
         return channelService.create(request, principal.getUsername());
+    }
+
+    /** The signed-in member's resolved (override-aware) SEND_MESSAGES / ATTACH_FILES on this channel —
+     *  for the client to hide the composer when the member can't write here. */
+    @GetMapping("/{id}/permissions/me")
+    public ChannelMyPermissions myPermissions(@PathVariable Long id,
+                                              @AuthenticationPrincipal UserDetails principal) {
+        return channelService.myPermissions(id, principal.getUsername());
     }
 }

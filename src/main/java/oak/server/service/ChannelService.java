@@ -1,15 +1,19 @@
 package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
+import oak.server.dto.ChannelMyPermissions;
 import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
 import oak.server.entity.Permission;
+import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
+import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
 
@@ -44,5 +48,18 @@ public class ChannelService {
         // having to reselect the server. Same REST-write → push pattern as MessageService.create.
         messagingTemplate.convertAndSend(CHANNELS_TOPIC, response);
         return response;
+    }
+
+    /** The member's resolved SEND_MESSAGES / ATTACH_FILES on one channel (override-aware) — for the
+     *  client to gate the composer. Channel-scoped (unlike {@code /api/users/me/permissions}, which is
+     *  server-wide), so private channels and per-channel denies are honoured. */
+    @Transactional(readOnly = true)
+    public ChannelMyPermissions myPermissions(Long channelId, String username) {
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        User user = auth.requireUser(username);
+        return new ChannelMyPermissions(
+                auth.hasInChannel(user, channel, Permission.SEND_MESSAGES),
+                auth.hasInChannel(user, channel, Permission.ATTACH_FILES));
     }
 }
