@@ -124,6 +124,16 @@ public class AuthService {
             }
             throw unauthorized("Refresh token reused — token family revoked");
         }
+        if (stored.getUser().isBanned()) {
+            // A banned account must not rotate tokens — every access JWT is already 401'd by the filter,
+            // so refuse the refresh and revoke the family to stop the churn (noRollbackFor keeps the
+            // revoke, same as the reuse branch above).
+            String familyId = stored.getFamilyId();
+            if (familyId != null) {
+                refreshTokenRepository.findByFamilyId(familyId).forEach(token -> token.setRevoked(true));
+            }
+            throw unauthorized("This account is banned");
+        }
         if (stored.getExpiresAt().isBefore(Instant.now())) {
             throw unauthorized("Refresh token expired");
         }

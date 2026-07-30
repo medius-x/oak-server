@@ -107,7 +107,7 @@ public class MemberService {
         auth.requireServer(actor, Permission.KICK_MEMBERS);
         auth.requireCanActOn(actor, target);
         messagingTemplate.convertAndSendToUser(target.getUsername(), MEMBER_KICK_QUEUE,
-                Map.of("by", actor.getUsername()));
+                Map.of("by", actor.getUsername(), "banned", false));
         publish("kicked", target.getId());
     }
 

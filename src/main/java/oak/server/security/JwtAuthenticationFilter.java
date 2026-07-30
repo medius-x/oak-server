@@ -39,6 +39,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String username = tokenProvider.extractUsername(token);
             if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
                 UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+                // A banned account's still-valid access JWT must not reach any REST endpoint: ban takes
+                // effect now, not on the next login/CONNECT. Short-circuit (no filterChain.doFilter) so
+                // the protected resource is never served.
+                if (userDetails instanceof PrincipalUser principal && principal.isBanned()) {
+                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "banned");
+                    return;
+                }
                 UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
                         userDetails, null, userDetails.getAuthorities());
                 authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));

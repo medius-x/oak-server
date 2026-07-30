@@ -26,9 +26,6 @@ public class JpaUserDetailsService implements UserDetailsService {
     }
 
     private UserDetails toUserDetails(User user) {
-        return org.springframework.security.core.userdetails.User.withUsername(user.getUsername())
-                .password(user.getPasswordHash())
-                .roles("USER")
-                .build();
+        return new PrincipalUser(user.getUsername(), user.getPasswordHash(), user.isBanned());
     }
 }

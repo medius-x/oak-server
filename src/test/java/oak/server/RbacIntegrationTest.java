@@ -154,6 +154,12 @@ class RbacIntegrationTest {
         mockMvc.perform(post("/api/members/" + bobId + "/ban").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk());
 
+        // the management roster marks bob as banned
+        mockMvc.perform(get("/api/members").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.userId==" + bobId + ")].banned",
+                        org.hamcrest.Matchers.hasItem(true)));
+
         // bob can no longer log in -> 403
         mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(loginBody("bob", "supersecret")))
@@ -162,9 +168,29 @@ class RbacIntegrationTest {
         // owner unbans; bob can log in again
         mockMvc.perform(delete("/api/members/" + bobId + "/ban").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk());
+        mockMvc.perform(get("/api/members").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.userId==" + bobId + ")].banned",
+                        org.hamcrest.Matchers.hasItem(false)));
         mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(loginBody("bob", "supersecret")))
                 .andExpect(status().isOk());
+    }
+
+    @Test
+    void bannedMemberTokenRejectedOnRest() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret"); // valid access JWT issued BEFORE the ban
+        Long bobId = userRepository.findByUsername("bob").orElseThrow().getId();
+
+        // owner bans bob
+        mockMvc.perform(post("/api/members/" + bobId + "/ban").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk());
+
+        // bob's still-valid access JWT is now rejected on every REST endpoint — ban takes effect at
+        // once (not only on the next login/CONNECT), via the JwtAuthenticationFilter banned check.
+        mockMvc.perform(get("/api/users/me").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isUnauthorized());
     }
 
     @Test
