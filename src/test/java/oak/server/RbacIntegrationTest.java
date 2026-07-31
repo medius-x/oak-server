@@ -11,6 +11,8 @@ import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -357,6 +359,40 @@ class RbacIntegrationTest {
         mockMvc.perform(get("/api/users/me/permissions").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.owner").value(true));
+    }
+
+    @Test
+    void deleteChannel_requiresManageChannelsAndClearsDependents() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        registerAndLogin("bob", "supersecret"); // @everyone only
+        String bobToken = login("bob", "supersecret");
+
+        Long channelId = createChannel(ownerToken, "doomed", "TEXT");
+        Long everyoneId = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow().getId();
+        // A message and an override both depend on the channel — both must be cleared before the channel
+        // is deleted, or the channel DELETE is rejected by the FK (no ON DELETE CASCADE under ddl-auto=update).
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"content\":\"hello\"}"))
+                .andExpect(status().isCreated());
+        mockMvc.perform(put("/api/channels/" + channelId + "/overrides/" + everyoneId)
+                        .header("Authorization", "Bearer " + ownerToken).contentType(JSON)
+                        .content("{\"allow\":[],\"deny\":[\"SEND_MESSAGES\"]}"))
+                .andExpect(status().isOk());
+
+        // bob (no MANAGE_CHANNELS) -> 403; the channel is left untouched
+        mockMvc.perform(delete("/api/channels/" + channelId).header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isForbidden());
+        assertTrue(channelRepository.existsById(channelId));
+
+        // owner deletes it -> 204, and the channel + its dependents are gone
+        mockMvc.perform(delete("/api/channels/" + channelId).header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isNoContent());
+        assertFalse(channelRepository.existsById(channelId));
+        assertTrue(channelRoleOverrideRepository.findByChannelId(channelId).isEmpty());
+
+        // deleting the now-non-existent channel -> 404
+        mockMvc.perform(delete("/api/channels/" + channelId).header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isNotFound());
     }
 
     // --- helpers ---

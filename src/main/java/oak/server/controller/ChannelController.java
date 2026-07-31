@@ -9,6 +9,7 @@ import oak.server.service.ChannelService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -40,6 +41,14 @@ public class ChannelController {
     public ChannelResponse create(@RequestBody @Valid CreateChannelRequest request,
                                   @AuthenticationPrincipal UserDetails principal) {
         return channelService.create(request, principal.getUsername());
+    }
+
+    /** Deletes a channel (and its messages + overrides). Requires {@code MANAGE_CHANNELS} (enforced in
+     *  {@link ChannelService}); returns 204 on success, 404 if the channel no longer exists. */
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id, @AuthenticationPrincipal UserDetails principal) {
+        channelService.delete(id, principal.getUsername());
     }
 
     /** The signed-in member's resolved (override-aware) SEND_MESSAGES / ATTACH_FILES on this channel —

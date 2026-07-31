@@ -9,6 +9,8 @@ import oak.server.entity.ChannelType;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
+import oak.server.repository.ChannelRoleOverrideRepository;
+import oak.server.repository.MessageRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -26,7 +28,15 @@ public class ChannelService {
      *  carries a single channel's live messages. */
     public static final String CHANNELS_TOPIC = "/topic/channels";
 
+    /** STOMP topic broadcasting a channel <i>deletion</i> (the deleted channel's id) to every connected
+     *  client, so each removes it from its sidebar live. Separate from {@link #CHANNELS_TOPIC} (which
+     *  carries a {@link ChannelResponse} for a newly created channel) — reusing it would make a delete
+     *  indistinguishable from a create on the client. */
+    public static final String CHANNELS_DELETED_TOPIC = "/topic/channels.deleted";
+
     private final ChannelRepository channelRepository;
+    private final MessageRepository messageRepository;
+    private final ChannelRoleOverrideRepository channelRoleOverrideRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
 
@@ -61,5 +71,22 @@ public class ChannelService {
         return new ChannelMyPermissions(
                 auth.hasInChannel(user, channel, Permission.SEND_MESSAGES),
                 auth.hasInChannel(user, channel, Permission.ATTACH_FILES));
+    }
+
+    /** Deletes a channel and everything tied to it (messages + per-channel overrides), then broadcasts
+     *  the deleted id so every connected client drops it from their sidebar. Requires
+     *  {@code MANAGE_CHANNELS} (OWNER/ADMINISTRATOR short-circuit applies). */
+    @Transactional
+    public void delete(Long channelId, String actorUsername) {
+        auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        // The FKs messages.channel_id and channel_role_overrides.channel_id have no ON DELETE CASCADE
+        // (ddl-auto=update never adds cascade), so the children must go first or the channel DELETE
+        // fails with a FK violation.
+        messageRepository.deleteByChannelId(channelId);
+        channelRoleOverrideRepository.deleteByChannelId(channelId);
+        channelRepository.delete(channel);
+        messagingTemplate.convertAndSend(CHANNELS_DELETED_TOPIC, channelId);
     }
 }
