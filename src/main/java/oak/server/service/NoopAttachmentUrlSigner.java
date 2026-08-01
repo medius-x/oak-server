@@ -29,6 +29,11 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner {
         return key("avatars/noop/originals", fileName);
     }
 
+    @Override
+    public String newServerAvatarKey(String fileName) {
+        return key("server-avatars/noop", fileName);
+    }
+
     private static String key(String prefix, String fileName) {
         String safe = (fileName == null || fileName.isBlank()) ? "file" : fileName;
         return prefix + "/" + UUID.randomUUID() + "/" + safe;

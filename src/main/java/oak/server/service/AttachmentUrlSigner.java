@@ -16,6 +16,9 @@ public interface AttachmentUrlSigner {
     /** A fresh object key for the original (pre-crop) avatar image (e.g. {@code avatars/originals/<uuid>/<name>}). */
     String newOriginalKey(String fileName);
 
+    /** A fresh object key for the instance (server) icon upload (e.g. {@code server-avatars/<uuid>/<name>}). */
+    String newServerAvatarKey(String fileName);
+
     /** Short-lived presigned PUT URL authorizing an upload of exactly {@code key}. */
     String presignedPutUrl(String key);
 
