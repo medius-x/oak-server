@@ -3,6 +3,7 @@ package oak.server.service;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.MessageResponse;
+import oak.server.dto.MentionResponse;
 import oak.server.entity.Channel;
 import oak.server.entity.Message;
 import oak.server.entity.Permission;
@@ -37,6 +38,7 @@ public class MessageService {
     private final SimpMessagingTemplate messagingTemplate;
     private final AttachmentUrlSigner attachmentUrlSigner;
     private final AuthorizationService auth;
+    private final MentionParser mentionParser;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
@@ -76,10 +78,14 @@ public class MessageService {
         return messages.stream().map(this::toResponse).toList();
     }
 
-    /** Builds the response view, signing a fresh GET URL when the message has an attachment. */
+    /** Builds the response view, signing a fresh GET URL when the message has an attachment and
+     *  parsing {@code @}-mentions from the content (single chokepoint: covers both the create
+     *  broadcast and history fetch). */
     private MessageResponse toResponse(Message message) {
         String attachmentKey = message.getAttachmentKey();
         String attachmentUrl = isBlank(attachmentKey) ? null : attachmentUrlSigner.presignedGetUrl(attachmentKey);
+        List<MentionResponse> mentions = mentionParser.parse(
+                message.getContent(), message.getAuthor(), message.getChannel());
         return new MessageResponse(
                 message.getId(),
                 message.getChannel().getId(),
@@ -88,7 +94,8 @@ public class MessageService {
                 message.getContent(),
                 message.getCreatedAt(),
                 message.getAttachmentFileName(),
-                attachmentUrl);
+                attachmentUrl,
+                mentions);
     }
 
     private static boolean isBlank(String value) {

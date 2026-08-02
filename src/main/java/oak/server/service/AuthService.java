@@ -50,6 +50,7 @@ public class AuthService {
     private final RefreshTokenRepository refreshTokenRepository;
     private final JwtProperties jwtProperties;
     private final RoleRepository roleRepository;
+    private final ReadStateService readStateService;
 
     @Transactional
     public UserResponse register(RegisterRequest request) {
@@ -74,6 +75,9 @@ public class AuthService {
             // saved is effectively final here, so the lambda can capture it.
             roleRepository.findByKind(RoleKind.OWNER).ifPresent(ownerRole -> grantOwner(saved, ownerRole));
         }
+        // Seed read-state so the pre-existing archive is not "unread" on day one (Discord-faithful):
+        // every existing channel's pointer starts at its current latest message.
+        readStateService.seedInitialReadStates(saved);
         return UserResponse.from(saved);
     }
 

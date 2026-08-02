@@ -87,7 +87,7 @@ class RbacIntegrationTest {
         register("bob", "supersecret");
         Long bobId = userRepository.findByUsername("bob").orElseThrow().getId();
 
-        Long roleId = createRole(ownerToken, "Channel Admin", "MANAGE_CHANNELS");
+        Long roleId = createRole(ownerToken, "ChannelAdmin", "MANAGE_CHANNELS");
         assignRoles(ownerToken, bobId, roleId);
 
         String bobToken = login("bob", "supersecret");

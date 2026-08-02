@@ -54,6 +54,7 @@ public class RoleService {
     public RoleResponse create(CreateRoleRequest request, String actorUsername) {
         User actor = auth.requireUser(actorUsername);
         auth.requireServer(actor, Permission.MANAGE_ROLES);
+        validateRoleName(request.name());
         if (roleRepository.existsByName(request.name())) {
             throw conflict("Role name already taken");
         }
@@ -80,6 +81,7 @@ public class RoleService {
             // cannot edit a role at or above your own level
             auth.requireCanAssignRole(actor, role);
             if (request.name() != null) {
+                validateRoleName(request.name());
                 if (!role.getName().equals(request.name()) && roleRepository.existsByName(request.name())) {
                     throw conflict("Role name already taken");
                 }
@@ -150,6 +152,19 @@ public class RoleService {
         }
         roleRepository.saveAll(ordered);
         publish("reordered", null);
+    }
+
+    /** Custom role names are restricted to {@code [A-Za-z0-9_-]+} so the plain-text {@code @token}
+     *  mention grammar stays unambiguous (no spaces to delimit). Built-in {@code @everyone}/
+     *  {@code OWNER} are seeded, never created/renamed here. */
+    private static final java.util.regex.Pattern ROLE_NAME_PATTERN =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9_-]{1,32}$");
+
+    private static void validateRoleName(String name) {
+        if (name == null || !ROLE_NAME_PATTERN.matcher(name).matches()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Role name must be 1-32 letters, digits, underscores or hyphens (no spaces)");
+        }
     }
 
     /** Highest custom position + 1 (customs live far below OWNER_POSITION, so no collision). */

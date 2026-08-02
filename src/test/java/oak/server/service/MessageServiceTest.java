@@ -47,6 +47,8 @@ class MessageServiceTest {
     private AttachmentUrlSigner attachmentUrlSigner;
     @Mock
     private AuthorizationService auth;
+    @Mock
+    private MentionParser mentionParser;
 
     @InjectMocks
     private MessageService messageService;
@@ -63,12 +65,14 @@ class MessageServiceTest {
         when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
         when(messageRepository.save(any(Message.class))).thenReturn(saved);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId, new CreateMessageRequest("hello", null, null), "alice");
 
         assertEquals(100L, response.id());
         assertEquals(channelId, response.channelId());
         assertEquals("hello", response.content());
+        assertEquals(java.util.List.of(), response.mentions());
         assertNull(response.attachmentUrl());
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId), any(MessageResponse.class));
@@ -94,6 +98,7 @@ class MessageServiceTest {
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
         when(attachmentUrlSigner.presignedGetUrl("attachments/abc/pic.png")).thenReturn("https://minio/get/pic.png");
         when(messageRepository.save(any(Message.class))).thenReturn(saved);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId,
                 new CreateMessageRequest(null, "attachments/abc/pic.png", "pic.png"), "alice");
