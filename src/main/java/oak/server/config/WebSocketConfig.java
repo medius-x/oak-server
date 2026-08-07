@@ -2,6 +2,7 @@ package oak.server.config;
 
 import lombok.RequiredArgsConstructor;
 import oak.server.security.AuthChannelInterceptor;
+import oak.server.websocket.DmSubscriptionInterceptor;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;
@@ -33,6 +34,9 @@ import org.springframework.web.socket.config.annotation.WebSocketMessageBrokerCo
 public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     private final AuthChannelInterceptor authChannelInterceptor;
+    /** Gates {@code SUBSCRIBE} to DM channel topics to participants only (closes the DM eavesdrop leak
+     *  that the unauthorizing simple broker would otherwise allow). */
+    private final DmSubscriptionInterceptor dmSubscriptionInterceptor;
 
     /** STOMP heartbeat interval (ms) in both directions (server can-send / wants-receive). */
     static final long HEARTBEAT_MS = 10_000;
@@ -60,6 +64,6 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
-        registration.interceptors(authChannelInterceptor);
+        registration.interceptors(authChannelInterceptor, dmSubscriptionInterceptor);
     }
 }

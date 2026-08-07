@@ -13,4 +13,8 @@ public interface ChannelReadStateRepository extends JpaRepository<ChannelReadSta
 
     /** All read pointers for a user (one snapshot). */
     List<ChannelReadState> findByUserId(Long userId);
+
+    /** Derived bulk delete of every read pointer for a channel — used when a DM / channel is closed,
+     *  because {@code channel_read_states.channel_id} has no ON DELETE CASCADE under ddl-auto=update. */
+    long deleteByChannelId(Long channelId);
 }

@@ -3,11 +3,13 @@ package oak.server.service;
 import lombok.RequiredArgsConstructor;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
+import oak.server.entity.ChannelType;
 import oak.server.entity.Permission;
 import oak.server.entity.Permissions;
 import oak.server.entity.Role;
 import oak.server.entity.RoleKind;
 import oak.server.entity.User;
+import oak.server.repository.ChannelParticipantRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
@@ -44,6 +46,8 @@ public class AuthorizationService {
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final ChannelRoleOverrideRepository overrideRepository;
+    /** DM membership — the single authority for DM / group-DM access (the branch in {@link #hasInChannel}). */
+    private final ChannelParticipantRepository participantRepository;
 
     // --- lookups ---
 
@@ -107,6 +111,13 @@ public class AuthorizationService {
     public boolean hasInChannel(User user, Channel channel, Permission permission) {
         if (channel == null) {
             return hasServer(user, permission);
+        }
+        // DM / group-DM: membership is the only authority. A participant gets every capability (read,
+        // send, attach, mention); a non-participant gets nothing — even the instance OWNER. Placed
+        // before the ADMINISTRATOR short-circuit on purpose, so DMs stay private from admins. This
+        // single branch covers every existing call site (message read/send/attach, read-state, perms).
+        if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
+            return participantRepository.existsByChannelIdAndUserId(channel.getId(), user.getId());
         }
         long base = effectiveBase(user);
         if (Permissions.has(base, Permission.ADMINISTRATOR)) {

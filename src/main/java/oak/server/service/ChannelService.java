@@ -8,6 +8,8 @@ import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
+import oak.server.repository.ChannelParticipantRepository;
+import oak.server.repository.ChannelReadStateRepository;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.MessageRepository;
@@ -37,12 +39,17 @@ public class ChannelService {
     private final ChannelRepository channelRepository;
     private final MessageRepository messageRepository;
     private final ChannelRoleOverrideRepository channelRoleOverrideRepository;
+    private final ChannelParticipantRepository channelParticipantRepository;
+    private final ChannelReadStateRepository channelReadStateRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
 
     @Transactional(readOnly = true)
     public List<ChannelResponse> list() {
-        return channelRepository.findAllByOrderByIdAsc().stream()
+        // DM / group-DM channels are private — never appear in the public channel sidebar. Their access
+        // is membership-based (the DM branch in AuthorizationService.hasInChannel), surfaced separately
+        // via the DM-channel endpoints.
+        return channelRepository.findByTypeNotInOrderByIdAsc(List.of(ChannelType.DM, ChannelType.GROUP_DM)).stream()
                 .map(ChannelResponse::from)
                 .toList();
     }
@@ -81,11 +88,15 @@ public class ChannelService {
         auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
-        // The FKs messages.channel_id and channel_role_overrides.channel_id have no ON DELETE CASCADE
-        // (ddl-auto=update never adds cascade), so the children must go first or the channel DELETE
-        // fails with a FK violation.
+        // The FKs messages.channel_id, channel_role_overrides.channel_id, channel_participants.channel_id,
+        // and channel_read_states.channel_id have no ON DELETE CASCADE (ddl-auto=update never adds
+        // cascade), so the children must go first or the channel DELETE fails with a FK violation.
+        // participants / read-states are only present on DM channels, but cleaning them unconditionally
+        // is a cheap no-op for public channels and keeps the admin DELETE path safe on a DM channel.
         messageRepository.deleteByChannelId(channelId);
         channelRoleOverrideRepository.deleteByChannelId(channelId);
+        channelParticipantRepository.deleteByChannelId(channelId);
+        channelReadStateRepository.deleteByChannelId(channelId);
         channelRepository.delete(channel);
         messagingTemplate.convertAndSend(CHANNELS_DELETED_TOPIC, channelId);
     }

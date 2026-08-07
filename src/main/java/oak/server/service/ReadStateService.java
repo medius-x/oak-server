@@ -4,10 +4,13 @@ import lombok.RequiredArgsConstructor;
 import oak.server.dto.ChannelReadStateResponse;
 import oak.server.dto.MentionResponse;
 import oak.server.entity.Channel;
+import oak.server.entity.ChannelParticipant;
 import oak.server.entity.ChannelReadState;
+import oak.server.entity.ChannelType;
 import oak.server.entity.Message;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
+import oak.server.repository.ChannelParticipantRepository;
 import oak.server.repository.ChannelReadStateRepository;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.MessageRepository;
@@ -17,7 +20,9 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Per-(user, channel) read state: the {@code lastReadMessageId} pointer that backs unread/mention
@@ -38,6 +43,7 @@ public class ReadStateService {
     private final ChannelReadStateRepository readStateRepository;
     private final ChannelRepository channelRepository;
     private final MessageRepository messageRepository;
+    private final ChannelParticipantRepository participantRepository;
     private final AuthorizationService auth;
     private final MentionParser mentionParser;
 
@@ -89,6 +95,11 @@ public class ReadStateService {
     @Transactional
     public void seedInitialReadStates(User user) {
         for (Channel channel : channelRepository.findAllByOrderByIdAsc()) {
+            // A fresh member has no DM channels, but skip them defensively — DM read-state is created on
+            // demand (the participant accrues unread from their first message), never seeded here.
+            if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
+                continue;
+            }
             Long lastMessageId = messageRepository.findTopByChannelIdOrderByIdDesc(channel.getId())
                     .map(Message::getId).orElse(null);
             readStateRepository.save(new ChannelReadState(user, channel, lastMessageId));
@@ -96,10 +107,14 @@ public class ReadStateService {
     }
 
     /** Number of unread messages (freshest 200) that @mention {@code user}. Own messages are skipped
-     *  (you never @mention yourself into "unread"). */
+     *  (you never @mention yourself into "unread"). In a DM / group DM, a mention can only reach the
+     *  channel's participants, so the expanded id set is intersected with the participant roster — this
+     *  bounds {@code @everyone}/{@code @here}/{@code @role} to the conversation and keeps the count
+     *  correct if a future consumer routes mentions without the membership gate. */
     private long countMentionsOf(User user, Channel channel, long readFloor) {
         List<Message> unreadWindow = messageRepository
                 .findTop200ByChannelIdAndIdGreaterThanOrderByIdDesc(channel.getId(), readFloor);
+        Set<Long> participantIds = isDm(channel) ? participantIdsOf(channel) : null;
         long count = 0;
         for (Message message : unreadWindow) {
             if (message.getAuthor() == null
@@ -108,10 +123,29 @@ public class ReadStateService {
             }
             List<MentionResponse> mentions = mentionParser.parse(
                     message.getContent(), message.getAuthor(), channel);
-            if (mentionParser.expandToUserIds(mentions).contains(user.getId())) {
+            Set<Long> pinged = mentionParser.expandToUserIds(mentions);
+            if (participantIds != null) {
+                pinged.retainAll(participantIds);
+            }
+            if (pinged.contains(user.getId())) {
                 count++;
             }
         }
         return count;
+    }
+
+    private static boolean isDm(Channel channel) {
+        return channel != null
+                && (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM);
+    }
+
+    private Set<Long> participantIdsOf(Channel channel) {
+        Set<Long> ids = new HashSet<>();
+        for (ChannelParticipant participant : participantRepository.findByChannelId(channel.getId())) {
+            if (participant.getUser() != null && participant.getUser().getId() != null) {
+                ids.add(participant.getUser().getId());
+            }
+        }
+        return ids;
     }
 }
