@@ -145,6 +145,30 @@ public class AuthService {
         return issueTokens(stored.getUser(), stored.getFamilyId());
     }
 
+    /**
+     * Self-service password change: verifies the current password, stores a fresh BCrypt hash, revokes
+     * every refresh token of this user (so a password change logs out all other sessions), and issues
+     * a fresh access + refresh pair for THIS session (a new family) — the caller keeps working without
+     * a re-login. The access JWT is stateless and cannot be revoked, so other devices' access tokens
+     * stay valid up to their 8h expiry, but their now-revoked refresh dies on the next refresh attempt.
+     */
+    @Transactional
+    public AuthResponse changePassword(String username, String oldPassword, String newPassword) {
+        User user = userRepository.findByUsername(username)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        if (!passwordEncoder.matches(oldPassword, user.getPasswordHash())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Current password is incorrect");
+        }
+        if (newPassword.equals(oldPassword)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "New password must be different from the current one");
+        }
+        user.setPasswordHash(passwordEncoder.encode(newPassword));
+        userRepository.save(user);
+        // Revoke every session of this user — a password change invalidates all other devices.
+        refreshTokenRepository.findByUser(user).forEach(token -> token.setRevoked(true));
+        return issueTokens(user, newFamilyId());
+    }
+
     /** Issues a fresh access JWT + a new (persisted, hashed) refresh token for {@code user}. */
     private AuthResponse issueTokens(User user, String familyId) {
         String accessToken = tokenProvider.generateToken(user.getUsername());

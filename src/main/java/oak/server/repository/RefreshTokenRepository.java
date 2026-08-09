@@ -1,6 +1,7 @@
 package oak.server.repository;
 
 import oak.server.entity.RefreshToken;
+import oak.server.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 
@@ -18,6 +19,9 @@ public interface RefreshTokenRepository extends JpaRepository<RefreshToken, Long
 
     /** All tokens in a family — used to revoke the whole chain on reuse of a revoked token. */
     List<RefreshToken> findByFamilyId(String familyId);
+
+    /** All tokens belonging to a user — used to revoke every session on a password change. */
+    List<RefreshToken> findByUser(User user);
 
     /**
      * Deletes every token whose {@code expiresAt} is before {@code cutoff}. Purging by expiry

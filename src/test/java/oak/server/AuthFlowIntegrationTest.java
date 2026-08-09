@@ -233,6 +233,85 @@ class AuthFlowIntegrationTest {
                 "the live token survives the purge");
     }
 
+    @Test
+    void changePassword_correct_returnsNewTokens_andRevokesOldRefresh() throws Exception {
+        register("alice", "supersecret");
+        MvcResult loginResult = mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(loginBody("alice", "supersecret")))
+                .andExpect(status().isOk())
+                .andReturn();
+        String loginJson = loginResult.getResponse().getContentAsString();
+        String oldAccess = JsonPath.read(loginJson, "$.token");
+        String oldRefresh = JsonPath.read(loginJson, "$.refreshToken");
+
+        // correct old password -> 200 with a fresh access + refresh pair
+        MvcResult result = mockMvc.perform(post("/api/users/me/password")
+                        .header("Authorization", "Bearer " + oldAccess)
+                        .contentType(JSON)
+                        .content(changePasswordBody("supersecret", "newpassword123")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.token").isString())
+                .andExpect(jsonPath("$.refreshToken").isString())
+                .andReturn();
+        String newAccess = JsonPath.read(result.getResponse().getContentAsString(), "$.token");
+
+        // the new access token works on a protected endpoint
+        mockMvc.perform(get("/api/users/me").header("Authorization", "Bearer " + newAccess))
+                .andExpect(status().isOk());
+
+        // the new password now logs in; the old one no longer does
+        mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(loginBody("alice", "newpassword123")))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(loginBody("alice", "supersecret")))
+                .andExpect(status().isUnauthorized());
+
+        // the old refresh token was revoked (a password change logs out other sessions)
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON).content(refreshBody(oldRefresh)))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void changePassword_wrongOldPassword_returns400() throws Exception {
+        register("alice", "supersecret");
+        String token = login("alice", "supersecret");
+
+        mockMvc.perform(post("/api/users/me/password")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content(changePasswordBody("wrong-old-password", "newpassword123")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+    }
+
+    @Test
+    void changePassword_newEqualsOld_returns400() throws Exception {
+        register("alice", "supersecret");
+        String token = login("alice", "supersecret");
+
+        mockMvc.perform(post("/api/users/me/password")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content(changePasswordBody("supersecret", "supersecret")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+    }
+
+    @Test
+    void changePassword_shortNewPassword_returns400() throws Exception {
+        register("alice", "supersecret");
+        String token = login("alice", "supersecret");
+
+        // newPassword "short" fails @Size(min=8) bean validation -> 400
+        mockMvc.perform(post("/api/users/me/password")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content(changePasswordBody("supersecret", "short")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400));
+    }
+
     // --- helpers ---
 
     private void register(String username, String password) throws Exception {
@@ -293,5 +372,9 @@ class AuthFlowIntegrationTest {
 
     private static String refreshBody(String refreshToken) {
         return String.format("{\"refreshToken\":\"%s\"}", refreshToken);
+    }
+
+    private static String changePasswordBody(String oldPassword, String newPassword) {
+        return String.format("{\"oldPassword\":\"%s\",\"newPassword\":\"%s\"}", oldPassword, newPassword);
     }
 }

@@ -6,6 +6,8 @@ import oak.server.dto.AttachmentUploadRequest;
 import oak.server.dto.AttachmentUploadResponse;
 import oak.server.dto.AvatarKeysRequest;
 import oak.server.dto.AvatarOriginalResponse;
+import oak.server.dto.AuthResponse;
+import oak.server.dto.ChangePasswordRequest;
 import oak.server.dto.MyPermissions;
 import oak.server.dto.UserResponse;
 import oak.server.dto.UserSummary;
@@ -13,6 +15,7 @@ import oak.server.entity.Permissions;
 import oak.server.entity.User;
 import oak.server.repository.UserRepository;
 import oak.server.service.AttachmentUrlSigner;
+import oak.server.service.AuthService;
 import oak.server.service.AuthorizationService;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -44,6 +47,7 @@ public class UserController {
     private final AttachmentUrlSigner attachmentUrlSigner;
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
+    private final AuthService authService;
 
     /** STOMP topic a live user update (e.g. an avatar change) is pushed to: {@code /topic/users}. */
     public static final String USERS_TOPIC = "/topic/users";
@@ -75,6 +79,17 @@ public class UserController {
     public MyPermissions myPermissions(@AuthenticationPrincipal UserDetails principal) {
         User user = requireUser(principal);
         return new MyPermissions(Permissions.names(auth.effectiveBase(user)), auth.isOwner(user));
+    }
+
+    /**
+     * Self-service password change. Requires the current password (verified server-side); on success
+     * issues a fresh access + refresh pair for this session and revokes the refresh tokens of every
+     * other session. Returns the new pair so the client can rotate its tokens without a re-login.
+     */
+    @PostMapping("/me/password")
+    public AuthResponse changePassword(@AuthenticationPrincipal UserDetails principal,
+                                       @RequestBody @Valid ChangePasswordRequest request) {
+        return authService.changePassword(principal.getUsername(), request.oldPassword(), request.newPassword());
     }
 
     /**
