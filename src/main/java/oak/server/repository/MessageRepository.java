@@ -14,6 +14,10 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     /** Most recent messages first; the service reverses the page into chronological order. */
     Page<Message> findByChannelIdOrderByIdDesc(Long channelId, Pageable pageable);
 
+    /** One message scoped to its channel — a message id that lives in another channel 404s, so
+     *  {@code /api/channels/{otherChannel}/messages/{id}} cannot reach it (no cross-channel leak). */
+    Optional<Message> findByIdAndChannelId(Long id, Long channelId);
+
     /** Unread count for a channel relative to a read floor (the user's {@code lastReadMessageId};
      *  pass 0 to count everything when nothing has been read yet). */
     long countByChannelIdAndIdGreaterThan(Long channelId, Long id);

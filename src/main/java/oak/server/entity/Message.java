@@ -20,7 +20,8 @@ import java.time.Instant;
 /**
  * A chat message: belongs to a {@link Channel}, authored by a {@link User}. May carry an
  * attachment stored in MinIO (referenced by object key + display name) — a message has content,
- * an attachment, or both. Immutable for now (no edit/delete).
+ * an attachment, or both. Content is editable by the author ({@code editedAt} records the last
+ * edit; null = never edited); attachments are not editable.
  */
 @Entity
 @Table(name = "messages")
@@ -53,6 +54,12 @@ public class Message {
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
+
+    /** When the content was last edited; null = never edited. Set manually by
+     *  {@code MessageService.edit} only — deliberately NOT {@code @UpdateTimestamp}, which would
+     *  stamp every entity update (not just real edits) and expects a non-null value. */
+    @Column(name = "edited_at")
+    private Instant editedAt;
 
     public Message(Channel channel, User author, String content) {
         this.channel = channel;

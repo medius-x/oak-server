@@ -14,6 +14,13 @@ spring:
     username: ${POSTGRES_USER:oak}
     password: ${POSTGRES_PASSWORD:oakpass}
     driver-class-name: org.postgresql.Driver
+    # Wait up to 60 s for the first pool connection instead of failing the boot instantly when
+    # Postgres is still coming up (docker compose). On Windows the Docker port proxy accepts TCP
+    # without a live container, so the driver gets a misleading EOFException in the SSL handshake
+    # instead of "connection refused". Only initial pool creation retries; runtime failures still
+    # fail fast. Dev-only — the test profile (H2) is unaffected.
+    hikari:
+      initialization-fail-timeout: 60000
   jpa:
     # dev only — in prod use none + a migration tool (Flyway/Liquibase)
     hibernate:

@@ -3,12 +3,15 @@ package oak.server.controller;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.CreateMessageRequest;
+import oak.server.dto.EditMessageRequest;
 import oak.server.dto.MessageResponse;
 import oak.server.service.MessageService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -22,7 +25,8 @@ import java.util.List;
 /**
  * Messages within a channel. Creating a message is the REST write path (variant A);
  * real-time delivery to other clients arrives with the WebSocket roadmap item.
- * All endpoints require a valid JWT.
+ * Edit/delete are the same variant-A pattern: REST write, then a WS push on the
+ * channel's {@code .edited}/{@code .deleted} topics. All endpoints require a valid JWT.
  */
 @RestController
 @RequestMapping("/api/channels/{channelId}/messages")
@@ -44,5 +48,21 @@ public class MessageController {
                                   @RequestBody @Valid CreateMessageRequest request,
                                   @AuthenticationPrincipal UserDetails principal) {
         return messageService.create(channelId, request, principal.getUsername());
+    }
+
+    @PatchMapping("/{messageId}")
+    public MessageResponse edit(@PathVariable Long channelId,
+                                @PathVariable Long messageId,
+                                @RequestBody @Valid EditMessageRequest request,
+                                @AuthenticationPrincipal UserDetails principal) {
+        return messageService.edit(channelId, messageId, request, principal.getUsername());
+    }
+
+    @DeleteMapping("/{messageId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long channelId,
+                       @PathVariable Long messageId,
+                       @AuthenticationPrincipal UserDetails principal) {
+        messageService.delete(channelId, messageId, principal.getUsername());
     }
 }

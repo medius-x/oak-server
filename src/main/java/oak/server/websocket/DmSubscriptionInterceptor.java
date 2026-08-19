@@ -29,12 +29,18 @@ import java.util.regex.Pattern;
  * untouched. The authenticated principal (set on {@code CONNECT} by {@code AuthChannelInterceptor}) is
  * a bare username string; membership is therefore resolved by username via
  * {@link ChannelParticipantRepository#isParticipant}.
+ *
+ * <p>The pattern covers the channel's whole topic family — the base message topic plus the
+ * {@code .edited} and {@code .deleted} variants pushed by {@code MessageService}. A new
+ * per-channel topic MUST be added here as well, or it is world-readable by id enumeration
+ * (the simple broker does not authorize SUBSCRIBE frames).
  */
 @Component
 @RequiredArgsConstructor
 public class DmSubscriptionInterceptor implements ChannelInterceptor {
 
-    private static final Pattern CHANNEL_TOPIC = Pattern.compile("^/topic/channel\\.(\\d+)$");
+    private static final Pattern CHANNEL_TOPIC =
+            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted)?$");
 
     private final ChannelRepository channelRepository;
     private final ChannelParticipantRepository participantRepository;

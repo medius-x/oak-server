@@ -9,6 +9,8 @@ import java.util.List;
  * by {@code MessageService}); otherwise both attachment fields are null. Built by the service so
  * the URL is re-signed on every fetch (never ages out). {@code mentions} is the parsed list of
  * {@code @}-mentions (never null, empty when none) — see {@link MentionResponse}.
+ * {@code editedAt} is null until the message is edited (the client renders an "(edited)" marker).
+ * Field order is wire-stable — new fields append at the end only, paired with the client mirror.
  */
 public record MessageResponse(
         Long id,
@@ -19,6 +21,7 @@ public record MessageResponse(
         Instant createdAt,
         String attachmentFileName,
         String attachmentUrl,
-        List<MentionResponse> mentions
+        List<MentionResponse> mentions,
+        Instant editedAt
 ) {
 }
