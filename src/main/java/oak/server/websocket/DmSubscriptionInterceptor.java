@@ -31,16 +31,16 @@ import java.util.regex.Pattern;
  * {@link ChannelParticipantRepository#isParticipant}.
  *
  * <p>The pattern covers the channel's whole topic family — the base message topic plus the
- * {@code .edited} and {@code .deleted} variants pushed by {@code MessageService}. A new
- * per-channel topic MUST be added here as well, or it is world-readable by id enumeration
- * (the simple broker does not authorize SUBSCRIBE frames).
+ * {@code .edited}, {@code .deleted} and {@code .reactions} variants pushed by
+ * {@code MessageService}. A new per-channel topic MUST be added here as well, or it is
+ * world-readable by id enumeration (the simple broker does not authorize SUBSCRIBE frames).
  */
 @Component
 @RequiredArgsConstructor
 public class DmSubscriptionInterceptor implements ChannelInterceptor {
 
     private static final Pattern CHANNEL_TOPIC =
-            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted)?$");
+            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted|\\.reactions)?$");
 
     private final ChannelRepository channelRepository;
     private final ChannelParticipantRepository participantRepository;

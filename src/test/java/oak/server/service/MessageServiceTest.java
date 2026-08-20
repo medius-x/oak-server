@@ -6,6 +6,7 @@ import oak.server.dto.MessageResponse;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
 import oak.server.entity.Message;
+import oak.server.entity.MessageReaction;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.MessageRepository;
@@ -51,6 +52,8 @@ class MessageServiceTest {
     private AuthorizationService auth;
     @Mock
     private MentionParser mentionParser;
+    @Mock
+    private oak.server.repository.MessageReactionRepository reactionRepository;
 
     @InjectMocks
     private MessageService messageService;
@@ -130,6 +133,7 @@ class MessageServiceTest {
         when(auth.requireUser("alice")).thenReturn(author);
         when(messageRepository.save(any(Message.class))).thenReturn(existing);
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.edit(
                 channelId, messageId, new EditMessageRequest("hello (fixed)"), "alice");
@@ -138,6 +142,7 @@ class MessageServiceTest {
         assertEquals("hello (fixed)", existing.getContent());
         assertNotNull(existing.getEditedAt());
         assertNotNull(response.editedAt());
+        assertEquals(java.util.List.of(), response.reactions());
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.EDITED_TOPIC_SUFFIX),
                 any(MessageResponse.class));
@@ -160,6 +165,8 @@ class MessageServiceTest {
 
         messageService.delete(channelId, messageId, "alice");
 
+        // Reaction rows must be cleared before the message delete (no ON DELETE CASCADE).
+        verify(reactionRepository).deleteByMessageId(messageId);
         verify(messageRepository).delete(existing);
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.DELETED_TOPIC_SUFFIX),
@@ -189,5 +196,110 @@ class MessageServiceTest {
                 messageService.edit(channelId, messageId, new EditMessageRequest("bob was here"), "bob"));
         assertEquals(HttpStatus.FORBIDDEN, thrown.getStatusCode());
         verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    @Test
+    void addReactionPushesSnapshotToReactionsTopic() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+        MessageReaction row = new MessageReaction(existing, actor, "thumbsup");
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(reactionRepository.existsByMessageIdAndUserIdAndReaction(messageId, 5L, "thumbsup"))
+                .thenReturn(false);
+        when(reactionRepository.save(any(MessageReaction.class))).thenReturn(row);
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of(row));
+
+        java.util.List<oak.server.dto.ReactionSummary> snapshot =
+                messageService.addReaction(channelId, messageId, "thumbsup", "alice");
+
+        assertEquals(1, snapshot.size());
+        assertEquals("thumbsup", snapshot.get(0).reaction());
+        assertEquals(1, snapshot.get(0).count());
+        assertEquals(java.util.List.of(5L), snapshot.get(0).userIds());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.REACTIONS_TOPIC_SUFFIX),
+                any(oak.server.dto.ReactionEvent.class));
+    }
+
+    @Test
+    void addReactionUnknownSlugRejectedBeforeAnyWrite() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.addReaction(channelId, messageId, "elephant", "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(reactionRepository, org.mockito.Mockito.never())
+                .save(any(oak.server.entity.MessageReaction.class));
+        verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    @Test
+    void addReactionRequiresAddReactionsInChannel() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, new User("bob", "hash"), "hello");
+        existing.setId(messageId);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        org.mockito.Mockito.doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "denied"))
+                .when(auth).requireInChannel(actor, channel, oak.server.entity.Permission.ADD_REACTIONS);
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.addReaction(channelId, messageId, "thumbsup", "alice"));
+        assertEquals(HttpStatus.FORBIDDEN, thrown.getStatusCode());
+        verify(reactionRepository, org.mockito.Mockito.never())
+                .save(any(oak.server.entity.MessageReaction.class));
+    }
+
+    @Test
+    void removeReactionMissingRowStillBroadcastsSnapshot() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(reactionRepository.deleteByMessageIdAndUserIdAndReaction(messageId, 5L, "thumbsup")).thenReturn(0L);
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
+
+        java.util.List<oak.server.dto.ReactionSummary> snapshot =
+                messageService.removeReaction(channelId, messageId, "thumbsup", "alice");
+
+        assertEquals(java.util.List.of(), snapshot);
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.REACTIONS_TOPIC_SUFFIX),
+                any(oak.server.dto.ReactionEvent.class));
     }
 }

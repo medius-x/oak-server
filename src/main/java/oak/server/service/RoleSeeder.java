@@ -47,6 +47,7 @@ public class RoleSeeder implements ApplicationRunner {
             Permission.READ_MESSAGE_HISTORY.bit,
             Permission.ATTACH_FILES.bit,
             Permission.EMBED_LINKS.bit,
+            Permission.ADD_REACTIONS.bit,
             Permission.CONNECT.bit,
             Permission.SPEAK.bit,
             Permission.USE_VAD.bit);

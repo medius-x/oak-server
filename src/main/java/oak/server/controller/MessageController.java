@@ -5,6 +5,7 @@ import lombok.RequiredArgsConstructor;
 import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.EditMessageRequest;
 import oak.server.dto.MessageResponse;
+import oak.server.dto.ReactionSummary;
 import oak.server.service.MessageService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -14,6 +15,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -64,5 +66,26 @@ public class MessageController {
                        @PathVariable Long messageId,
                        @AuthenticationPrincipal UserDetails principal) {
         messageService.delete(channelId, messageId, principal.getUsername());
+    }
+
+    /** Adds the caller's reaction (idempotent). 200 with the message's updated reaction
+     *  snapshot — the client applies this answer directly and the WS echo lands idempotently
+     *  on top. */
+    @PutMapping("/{messageId}/reactions/{slug}")
+    public List<ReactionSummary> addReaction(@PathVariable Long channelId,
+                                             @PathVariable Long messageId,
+                                             @PathVariable String slug,
+                                             @AuthenticationPrincipal UserDetails principal) {
+        return messageService.addReaction(channelId, messageId, slug, principal.getUsername());
+    }
+
+    /** Removes the caller's reaction (idempotent). Same 200-with-snapshot contract as
+     *  {@link #addReaction}. */
+    @DeleteMapping("/{messageId}/reactions/{slug}")
+    public List<ReactionSummary> removeReaction(@PathVariable Long channelId,
+                                                @PathVariable Long messageId,
+                                                @PathVariable String slug,
+                                                @AuthenticationPrincipal UserDetails principal) {
+        return messageService.removeReaction(channelId, messageId, slug, principal.getUsername());
     }
 }

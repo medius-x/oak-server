@@ -10,6 +10,9 @@ import java.util.List;
  * the URL is re-signed on every fetch (never ages out). {@code mentions} is the parsed list of
  * {@code @}-mentions (never null, empty when none) — see {@link MentionResponse}.
  * {@code editedAt} is null until the message is edited (the client renders an "(edited)" marker).
+ * {@code reactions} is the aggregated emoji state (never null, empty when none) — see
+ * {@link ReactionSummary}; an edit push MUST carry the current snapshot or clients would wipe
+ * the rendered chips when applying the edited message.
  * Field order is wire-stable — new fields append at the end only, paired with the client mirror.
  */
 public record MessageResponse(
@@ -22,6 +25,7 @@ public record MessageResponse(
         String attachmentFileName,
         String attachmentUrl,
         List<MentionResponse> mentions,
-        Instant editedAt
+        Instant editedAt,
+        List<ReactionSummary> reactions
 ) {
 }
