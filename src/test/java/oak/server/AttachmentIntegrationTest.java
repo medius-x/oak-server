@@ -53,6 +53,7 @@ class AttachmentIntegrationTest {
                         .content("{\"content\":\"\",\"attachments\":[{\"key\":\"some-key\",\"fileName\":\"pic.png\"}]}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.attachments[0].fileName").value("pic.png"))
+                .andExpect(jsonPath("$.attachments[0].key").value("some-key"))
                 .andExpect(jsonPath("$.authorUsername").value("alice"));
 
         // a message with neither content nor attachments -> 400

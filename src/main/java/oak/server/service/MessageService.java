@@ -173,10 +173,15 @@ public class MessageService {
                 .toList();
     }
 
-    /** Replaces a message's text. Only the author (a server channel additionally allows
-     *  MANAGE_MESSAGES holders — see {@link #requireCanModify}). Attachments are not editable:
-     *  an attachment-only message simply gains text. {@code editedAt} starts stamping here.
-     *  Broadcast mirrors {@link #create}: REST write → WS push on the {@code .edited} topic. */
+    /** Replaces a message's text and/or prunes its attachment list (remove-only, Discord-style:
+     *  {@code request.attachments()} must be a SUBSET of the currently attached keys). Only the
+     *  author (a server channel additionally allows MANAGE_MESSAGES holders — see
+     *  {@link #requireCanModify}). The content-or-attachment rule is enforced on the RESULTING
+     *  message (blank text is legal while an attachment remains — removing the last attachment
+     *  of an attachment-only message while clearing the text is not). {@code editedAt} starts
+     *  stamping here. Broadcast mirrors {@link #create}: REST write → WS push on the
+     *  {@code .edited} topic. The MinIO objects of removed attachments are NEVER deleted —
+     *  intra-instance forwards share the keys. */
     @Transactional
     public MessageResponse edit(Long channelId, Long messageId, EditMessageRequest request, String actorUsername) {
         Channel channel = channelRepository.findById(channelId)
@@ -185,7 +190,37 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
         User actor = auth.requireUser(actorUsername);
         requireCanModify(actor, channel, message);
+        // Attachment rewrite first, VALIDATED before any mutation (a 400 must leave the row and
+        // editedAt untouched): null = untouched; a list = exactly that list, each key one of
+        // the currently attached ones, no duplicates. A stored row never exceeds the cap, so a
+        // subset never does either; create's sanitized() is deliberately NOT reused — its
+        // blank-key error message would mislead here (a blank key is simply not a subset).
+        List<AttachmentRef> currentAttachments = attachmentListCodec.read(message.getAttachments());
+        List<AttachmentRef> resultingAttachments = currentAttachments;
+        if (request.attachments() != null) {
+            Set<String> currentKeys = currentAttachments.stream()
+                    .map(AttachmentRef::key).filter(Objects::nonNull).collect(Collectors.toSet());
+            Set<String> seenKeys = new java.util.HashSet<>();
+            for (AttachmentRef ref : request.attachments()) {
+                if (ref == null || ref.key() == null || !currentKeys.contains(ref.key())) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Unknown attachment: " + (ref == null ? null : ref.key()));
+                }
+                if (!seenKeys.add(ref.key())) {
+                    throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                            "Duplicate attachment: " + ref.key());
+                }
+            }
+            resultingAttachments = List.copyOf(request.attachments());
+        }
+        if (isBlank(request.content()) && resultingAttachments.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Message must have content or an attachment");
+        }
         message.setContent(request.content());
+        if (request.attachments() != null) {
+            message.setAttachments(attachmentListCodec.write(resultingAttachments));
+        }
         message.setEditedAt(Instant.now());
         // The .edited push carries the FULL message view — including the current reaction
         // snapshot, or every client applying the edit would wipe its rendered chips. Same for
@@ -422,7 +457,8 @@ public class MessageService {
     private MessageResponse toResponse(Message message, List<ReactionSummary> reactions,
                                        Map<Long, Message> replyOriginals) {
         List<AttachmentResponse> attachments = attachmentListCodec.read(message.getAttachments()).stream()
-                .map(ref -> new AttachmentResponse(ref.fileName(), attachmentUrlSigner.presignedGetUrl(ref.key())))
+                .map(ref -> new AttachmentResponse(ref.fileName(),
+                        attachmentUrlSigner.presignedGetUrl(ref.key()), ref.key()))
                 .toList();
         ReplyInfo reply = replyInfo(message, replyOriginals, MAX_QUOTE_DEPTH);
         List<MentionResponse> mentions = withReplyMention(message, mentionParser.parse(

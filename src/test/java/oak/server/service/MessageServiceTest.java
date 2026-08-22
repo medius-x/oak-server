@@ -329,7 +329,7 @@ class MessageServiceTest {
         when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.edit(
-                channelId, messageId, new EditMessageRequest("hello (fixed)"), "alice");
+                channelId, messageId, new EditMessageRequest("hello (fixed)", null), "alice");
 
         assertEquals("hello (fixed)", response.content());
         assertEquals("hello (fixed)", existing.getContent());
@@ -339,6 +339,121 @@ class MessageServiceTest {
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.EDITED_TOPIC_SUFFIX),
                 any(MessageResponse.class));
+    }
+
+    @Test
+    void editReplacesAttachmentsWithRequestedSubset() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        AttachmentRef doc = new AttachmentRef("attachments/abc/doc.pdf", "doc.pdf");
+        Message existing = new Message(channel, author, "two files");
+        existing.setId(messageId);
+        existing.setAttachments(attachmentListCodec.write(java.util.List.of(pic, doc)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(author);
+        when(messageRepository.save(any(Message.class))).thenReturn(existing);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.edit(channelId, messageId,
+                new EditMessageRequest("one file now", java.util.List.of(doc)), "alice");
+
+        // The column now holds exactly the requested subset; the response carries the key.
+        java.util.List<AttachmentRef> stored = attachmentListCodec.read(existing.getAttachments());
+        assertEquals(1, stored.size());
+        assertEquals("attachments/abc/doc.pdf", stored.get(0).key());
+        assertEquals(1, response.attachments().size());
+        assertEquals("doc.pdf", response.attachments().get(0).fileName());
+        assertEquals("attachments/abc/doc.pdf", response.attachments().get(0).key());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.EDITED_TOPIC_SUFFIX),
+                any(MessageResponse.class));
+    }
+
+    @Test
+    void editRejectsForeignAttachmentKey() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        Message existing = new Message(channel, author, "one file");
+        existing.setId(messageId);
+        existing.setAttachments(attachmentListCodec.write(java.util.List.of(pic)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(author);
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.edit(channelId, messageId,
+                        new EditMessageRequest("edit",
+                                java.util.List.of(new AttachmentRef("attachments/zzz/foreign.png", "foreign.png"))),
+                        "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        // Validation runs BEFORE any mutation — the row and the push are untouched.
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+        verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    @Test
+    void editRejectsBlankContentWhenNoAttachmentsRemain() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        Message existing = new Message(channel, author, null);   // attachment-only
+        existing.setId(messageId);
+        existing.setAttachments(attachmentListCodec.write(java.util.List.of(pic)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(author);
+
+        // Stripping the last attachment while clearing the text would leave an empty message.
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.edit(channelId, messageId, new EditMessageRequest("   ", java.util.List.of()), "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+    }
+
+    @Test
+    void editNullAttachmentsListLeavesAttachmentsUntouched() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        Message existing = new Message(channel, author, "keep files");
+        existing.setId(messageId);
+        existing.setAttachments(attachmentListCodec.write(java.util.List.of(pic)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(author);
+        when(messageRepository.save(any(Message.class))).thenReturn(existing);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.edit(channelId, messageId,
+                new EditMessageRequest("text only edit", null), "alice");
+
+        assertEquals(1, response.attachments().size());
+        assertEquals(1, attachmentListCodec.read(existing.getAttachments()).size());
     }
 
     @Test
@@ -386,7 +501,7 @@ class MessageServiceTest {
         when(auth.requireUser("bob")).thenReturn(peer);
 
         ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
-                messageService.edit(channelId, messageId, new EditMessageRequest("bob was here"), "bob"));
+                messageService.edit(channelId, messageId, new EditMessageRequest("bob was here", null), "bob"));
         assertEquals(HttpStatus.FORBIDDEN, thrown.getStatusCode());
         verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
     }

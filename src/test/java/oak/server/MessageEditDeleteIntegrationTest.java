@@ -65,6 +65,61 @@ class MessageEditDeleteIntegrationTest {
     }
 
     @Test
+    void editRemovesAttachmentsSubsetRejectsForeignAndEmpty() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessageWithAttachments(aliceToken, channelId, "pics",
+                java.util.List.of("att/a", "att/b"));
+
+        // remove "att/a" — ONE PATCH carrying the surviving subset; the response carries the key
+        mockMvc.perform(patch(messageUrl(channelId, messageId))
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"one pic now\",\"attachments\":[{\"key\":\"att/b\",\"fileName\":\"b.png\"}]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content").value("one pic now"))
+                .andExpect(jsonPath("$.editedAt").exists())
+                .andExpect(jsonPath("$.attachments.length()").value(1))
+                .andExpect(jsonPath("$.attachments[0].key").value("att/b"))
+                .andExpect(jsonPath("$.attachments[0].fileName").value("b.png"));
+
+        // history reflects the removal
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].attachments.length()").value(1))
+                .andExpect(jsonPath("$[0].attachments[0].key").value("att/b"));
+
+        // a foreign key (not currently attached) -> 400
+        mockMvc.perform(patch(messageUrl(channelId, messageId))
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"x\",\"attachments\":[{\"key\":\"att/zzz\",\"fileName\":\"z.png\"}]}"))
+                .andExpect(status().isBadRequest());
+        // a duplicated key -> 400
+        mockMvc.perform(patch(messageUrl(channelId, messageId))
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"x\",\"attachments\":[{\"key\":\"att/b\",\"fileName\":\"b.png\"},"
+                                + "{\"key\":\"att/b\",\"fileName\":\"b.png\"}]}"))
+                .andExpect(status().isBadRequest());
+        // stripping the LAST attachment while blanking the text -> 400 (the resulting message
+        // would be empty)
+        mockMvc.perform(patch(messageUrl(channelId, messageId))
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"   \",\"attachments\":[]}"))
+                .andExpect(status().isBadRequest());
+        // a PATCH without the attachments field leaves them untouched
+        mockMvc.perform(patch(messageUrl(channelId, messageId))
+                        .header("Authorization", "Bearer " + aliceToken)
+                        .contentType(JSON)
+                        .content("{\"content\":\"one pic again\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.attachments.length()").value(1));
+    }
+
+    @Test
     void editOthersMessage_requiresManageMessages() throws Exception {
         String ownerToken = registerAndLogin("alice", "supersecret");
         register("bob", "supersecret");
@@ -106,12 +161,13 @@ class MessageEditDeleteIntegrationTest {
         Long channelId = createChannel(aliceToken, "general", "TEXT");
         Long messageId = postMessage(aliceToken, channelId, "hello");
 
-        // blank content -> 400 (bean validation)
+        // blank content on a text-only message -> 400 (the service's content-or-attachment
+        // rule — the bean-level @NotBlank was relaxed for attachment-only edits)
         mockMvc.perform(patch(messageUrl(channelId, messageId))
                         .header("Authorization", "Bearer " + aliceToken)
                         .contentType(JSON).content("{\"content\":\"   \"}"))
                 .andExpect(status().isBadRequest());
-        // empty body -> 400
+        // empty body -> the resulting message would have neither text nor attachments -> 400
         mockMvc.perform(patch(messageUrl(channelId, messageId))
                         .header("Authorization", "Bearer " + aliceToken)
                         .contentType(JSON).content("{}"))
@@ -263,6 +319,26 @@ class MessageEditDeleteIntegrationTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
                         .content(String.format("{\"content\":\"%s\"}", content)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return ((Number) JsonPath.read(result.getResponse().getContentAsString(), "$.id")).longValue();
+    }
+
+    /** Posts a message carrying attachment refs (arbitrary non-blank keys — the test signer is a
+     *  noop, only the key matters). */
+    private Long postMessageWithAttachments(String token, Long channelId, String content,
+                                            java.util.List<String> keys) throws Exception {
+        StringBuilder refs = new StringBuilder();
+        for (int keyIndex = 0; keyIndex < keys.size(); keyIndex++) {
+            if (keyIndex > 0) {
+                refs.append(',');
+            }
+            refs.append(String.format("{\"key\":\"%s\",\"fileName\":\"%d.png\"}", keys.get(keyIndex), keyIndex));
+        }
+        MvcResult result = mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content(String.format("{\"content\":\"%s\",\"attachments\":[%s]}", content, refs)))
                 .andExpect(status().isCreated())
                 .andReturn();
         return ((Number) JsonPath.read(result.getResponse().getContentAsString(), "$.id")).longValue();
