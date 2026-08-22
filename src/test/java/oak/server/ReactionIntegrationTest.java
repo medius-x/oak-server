@@ -217,7 +217,7 @@ class ReactionIntegrationTest {
         String aliceToken = registerAndLogin("alice", "supersecret");
         Long channelId = createChannel(aliceToken, "general", "TEXT");
         Long messageId = postMessage(aliceToken, channelId, "to be removed");
-        mockMvc.perform(put(reactionUrl(channelId, messageId, "point"))
+        mockMvc.perform(put(reactionUrl(channelId, messageId, "thumbsdown"))
                         .header("Authorization", "Bearer " + aliceToken))
                 .andExpect(status().isOk());
 

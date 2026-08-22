@@ -61,11 +61,11 @@ public class MessageService {
 
     /** The full emoji catalog clients may react with, as URL/database-safe slugs (never glyphs).
      *  Any other slug is rejected with 400; the client mirrors this list with slug→glyph
-     *  mapping for rendering. The set mirrors the user's reference picker: 💯 👍 👎 ❤ 👉 👀 😢
-     *  😄 ✅ ❌. */
+     *  mapping for rendering. The set mirrors the user's reference picker: 💯 👍 👎 ❤ 👀 😢
+     *  😄 🤦 ✅ ❌ (facepalm right before the check; the pointing finger left the set). */
     static final Set<String> REACTION_SLUGS = Set.of(
-            "hundred", "thumbsup", "thumbsdown", "heart", "point", "eyes", "cry", "smile",
-            "check", "cross");
+            "hundred", "thumbsup", "thumbsdown", "heart", "eyes", "cry", "smile",
+            "facepalm", "check", "cross");
 
     private static final int DEFAULT_LIMIT = 50;
     private static final int MAX_LIMIT = 200;
