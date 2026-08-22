@@ -63,6 +63,7 @@ class ReplyForwardIntegrationTest {
                 .andExpect(jsonPath("$.reply.authorUsername").value("bob"))
                 .andExpect(jsonPath("$.reply.preview").value("the original words"))
                 .andExpect(jsonPath("$.reply.deleted").value(false))
+                .andExpect(jsonPath("$.reply.forward").doesNotExist())   // a plain original quotes with no origin
                 .andReturn();
         // The reply ping is a USER mention of the original author, span-less (offsets -1).
         assertEquals(1, (int) JsonPath.read(result.getResponse().getContentAsString(), "$.mentions.length()"));
@@ -76,6 +77,36 @@ class ReplyForwardIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[1].reply.messageId").value(originalId.intValue()))
                 .andExpect(jsonPath("$[0].reply").doesNotExist());
+    }
+
+    @Test
+    void reply_toForward_carriesTheForwardOriginInItsQuote() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long sourceChannelId = createChannel(aliceToken, "source", "TEXT");
+        Long targetChannelId = createChannel(aliceToken, "target", "TEXT");
+        Long sourceId = postMessage(bobToken, sourceChannelId, "the forwarded words");
+
+        // Alice forwards bob's message into "target" (intra: canonical, trusted origin).
+        MvcResult forwardResult = mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages/forward")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"sourceMessageId\":" + sourceId + "}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+        Long forwardId = ((Number) JsonPath.read(forwardResult.getResponse().getContentAsString(),
+                "$.id")).longValue();
+
+        // Bob replies to the FORWARD: the quote's author is the FORWARDER (alice) and it carries
+        // the forward origin — without it the quote would read as replying to bob's text.
+        mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages")
+                        .header("Authorization", "Bearer " + bobToken).contentType(JSON)
+                        .content("{\"content\":\"replying to the forward\",\"replyToId\":" + forwardId + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.reply.authorUsername").value("alice"))
+                .andExpect(jsonPath("$.reply.preview").value("the forwarded words"))
+                .andExpect(jsonPath("$.reply.forward.serverName").value("OAK Server"))
+                .andExpect(jsonPath("$.reply.forward.channelName").value("source"))
+                .andExpect(jsonPath("$.reply.forward.trusted").value(true));
     }
 
     @Test

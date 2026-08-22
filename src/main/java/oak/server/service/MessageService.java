@@ -435,7 +435,9 @@ public class MessageService {
 
     /** The message's reply quote: null when it is not a reply; {@code deleted=true} with null
      *  fields when the original is gone (dangling id, no FK); otherwise the LIVE original's
-     *  snapshot — edits to the original show up in quotes on every re-fetch. */
+     *  snapshot — edits to the original show up in quotes on every re-fetch. A replied-to
+     *  forward carries its origin snapshot ({@link #forwardInfo}) so the quote shows WHO was
+     *  replied to (the forwarder) AND that the message was forwarded, not just its content. */
     private static ReplyInfo replyInfo(Message message, Map<Long, Message> replyOriginals) {
         Long repliedToId = message.getRepliedToId();
         if (repliedToId == null) {
@@ -443,7 +445,7 @@ public class MessageService {
         }
         Message original = replyOriginals.get(repliedToId);
         if (original == null) {
-            return new ReplyInfo(repliedToId, null, null, null, null, true);
+            return new ReplyInfo(repliedToId, null, null, null, null, true, null);
         }
         return new ReplyInfo(
                 repliedToId,
@@ -451,7 +453,8 @@ public class MessageService {
                 original.getAuthor().getUsername(),
                 previewOf(original),
                 original.getCreatedAt(),
-                false);
+                false,
+                forwardInfo(original));
     }
 
     /** One-line quote preview of the original: newlines flatten to spaces, capped at

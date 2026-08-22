@@ -12,6 +12,11 @@ import java.time.Instant;
  *
  * <p>{@code preview}: the original's content flattened to one line and capped (100 chars +
  * "…"); an attachment-only original falls back to its file name.
+ *
+ * <p>{@code forward}: the original's forward origin when the replied-to message is itself a
+ * forward (else null). The quote's author is the FORWARDER (the message's author), and without
+ * this snapshot the client's quote would read as if the user were replying to the ORIGINAL's
+ * author — the forwarded-ness must survive into the quote.
  */
 public record ReplyInfo(
         Long messageId,
@@ -19,6 +24,7 @@ public record ReplyInfo(
         String authorUsername,
         String preview,
         Instant createdAt,
-        boolean deleted
+        boolean deleted,
+        ForwardInfo forward
 ) {
 }
