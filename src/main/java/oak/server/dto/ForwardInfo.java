@@ -11,6 +11,11 @@ import java.time.Instant;
  * <p>{@code trusted} is the anti-spoofing marker: true only when the SERVER derived the origin
  * itself (intra-instance forward); false for a client-supplied cross-instance snapshot, which this
  * instance cannot verify (no federation protocol). Clients render "unverified" on such cards.
+ *
+ * <p>{@code reply}: a snapshot of the source's quote tree, present when a REPLY was forwarded —
+ * the frozen quote the source carried at forward time (the source may be edited or even deleted
+ * afterwards; the snapshot stays). Cross-instance forwards receive this tree from the client
+ * (same trust model as every other mode-b field). Null when the source was not a reply.
  */
 public record ForwardInfo(
         String serverName,
@@ -18,6 +23,7 @@ public record ForwardInfo(
         Long authorId,
         String authorUsername,
         Instant createdAt,
-        boolean trusted
+        boolean trusted,
+        ReplyInfo reply
 ) {
 }

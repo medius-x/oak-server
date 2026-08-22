@@ -35,6 +35,7 @@ public record ForwardMessageRequest(
         @Size(max = 100) String originChannel,
         Long originAuthorId,
         @Size(max = 50) String originAuthorName,
-        Instant originCreatedAt
+        Instant originCreatedAt,
+        ReplyInfo originReply
 ) {
 }

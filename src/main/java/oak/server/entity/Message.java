@@ -102,6 +102,15 @@ public class Message {
     @Column(name = "forward_trusted")
     private Boolean forwardTrusted;
 
+    /** The source's quote tree (a {@code ReplyInfo} JSON document) frozen at forward time, set
+     *  only when a REPLY was forwarded — the nested cards a forwarded reply must keep rendering.
+     *  A SNAPSHOT like the other forward_* columns: edits/deletion of the source's own original
+     *  never propagate into it. The project's first JSON column (see NestedReplyCodec for the
+     *  lenient read/write discipline); nullable TEXT, so {@code ddl-auto=update} adds it safely
+     *  to a populated table. */
+    @Column(name = "forward_nested_reply", columnDefinition = "text")
+    private String forwardNestedReply;
+
     public Message(Channel channel, User author, String content) {
         this.channel = channel;
         this.author = author;

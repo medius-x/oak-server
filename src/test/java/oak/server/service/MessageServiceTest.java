@@ -64,6 +64,8 @@ class MessageServiceTest {
     private oak.server.repository.MessageReactionRepository reactionRepository;
     @Mock
     private ServerProfileRepository serverProfileRepository;
+    @Mock
+    private NestedReplyCodec nestedReplyCodec;
 
     @InjectMocks
     private MessageService messageService;
@@ -117,6 +119,7 @@ class MessageServiceTest {
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
         when(messageRepository.findByIdAndChannelId(90L, channelId)).thenReturn(Optional.of(original));
         when(messageRepository.save(any(Message.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(messageRepository.findAllById(any())).thenReturn(java.util.List.of(original));
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId,
@@ -175,6 +178,7 @@ class MessageServiceTest {
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
         when(messageRepository.findByIdAndChannelId(90L, channelId)).thenReturn(Optional.of(original));
         when(messageRepository.save(any(Message.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(messageRepository.findAllById(any())).thenReturn(java.util.List.of(original));
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId,
@@ -200,6 +204,7 @@ class MessageServiceTest {
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
         when(messageRepository.findByIdAndChannelId(90L, channelId)).thenReturn(Optional.of(original));
         when(messageRepository.save(any(Message.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(messageRepository.findAllById(any())).thenReturn(java.util.List.of(original));
         // The content already carries "@bob" — the parser resolved it to a USER mention with a span.
         when(mentionParser.parse(any(), any(), any()))
                 .thenReturn(java.util.List.of(new MentionResponse("USER", 6L, "bob", 0, 4)));
@@ -456,7 +461,7 @@ class MessageServiceTest {
 
         MessageResponse response = messageService.forward(targetId,
                 new ForwardMessageRequest(sourceId, "client content ignored", null, null,
-                        "Fake Server", "fake-channel", 99L, "faker", null),
+                        "Fake Server", "fake-channel", 99L, "faker", null, null),
                 "alice");
 
         // Payload copied from the source, not from the client-supplied fields.
@@ -494,7 +499,7 @@ class MessageServiceTest {
         MessageResponse response = messageService.forward(targetId,
                 new ForwardMessageRequest(null, "cross-instance text", null, null,
                         "Other Server", "their-channel", 42L, "carol",
-                        java.time.Instant.parse("2026-02-02T12:00:00Z")),
+                        java.time.Instant.parse("2026-02-02T12:00:00Z"), null),
                 "alice");
 
         assertEquals("cross-instance text", response.content());
@@ -520,7 +525,7 @@ class MessageServiceTest {
 
         ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
                 messageService.forward(targetId,
-                        new ForwardMessageRequest(90L, "text", null, null, null, null, null, null, null),
+                        new ForwardMessageRequest(90L, "text", null, null, null, null, null, null, null, null),
                         "alice"));
         assertEquals(HttpStatus.FORBIDDEN, thrown.getStatusCode());
         verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));

@@ -283,6 +283,160 @@ class ReplyForwardIntegrationTest {
         assertTrue(ids.stream().noneMatch(id -> id.longValue() == third.longValue()));
     }
 
+    @Test
+    void reply_chainQuotesTwoNestedLevels() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long firstId = postMessage(aliceToken, channelId, "the root words");
+        Long secondId = postMessage(bobToken, channelId, "middle answer", firstId);
+        postMessage(aliceToken, channelId, "outer answer", secondId);
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[2].reply.authorUsername").value("bob"))
+                .andExpect(jsonPath("$[2].reply.preview").value("middle answer"))
+                .andExpect(jsonPath("$[2].reply.reply.authorUsername").value("alice"))
+                .andExpect(jsonPath("$[2].reply.reply.preview").value("the root words"))
+                .andExpect(jsonPath("$[1].reply.reply").doesNotExist());
+    }
+
+    @Test
+    void reply_chainDeeperThanTheCapIsTruncatedNotDeleted() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long previous = postMessage(aliceToken, channelId, "root");
+        for (int index = 1; index <= 9; index++) {
+            previous = postMessage(aliceToken, channelId, "level " + index, previous);
+        }
+        // The outermost reply's quote renders MAX_QUOTE_DEPTH (5) nested cards — level 5 shows
+        // "level 4" — and the tail is TRUNCATED (absent), never flagged deleted.
+        String levelFive = "$[9].reply" + ".reply".repeat(4);
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath(levelFive + ".preview").value("level 4"))
+                .andExpect(jsonPath(levelFive + ".reply").doesNotExist())
+                .andExpect(jsonPath(levelFive + ".deleted").value(false));
+    }
+
+    @Test
+    void reply_deletedDeepOriginalMarksThatLevelDeleted() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long firstId = postMessage(aliceToken, channelId, "the root");
+        Long secondId = postMessage(bobToken, channelId, "middle", firstId);
+        postMessage(aliceToken, channelId, "outer", secondId);
+
+        // Deleting the ROOT greys out the outer reply's LEVEL-2 card; level 1 stays live.
+        mockMvc.perform(delete("/api/channels/" + channelId + "/messages/" + firstId)
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[1].reply.authorUsername").value("bob"))
+                .andExpect(jsonPath("$[1].reply.deleted").value(false))
+                .andExpect(jsonPath("$[1].reply.reply.deleted").value(true))
+                .andExpect(jsonPath("$[1].reply.reply.preview").doesNotExist());
+    }
+
+    @Test
+    void forward_ofReplyFreezesTheNestedQuote() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long sourceChannelId = createChannel(aliceToken, "source", "TEXT");
+        Long targetChannelId = createChannel(aliceToken, "target", "TEXT");
+        Long rootId = postMessage(bobToken, sourceChannelId, "root text");
+        Long replyId = postMessage(aliceToken, sourceChannelId, "the reply body", rootId);
+
+        // Forwarding the REPLY snapshots its quote: the copy's origin card carries the frozen
+        // tree (the root's author + preview) rather than losing it.
+        mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages/forward")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"sourceMessageId\":" + replyId + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.forward.trusted").value(true))
+                .andExpect(jsonPath("$.forward.reply.authorUsername").value("bob"))
+                .andExpect(jsonPath("$.forward.reply.preview").value("root text"));
+
+        mockMvc.perform(get("/api/channels/" + targetChannelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].forward.reply.preview").value("root text"));
+
+        // The freeze is real: deleting the root AFTER the forward does not touch the snapshot.
+        mockMvc.perform(delete("/api/channels/" + sourceChannelId + "/messages/" + rootId)
+                        .header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isNoContent());
+        mockMvc.perform(get("/api/channels/" + targetChannelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].forward.reply.preview").value("root text"))
+                .andExpect(jsonPath("$[0].forward.reply.deleted").value(false));
+    }
+
+    @Test
+    void reply_toForwardOfReply_carriesTheFrozenTreeInsideTheQuote() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long sourceChannelId = createChannel(aliceToken, "source", "TEXT");
+        Long targetChannelId = createChannel(aliceToken, "target", "TEXT");
+        Long rootId = postMessage(bobToken, sourceChannelId, "root text");
+        Long replyId = postMessage(aliceToken, sourceChannelId, "the reply body", rootId);
+        MvcResult forwardResult = mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages/forward")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"sourceMessageId\":" + replyId + "}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+        Long forwardId = ((Number) JsonPath.read(forwardResult.getResponse().getContentAsString(),
+                "$.id")).longValue();
+
+        // Replying to that forward: the quote's author is the FORWARDER, its forward context
+        // carries the origin, and INSIDE that context the frozen quote of the source survives —
+        // the full mutual ReplyInfo.forward.reply nesting.
+        mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages")
+                        .header("Authorization", "Bearer " + bobToken).contentType(JSON)
+                        .content("{\"content\":\"replying to the forward\",\"replyToId\":" + forwardId + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.reply.authorUsername").value("alice"))
+                .andExpect(jsonPath("$.reply.forward.serverName").value("OAK Server"))
+                .andExpect(jsonPath("$.reply.forward.reply.authorUsername").value("bob"))
+                .andExpect(jsonPath("$.reply.forward.reply.preview").value("root text"));
+    }
+
+    @Test
+    void forward_snapshotCarriesClientReplyTreeCapped() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long targetChannelId = createChannel(aliceToken, "target", "TEXT");
+
+        // Mode (b): the client supplies a 9-deep originReply tree (cross-instance, on trust);
+        // the server persists it depth-capped — 5 levels survive, the 6th is cut.
+        mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages/forward")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"content\":\"cross-instance reply\",\"originServer\":\"Other Server\","
+                                + "\"originChannel\":\"their-channel\",\"originAuthorName\":\"carol\","
+                                + "\"originReply\":" + nestedReplyJson(9) + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.forward.trusted").value(false))
+                .andExpect(jsonPath("$.forward.reply.preview").value("p9"))
+                .andExpect(jsonPath("$.forward.reply" + ".reply".repeat(4) + ".preview").value("p5"))
+                .andExpect(jsonPath("$.forward.reply" + ".reply".repeat(5)).doesNotExist());
+    }
+
+    /** A {@code ReplyInfo} JSON tree of {@code depth} nested cards (previews "p1"…"p{depth}"). */
+    private static String nestedReplyJson(int depth) {
+        if (depth <= 0) {
+            return "null";
+        }
+        return String.format("{\"messageId\":%d,\"authorId\":1,\"authorUsername\":\"u%d\",\"preview\":\"p%d\","
+                        + "\"createdAt\":\"2026-01-01T10:00:00Z\",\"deleted\":false,\"reply\":%s}",
+                depth, depth, depth, nestedReplyJson(depth - 1));
+    }
+
     // ---- seeding helpers (REST-driven, mirrors ReactionIntegrationTest) ----
 
     private String registerAndLogin(String username, String password) throws Exception {

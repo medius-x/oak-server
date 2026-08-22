@@ -73,6 +73,12 @@ public class MessageService {
     /** Cap of the one-line reply-quote preview (chars, "…" appended when trimmed). */
     private static final int REPLY_PREVIEW_MAX = 100;
 
+    /** How deep nested quote cards resolve/serialize: a reply chain renders as recursive cards
+     *  (a reply to a reply to a …), and past this depth the tree is TRUNCATED (nested null) —
+     *  not marked deleted. Bounds both the per-page level-batch in {@link #replyOriginalsFor}
+     *  and every persisted forward snapshot (see {@link NestedReplyCodec#capDepth}). */
+    static final int MAX_QUOTE_DEPTH = 5;
+
     private final MessageRepository messageRepository;
     private final ChannelRepository channelRepository;
     private final UserRepository userRepository;
@@ -82,6 +88,7 @@ public class MessageService {
     private final MentionParser mentionParser;
     private final MessageReactionRepository reactionRepository;
     private final ServerProfileRepository serverProfileRepository;
+    private final NestedReplyCodec nestedReplyCodec;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
@@ -113,8 +120,10 @@ public class MessageService {
             message.setRepliedToId(replyTarget.getId());
         }
         message = messageRepository.save(message);
-        MessageResponse response = toResponse(message, List.of(),
-                replyTarget == null ? Map.of() : Map.of(replyTarget.getId(), replyTarget));
+        // The level-batch resolves the target AND its whole chain (up to MAX_QUOTE_DEPTH), so a
+        // reply-to-a-reply's create broadcast already carries its nested cards — one code path
+        // with history fetches, no depth-1 special case.
+        MessageResponse response = toResponse(message, List.of(), replyOriginalsFor(List.of(message)));
         // Variant A: written via REST, then broadcast to everyone subscribed to this channel.
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId, response);
         return response;
@@ -242,6 +251,7 @@ public class MessageService {
         String originAuthorName;
         Instant originCreatedAt;
         boolean trusted;
+        ReplyInfo originReply;
         if (request.sourceMessageId() != null) {
             Message source = messageRepository.findById(request.sourceMessageId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source message not found"));
@@ -255,6 +265,13 @@ public class MessageService {
             originAuthorName = source.getAuthor().getUsername();
             originCreatedAt = source.getCreatedAt();
             trusted = true;
+            // Forwarding a REPLY snapshots its quote tree: the copy keeps rendering the nested
+            // cards the source carried (frozen — later edits of the source's own original never
+            // propagate, the same snapshot semantics as every other origin field).
+            originReply = source.getRepliedToId() == null ? null
+                    : nestedReplyCodec.capDepth(
+                            replyInfo(source, replyOriginalsFor(List.of(source)), MAX_QUOTE_DEPTH),
+                            MAX_QUOTE_DEPTH);
         } else {
             originServer = request.originServer();
             originChannel = request.originChannel();
@@ -262,6 +279,9 @@ public class MessageService {
             originAuthorName = request.originAuthorName();
             originCreatedAt = request.originCreatedAt();
             trusted = false;
+            // The client-supplied tree rides the same trust model as every mode-b field; the
+            // depth cap runs BEFORE persisting so a hostile payload cannot bloat the column.
+            originReply = nestedReplyCodec.capDepth(request.originReply(), MAX_QUOTE_DEPTH);
         }
         if (isBlank(content) && isBlank(attachmentKey)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -277,6 +297,11 @@ public class MessageService {
         forward.setForwardAuthorName(originAuthorName);
         forward.setForwardCreatedAt(originCreatedAt);
         forward.setForwardTrusted(trusted);
+        // Set BEFORE save: toResponse below reads the field off the in-memory entity, so the
+        // create broadcast equals a later history fetch byte for byte (the reactions' determinism
+        // discipline). A write failure degrades to null — the forward must not fail over the
+        // cosmetic nesting.
+        forward.setForwardNestedReply(nestedReplyCodec.write(originReply));
         forward = messageRepository.save(forward);
         MessageResponse response = toResponse(forward, List.of(), Map.of());
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId, response);
@@ -382,7 +407,7 @@ public class MessageService {
                                        Map<Long, Message> replyOriginals) {
         String attachmentKey = message.getAttachmentKey();
         String attachmentUrl = isBlank(attachmentKey) ? null : attachmentUrlSigner.presignedGetUrl(attachmentKey);
-        ReplyInfo reply = replyInfo(message, replyOriginals);
+        ReplyInfo reply = replyInfo(message, replyOriginals, MAX_QUOTE_DEPTH);
         List<MentionResponse> mentions = withReplyMention(message, mentionParser.parse(
                 message.getContent(), message.getAuthor(), message.getChannel()), reply);
         return new MessageResponse(
@@ -402,8 +427,10 @@ public class MessageService {
     }
 
     /** The forward's origin card, or null when the message is not a forward. Any single origin
-     *  column set ⇒ a forward (they are written together in {@link #forward}). */
-    private static ForwardInfo forwardInfo(Message message) {
+     *  column set ⇒ a forward (they are written together in {@link #forward}). The nested quote
+     *  snapshot ({@code ForwardInfo.reply}) is read from the JSON column — a CPU-only parse, so
+     *  the "toResponse never touches the repository" invariant holds. */
+    private ForwardInfo forwardInfo(Message message) {
         if (message.getForwardOriginServer() == null && message.getForwardOriginChannel() == null
                 && message.getForwardAuthorId() == null && message.getForwardAuthorName() == null
                 && message.getForwardCreatedAt() == null) {
@@ -415,37 +442,59 @@ public class MessageService {
                 message.getForwardAuthorId(),
                 message.getForwardAuthorName(),
                 message.getForwardCreatedAt(),
-                Boolean.TRUE.equals(message.getForwardTrusted()));
+                Boolean.TRUE.equals(message.getForwardTrusted()),
+                nestedReplyCodec.read(message.getForwardNestedReply()));
     }
 
-    /** Batched reply-originals for a page of messages: one {@code findAllById} instead of one
-     *  select per reply (mirrors {@link #reactionSummariesByMessage}). Originals missing from the
-     *  result (deleted) are simply absent — {@link #replyInfo} turns that into the deleted marker. */
+    /** Level-batched reply-originals for a page of messages: the page's replies' originals, then
+     *  THOSE originals' own originals, and so on — up to {@link #MAX_QUOTE_DEPTH} levels, one
+     *  {@code findAllById} per level (mirrors {@link #reactionSummariesByMessage}; worst case 7
+     *  selects per history page, and only when the page's replies form deep chains). A union map:
+     *  {@link #replyInfo} recurses over it, any level's miss becoming that level's deleted
+     *  marker. The containsKey filter dedups shared ancestors and guards against hypothetical
+     *  cycles (a reply target must pre-exist, so ids strictly decrease — cycles are impossible
+     *  via the API; this is defense in depth). Kept SEPARATE from ReadStateService's one-level
+     *  {@code replyOriginalsOf}: that one feeds the mention counter's freshest-200 loop, where
+     *  extra levels are pure query cost — do not "unify" them. */
     private Map<Long, Message> replyOriginalsFor(List<Message> messages) {
-        Set<Long> ids = messages.stream()
+        Map<Long, Message> originals = new LinkedHashMap<>();
+        Set<Long> frontier = messages.stream()
                 .map(Message::getRepliedToId)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
-        if (ids.isEmpty()) {
-            return Map.of();
+        for (int level = 0; level < MAX_QUOTE_DEPTH && !frontier.isEmpty(); level++) {
+            frontier.removeAll(originals.keySet());
+            if (frontier.isEmpty()) {
+                break;
+            }
+            for (Message original : messageRepository.findAllById(frontier)) {
+                originals.put(original.getId(), original);
+            }
+            frontier = originals.values().stream()
+                    .map(Message::getRepliedToId)
+                    .filter(Objects::nonNull)
+                    .filter(id -> !originals.containsKey(id))
+                    .collect(Collectors.toSet());
         }
-        return messageRepository.findAllById(ids).stream()
-                .collect(Collectors.toMap(Message::getId, original -> original));
+        return originals.isEmpty() ? Map.of() : originals;
     }
 
     /** The message's reply quote: null when it is not a reply; {@code deleted=true} with null
      *  fields when the original is gone (dangling id, no FK); otherwise the LIVE original's
      *  snapshot — edits to the original show up in quotes on every re-fetch. A replied-to
      *  forward carries its origin snapshot ({@link #forwardInfo}) so the quote shows WHO was
-     *  replied to (the forwarder) AND that the message was forwarded, not just its content. */
-    private static ReplyInfo replyInfo(Message message, Map<Long, Message> replyOriginals) {
+     *  replied to (the forwarder) AND that the message was forwarded, not just its content.
+     *  Recurses through {@code original}'s own quote ({@code ReplyInfo.reply}) so chains render
+     *  as nested cards; {@code depth} counts DOWN from {@link #MAX_QUOTE_DEPTH} — at zero the
+     *  nesting is truncated (null), which clients must not read as deleted. */
+    private ReplyInfo replyInfo(Message message, Map<Long, Message> replyOriginals, int depth) {
         Long repliedToId = message.getRepliedToId();
         if (repliedToId == null) {
             return null;
         }
         Message original = replyOriginals.get(repliedToId);
         if (original == null) {
-            return new ReplyInfo(repliedToId, null, null, null, null, true, null);
+            return new ReplyInfo(repliedToId, null, null, null, null, true, null, null);
         }
         return new ReplyInfo(
                 repliedToId,
@@ -454,7 +503,8 @@ public class MessageService {
                 previewOf(original),
                 original.getCreatedAt(),
                 false,
-                forwardInfo(original));
+                forwardInfo(original),
+                depth > 1 ? replyInfo(original, replyOriginals, depth - 1) : null);
     }
 
     /** One-line quote preview of the original: newlines flatten to spaces, capped at
