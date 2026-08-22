@@ -13,6 +13,10 @@ import java.util.List;
  * {@code reactions} is the aggregated emoji state (never null, empty when none) — see
  * {@link ReactionSummary}; an edit push MUST carry the current snapshot or clients would wipe
  * the rendered chips when applying the edited message.
+ * {@code reply} is the quote this message renders when it is a reply (null = not a reply) — see
+ * {@link ReplyInfo}; a reply's author-mention is synthesized into {@code mentions} (offsets -1).
+ * {@code forward} is the origin card when this message is a forward (null = not a forward) — see
+ * {@link ForwardInfo}; the message's own author is the forwarder.
  * Field order is wire-stable — new fields append at the end only, paired with the client mirror.
  */
 public record MessageResponse(
@@ -26,6 +30,8 @@ public record MessageResponse(
         String attachmentUrl,
         List<MentionResponse> mentions,
         Instant editedAt,
-        List<ReactionSummary> reactions
+        List<ReactionSummary> reactions,
+        ReplyInfo reply,
+        ForwardInfo forward
 ) {
 }

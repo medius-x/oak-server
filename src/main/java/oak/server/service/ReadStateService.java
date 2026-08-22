@@ -20,8 +20,10 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -115,6 +117,7 @@ public class ReadStateService {
         List<Message> unreadWindow = messageRepository
                 .findTop200ByChannelIdAndIdGreaterThanOrderByIdDesc(channel.getId(), readFloor);
         Set<Long> participantIds = isDm(channel) ? participantIdsOf(channel) : null;
+        Map<Long, Message> replyOriginals = replyOriginalsOf(unreadWindow);
         long count = 0;
         for (Message message : unreadWindow) {
             if (message.getAuthor() == null
@@ -127,11 +130,48 @@ public class ReadStateService {
             if (participantIds != null) {
                 pinged.retainAll(participantIds);
             }
-            if (pinged.contains(user.getId())) {
+            // A message counts ONCE even when it both @mentions the user and is a reply to their
+            // message (mirrors MessageService.withReplyMention's dedup).
+            if (pinged.contains(user.getId()) || replyPings(message, replyOriginals, user)) {
                 count++;
             }
         }
         return count;
+    }
+
+    /** Reply ping, mirror of {@code MessageService.withReplyMention}: an unread reply to the
+     *  user's own message counts as a mention even without an {@code @token} in the text. Keeps
+     *  this pull-based counter in sync with the mentions list clients receive in MessageResponse
+     *  — touch BOTH when changing the rule. No participant intersect needed: in a DM/group-DM the
+     *  original's author is either a participant or no longer readable here at all. */
+    private static boolean replyPings(Message message, Map<Long, Message> replyOriginals, User user) {
+        Long repliedToId = message.getRepliedToId();
+        if (repliedToId == null) {
+            return false;
+        }
+        Message original = replyOriginals.get(repliedToId);
+        return original != null
+                && original.getAuthor() != null
+                && original.getAuthor().getId() != null
+                && original.getAuthor().getId().equals(user.getId());
+    }
+
+    /** Batched originals behind the window's replies (one query). */
+    private Map<Long, Message> replyOriginalsOf(List<Message> messages) {
+        Set<Long> ids = new HashSet<>();
+        for (Message message : messages) {
+            if (message.getRepliedToId() != null) {
+                ids.add(message.getRepliedToId());
+            }
+        }
+        if (ids.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Message> out = new HashMap<>();
+        for (Message original : messageRepository.findAllById(ids)) {
+            out.put(original.getId(), original);
+        }
+        return out;
     }
 
     private static boolean isDm(Channel channel) {

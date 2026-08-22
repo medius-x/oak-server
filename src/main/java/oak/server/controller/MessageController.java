@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.EditMessageRequest;
+import oak.server.dto.ForwardMessageRequest;
 import oak.server.dto.MessageResponse;
 import oak.server.dto.ReactionSummary;
 import oak.server.service.MessageService;
@@ -40,8 +41,9 @@ public class MessageController {
     @GetMapping
     public List<MessageResponse> list(@PathVariable Long channelId,
                                       @RequestParam(required = false) Integer limit,
+                                      @RequestParam(required = false) Long beforeId,
                                       @AuthenticationPrincipal UserDetails principal) {
-        return messageService.listByChannel(channelId, limit, principal.getUsername());
+        return messageService.listByChannel(channelId, limit, beforeId, principal.getUsername());
     }
 
     @PostMapping
@@ -50,6 +52,16 @@ public class MessageController {
                                   @RequestBody @Valid CreateMessageRequest request,
                                   @AuthenticationPrincipal UserDetails principal) {
         return messageService.create(channelId, request, principal.getUsername());
+    }
+
+    /** Copies a message into THIS channel as a forward (intra-instance source or a cross-instance
+     *  snapshot — see {@link ForwardMessageRequest}). 201 with the created forward. */
+    @PostMapping("/forward")
+    @ResponseStatus(HttpStatus.CREATED)
+    public MessageResponse forward(@PathVariable Long channelId,
+                                   @RequestBody @Valid ForwardMessageRequest request,
+                                   @AuthenticationPrincipal UserDetails principal) {
+        return messageService.forward(channelId, request, principal.getUsername());
     }
 
     @PatchMapping("/{messageId}")

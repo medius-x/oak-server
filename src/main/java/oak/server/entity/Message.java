@@ -61,6 +61,47 @@ public class Message {
     @Column(name = "edited_at")
     private Instant editedAt;
 
+    /** The message this one replies to (same channel only — enforced on create), null = not a
+     *  reply. Deliberately a bare id with NO FK/@ManyToOne: nothing in the project uses ON DELETE
+     * CASCADE (manual cleanup discipline), and a self-referential FK would force a detach/cascade
+     * dance every time a replied-to message is deleted. Instead a dangling id is detected at read
+     * time (batch miss) and rendered as "original deleted". */
+    @Column(name = "replied_to_id")
+    private Long repliedToId;
+
+    // ---- Forward origin snapshot (Discord-style forward card). A forward is a NEW message whose
+    // content/attachment are a COPY plus these denormalized fields describing where the original
+    // lived. A snapshot (not a live reference): edits/deletion of the original do not propagate.
+    // The message's own author is the FORWARDER; the card shows forward_author_*.
+
+    /** Display name of the instance the original came from (the server profile name, or the
+     *  client-supplied name for a cross-instance snapshot — unverifiable, see ForwardInfo.trusted). */
+    @Column(name = "forward_origin_server", length = 100)
+    private String forwardOriginServer;
+
+    /** The original's channel display name at forward time. */
+    @Column(name = "forward_origin_channel", length = 100)
+    private String forwardOriginChannel;
+
+    /** The original author's id (null allowed for cross-instance snapshots). */
+    @Column(name = "forward_author_id")
+    private Long forwardAuthorId;
+
+    /** The original author's username at forward time. */
+    @Column(name = "forward_author_name", length = 50)
+    private String forwardAuthorName;
+
+    /** When the original was created (for the card's timestamp). */
+    @Column(name = "forward_created_at")
+    private Instant forwardCreatedAt;
+
+    /** Anti-spoofing marker: TRUE only when THIS server derived the origin itself (intra-instance
+     *  forward); false for a client-supplied cross-instance snapshot, which cannot be verified.
+     *  Clients render "unverified" on untrusted cards. Never derived from the other columns — a
+     *  snapshot could copy a truthful-looking originServer. */
+    @Column(name = "forward_trusted")
+    private Boolean forwardTrusted;
+
     public Message(Channel channel, User author, String content) {
         this.channel = channel;
         this.author = author;
