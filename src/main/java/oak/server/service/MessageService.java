@@ -1,6 +1,8 @@
 package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
+import oak.server.dto.AttachmentRef;
+import oak.server.dto.AttachmentResponse;
 import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.EditMessageRequest;
 import oak.server.dto.ForwardInfo;
@@ -79,6 +81,11 @@ public class MessageService {
      *  and every persisted forward snapshot (see {@link NestedReplyCodec#capDepth}). */
     static final int MAX_QUOTE_DEPTH = 5;
 
+    /** Hard cap of attachments per message (create AND the cross-instance forward snapshot) —
+     *  the Discord limit. Enforced here at the service boundary; a stored row can never exceed
+     *  it because writes only go through {@link #create}/{@link #forward}. */
+    public static final int MAX_ATTACHMENTS = 10;
+
     private final MessageRepository messageRepository;
     private final ChannelRepository channelRepository;
     private final UserRepository userRepository;
@@ -89,12 +96,13 @@ public class MessageService {
     private final MessageReactionRepository reactionRepository;
     private final ServerProfileRepository serverProfileRepository;
     private final NestedReplyCodec nestedReplyCodec;
+    private final AttachmentListCodec attachmentListCodec;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
         String content = request.content();
-        String attachmentKey = request.attachmentKey();
-        if (isBlank(content) && isBlank(attachmentKey)) {
+        List<AttachmentRef> attachments = sanitized(request.attachments());
+        if (isBlank(content) && attachments.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message must have content or an attachment");
         }
         Channel channel = channelRepository.findById(channelId)
@@ -103,8 +111,8 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
         // Channel-scoped SEND_MESSAGES (respects overrides; OWNER/ADMINISTRATOR bypass).
         auth.requireInChannel(author, channel, Permission.SEND_MESSAGES);
-        // Posting a message that carries an attachment additionally requires ATTACH_FILES (channel-scoped).
-        if (!isBlank(attachmentKey)) {
+        // Posting a message that carries attachments additionally requires ATTACH_FILES (channel-scoped).
+        if (!attachments.isEmpty()) {
             auth.requireInChannel(author, channel, Permission.ATTACH_FILES);
         }
         // A reply must target an existing message of the SAME channel (cross-channel ids leak
@@ -115,7 +123,10 @@ public class MessageService {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND,
                             "Message to reply to not found"));
         }
-        Message message = new Message(channel, author, content, attachmentKey, request.attachmentFileName());
+        Message message = new Message(channel, author, content);
+        // Set BEFORE save: toResponse below reads the JSON column off the in-memory entity, so
+        // the create broadcast equals a later history fetch (the forwardNestedReply discipline).
+        message.setAttachments(attachmentListCodec.write(attachments));
         if (replyTarget != null) {
             message.setRepliedToId(replyTarget.getId());
         }
@@ -243,8 +254,7 @@ public class MessageService {
         auth.requireInChannel(actor, targetChannel, Permission.SEND_MESSAGES);
 
         String content = request.content();
-        String attachmentKey = request.attachmentKey();
-        String attachmentFileName = request.attachmentFileName();
+        List<AttachmentRef> attachments;
         String originServer;
         String originChannel;
         Long originAuthorId;
@@ -257,8 +267,10 @@ public class MessageService {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source message not found"));
             auth.requireInChannel(actor, source.getChannel(), Permission.READ_MESSAGE_HISTORY);
             content = source.getContent();
-            attachmentKey = source.getAttachmentKey();
-            attachmentFileName = source.getAttachmentFileName();
+            // Verbatim copy: ALL keys are shared with the source (MinIO objects are never
+            // deleted with messages), no per-attachment re-sign or upload. A stored row cannot
+            // exceed MAX_ATTACHMENTS, so no cap re-check here.
+            attachments = attachmentListCodec.read(source.getAttachments());
             originServer = serverProfileRepository.singleton().getName();
             originChannel = source.getChannel().getName();
             originAuthorId = source.getAuthor().getId();
@@ -279,18 +291,21 @@ public class MessageService {
             originAuthorName = request.originAuthorName();
             originCreatedAt = request.originCreatedAt();
             trusted = false;
+            attachments = sanitized(request.attachments());
             // The client-supplied tree rides the same trust model as every mode-b field; the
             // depth cap runs BEFORE persisting so a hostile payload cannot bloat the column.
             originReply = nestedReplyCodec.capDepth(request.originReply(), MAX_QUOTE_DEPTH);
         }
-        if (isBlank(content) && isBlank(attachmentKey)) {
+        if (isBlank(content) && attachments.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Forward must have content or an attachment");
         }
-        if (!isBlank(attachmentKey)) {
+        if (!attachments.isEmpty()) {
             auth.requireInChannel(actor, targetChannel, Permission.ATTACH_FILES);
         }
-        Message forward = new Message(targetChannel, actor, content, attachmentKey, attachmentFileName);
+        Message forward = new Message(targetChannel, actor, content);
+        // Same set-before-save discipline as create (the broadcast reads the in-memory entity).
+        forward.setAttachments(attachmentListCodec.write(attachments));
         forward.setForwardOriginServer(originServer);
         forward.setForwardOriginChannel(originChannel);
         forward.setForwardAuthorId(originAuthorId);
@@ -398,15 +413,17 @@ public class MessageService {
                 LinkedHashMap::new));
     }
 
-    /** Builds the response view, signing a fresh GET URL when the message has an attachment and
-     *  parsing {@code @}-mentions from the content (single chokepoint: covers both the create
-     *  broadcast and history fetch). Reactions and reply originals are passed IN by the caller —
-     *  this method never touches a repository, or a 50-message history page would fire 50 extra
-     *  selects (callers batch via {@link #reactionSummariesByMessage} / {@link #replyOriginalsFor}). */
+    /** Builds the response view, signing a fresh GET URL per attachment and parsing
+     *  {@code @}-mentions from the content (single chokepoint: covers both the create broadcast
+     *  and history fetch). Reactions and reply originals are passed IN by the caller — this
+     *  method never touches a repository, or a 50-message history page would fire 50 extra
+     *  selects (callers batch via {@link #reactionSummariesByMessage} / {@link #replyOriginalsFor});
+     *  the attachments are a CPU-only JSON parse (see {@link AttachmentListCodec}). */
     private MessageResponse toResponse(Message message, List<ReactionSummary> reactions,
                                        Map<Long, Message> replyOriginals) {
-        String attachmentKey = message.getAttachmentKey();
-        String attachmentUrl = isBlank(attachmentKey) ? null : attachmentUrlSigner.presignedGetUrl(attachmentKey);
+        List<AttachmentResponse> attachments = attachmentListCodec.read(message.getAttachments()).stream()
+                .map(ref -> new AttachmentResponse(ref.fileName(), attachmentUrlSigner.presignedGetUrl(ref.key())))
+                .toList();
         ReplyInfo reply = replyInfo(message, replyOriginals, MAX_QUOTE_DEPTH);
         List<MentionResponse> mentions = withReplyMention(message, mentionParser.parse(
                 message.getContent(), message.getAuthor(), message.getChannel()), reply);
@@ -417,8 +434,7 @@ public class MessageService {
                 message.getAuthor().getUsername(),
                 message.getContent(),
                 message.getCreatedAt(),
-                message.getAttachmentFileName(),
-                attachmentUrl,
+                attachments,
                 mentions,
                 message.getEditedAt(),
                 reactions,
@@ -509,14 +525,38 @@ public class MessageService {
 
     /** One-line quote preview of the original: newlines flatten to spaces, capped at
      *  {@link #REPLY_PREVIEW_MAX} chars ("…" appended when trimmed); an attachment-only original
-     *  falls back to its file name. */
-    private static String previewOf(Message original) {
+     *  falls back to its FIRST file name. Instance method — reading the attachments JSON column
+     *  needs the codec. */
+    private String previewOf(Message original) {
         String body = original.getContent();
         if (body == null || body.isBlank()) {
-            body = original.getAttachmentFileName() == null ? "" : original.getAttachmentFileName();
+            List<AttachmentRef> refs = attachmentListCodec.read(original.getAttachments());
+            body = refs.isEmpty() ? "" : String.valueOf(refs.get(0).fileName());
         }
         String flat = body.replace('\n', ' ');
         return flat.length() <= REPLY_PREVIEW_MAX ? flat : flat.substring(0, REPLY_PREVIEW_MAX) + "…";
+    }
+
+    /** Normalizes an incoming attachment list: null → empty, null ELEMENTS dropped, and a
+     *  blank {@code key} element is a 400 (the key is the only thing the server cannot invent —
+     *  the client must have uploaded the bytes and minted it first). Enforces
+     *  {@link #MAX_ATTACHMENTS} the same way. */
+    private List<AttachmentRef> sanitized(List<AttachmentRef> attachments) {
+        if (attachments == null) {
+            return List.of();
+        }
+        List<AttachmentRef> kept = attachments.stream().filter(Objects::nonNull).toList();
+        if (kept.size() > MAX_ATTACHMENTS) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "At most " + MAX_ATTACHMENTS + " attachments per message");
+        }
+        for (AttachmentRef ref : kept) {
+            if (ref.key() == null || ref.key().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Attachment is missing its key (upload the file first)");
+            }
+        }
+        return kept;
     }
 
     /** Appends the reply ping (Discord-style): replying to someone's message mentions them

@@ -18,10 +18,10 @@ import org.hibernate.annotations.CreationTimestamp;
 import java.time.Instant;
 
 /**
- * A chat message: belongs to a {@link Channel}, authored by a {@link User}. May carry an
- * attachment stored in MinIO (referenced by object key + display name) — a message has content,
- * an attachment, or both. Content is editable by the author ({@code editedAt} records the last
- * edit; null = never edited); attachments are not editable.
+ * A chat message: belongs to a {@link Channel}, authored by a {@link User}. May carry
+ * attachments stored in MinIO (referenced by object key + display name) — a message has
+ * content, attachments, or both. Content is editable by the author ({@code editedAt} records
+ * the last edit; null = never edited); attachments are not editable.
  */
 @Entity
 @Table(name = "messages")
@@ -45,11 +45,14 @@ public class Message {
     @Column(length = 4000)
     private String content;   // nullable: an attachment-only message has no text
 
-    @Column(name = "attachment_key", length = 512)
-    private String attachmentKey;       // MinIO object key, null when there is no attachment
-
-    @Column(name = "attachment_file_name", length = 255)
-    private String attachmentFileName;  // original file name, for display
+    /** The message's attachments (0..MessageService.MAX_ATTACHMENTS) as a JSON array of
+     *  {@code AttachmentRef} — see {@code AttachmentListCodec}. Attachments are immutable after
+     *  create, always read together with the message and copied verbatim by a forward, so a JSON
+     *  column (the {@code forwardNestedReply} pattern) beats a join table: one CPU-only parse in
+     *  {@code toResponse}, no extra SELECTs, no N inserts per intra-instance forward. TEXT like
+     *  {@code forward_nested_reply}: {@code ddl-auto=update} adds it safely to a populated table. */
+    @Column(name = "attachments", columnDefinition = "text")
+    private String attachments;   // null/blank = no attachments
 
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
@@ -115,13 +118,5 @@ public class Message {
         this.channel = channel;
         this.author = author;
         this.content = content;
-    }
-
-    public Message(Channel channel, User author, String content, String attachmentKey, String attachmentFileName) {
-        this.channel = channel;
-        this.author = author;
-        this.content = content;
-        this.attachmentKey = attachmentKey;
-        this.attachmentFileName = attachmentFileName;
     }
 }

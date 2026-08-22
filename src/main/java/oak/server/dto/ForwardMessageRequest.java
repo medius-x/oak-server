@@ -3,6 +3,7 @@ package oak.server.dto;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
+import java.util.List;
 
 /**
  * Forward-destination write body for {@code POST /api/channels/{targetChannelId}/messages/forward}.
@@ -22,15 +23,15 @@ import java.time.Instant;
  *   back false and clients mark such cards "unverified".</li>
  * </ul>
  *
- * <p>The attachment is shared, not re-uploaded: an intra-instance forward reuses the source's
- * {@code attachmentKey} (MinIO objects are never deleted with messages), a cross-instance one
- * carries a key the client re-uploaded to THIS instance beforehand.
+ * <p>The attachments are shared, not re-uploaded: an intra-instance forward reuses ALL of the
+ * source's MinIO keys (objects are never deleted with messages), a cross-instance one carries
+ * keys the client re-uploaded to THIS instance beforehand. At most
+ * {@code MessageService.MAX_ATTACHMENTS} per forward.
  */
 public record ForwardMessageRequest(
         Long sourceMessageId,
         @Size(max = 4000) String content,
-        @Size(max = 512) String attachmentKey,
-        @Size(max = 255) String attachmentFileName,
+        @Size(max = 10) List<AttachmentRef> attachments,
         @Size(max = 100) String originServer,
         @Size(max = 100) String originChannel,
         Long originAuthorId,

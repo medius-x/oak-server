@@ -244,7 +244,7 @@ class RbacIntegrationTest {
         // @everyone grants ATTACH_FILES by default -> bob can post WITH an attachment
         mockMvc.perform(post("/api/channels/" + channelId + "/messages").header("Authorization", "Bearer " + bobToken)
                         .contentType(JSON)
-                        .content("{\"content\":\"pic\",\"attachmentKey\":\"attachments/x/y.png\",\"attachmentFileName\":\"y.png\"}"))
+                        .content("{\"content\":\"pic\",\"attachments\":[{\"key\":\"attachments/x/y.png\",\"fileName\":\"y.png\"}]}"))
                 .andExpect(status().isCreated());
 
         // deny ATTACH_FILES for @everyone on this channel
@@ -254,7 +254,7 @@ class RbacIntegrationTest {
         // bob can no longer post with an attachment -> 403 ...
         mockMvc.perform(post("/api/channels/" + channelId + "/messages").header("Authorization", "Bearer " + bobToken)
                         .contentType(JSON)
-                        .content("{\"content\":\"pic2\",\"attachmentKey\":\"attachments/x/z.png\",\"attachmentFileName\":\"z.png\"}"))
+                        .content("{\"content\":\"pic2\",\"attachments\":[{\"key\":\"attachments/x/z.png\",\"fileName\":\"z.png\"}]}"))
                 .andExpect(status().isForbidden());
 
         // ... but text-only still works (SEND_MESSAGES still granted)

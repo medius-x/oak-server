@@ -46,14 +46,16 @@ class AttachmentIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.key").isNotEmpty());
 
-        // an attachment-only message (empty text) is valid -> 201
+        // an attachment-only message (empty text) is valid -> 201; the wire carries the list form
         mockMvc.perform(post("/api/channels/" + channelId + "/messages")
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
-                        .content("{\"content\":\"\",\"attachmentKey\":\"some-key\",\"attachmentFileName\":\"pic.png\"}"))
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"some-key\",\"fileName\":\"pic.png\"}]}"))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.attachmentFileName").value("pic.png"))
+                .andExpect(jsonPath("$.attachments[0].fileName").value("pic.png"))
                 .andExpect(jsonPath("$.authorUsername").value("alice"));
+
+        // a message with neither content nor attachments -> 400
 
         // a message with neither content nor attachment -> 400
         mockMvc.perform(post("/api/channels/" + channelId + "/messages")

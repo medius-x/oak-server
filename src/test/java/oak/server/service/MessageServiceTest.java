@@ -1,5 +1,7 @@
 package oak.server.service;
 
+import oak.server.dto.AttachmentRef;
+import oak.server.dto.AttachmentResponse;
 import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.EditMessageRequest;
 import oak.server.dto.ForwardMessageRequest;
@@ -21,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -67,6 +70,13 @@ class MessageServiceTest {
     @Mock
     private NestedReplyCodec nestedReplyCodec;
 
+    /** A REAL codec, not a mock: every create/forward/toResponse call reads/writes the
+     *  attachments JSON column, so a Mockito mock would force write/read stubs onto every test
+     *  in this class. The spy wrapper only lets @InjectMocks pick it up as a dependency. */
+    @Spy
+    private AttachmentListCodec attachmentListCodec = new AttachmentListCodec(
+            tools.jackson.databind.json.JsonMapper.builder().build());
+
     @InjectMocks
     private MessageService messageService;
 
@@ -84,13 +94,13 @@ class MessageServiceTest {
         when(messageRepository.save(any(Message.class))).thenReturn(saved);
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
-        MessageResponse response = messageService.create(channelId, new CreateMessageRequest("hello", null, null, null), "alice");
+        MessageResponse response = messageService.create(channelId, new CreateMessageRequest("hello", null, null), "alice");
 
         assertEquals(100L, response.id());
         assertEquals(channelId, response.channelId());
         assertEquals("hello", response.content());
         assertEquals(java.util.List.of(), response.mentions());
-        assertNull(response.attachmentUrl());
+        assertTrue(response.attachments().isEmpty());
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId), any(MessageResponse.class));
     }
@@ -98,7 +108,7 @@ class MessageServiceTest {
     @Test
     void createRejectsMessageWithNeitherContentNorAttachment() {
         ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
-                messageService.create(7L, new CreateMessageRequest("", null, null, null), "alice"));
+                messageService.create(7L, new CreateMessageRequest("", null, null), "alice"));
         assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
     }
 
@@ -123,7 +133,7 @@ class MessageServiceTest {
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId,
-                new CreateMessageRequest("a reply", null, null, 90L), "alice");
+                new CreateMessageRequest("a reply", null, 90L), "alice");
 
         // The quote: live original's author + flattened one-line preview.
         ReplyInfo reply = response.reply();
@@ -159,7 +169,7 @@ class MessageServiceTest {
         when(messageRepository.findByIdAndChannelId(90L, channelId)).thenReturn(Optional.empty());
 
         ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
-                messageService.create(channelId, new CreateMessageRequest("a reply", null, null, 90L), "alice"));
+                messageService.create(channelId, new CreateMessageRequest("a reply", null, 90L), "alice"));
         assertEquals(HttpStatus.NOT_FOUND, thrown.getStatusCode());
         verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
     }
@@ -182,7 +192,7 @@ class MessageServiceTest {
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId,
-                new CreateMessageRequest("self reply", null, null, 90L), "alice");
+                new CreateMessageRequest("self reply", null, 90L), "alice");
 
         assertEquals(java.util.List.of(), response.mentions());
         assertNotNull(response.reply());
@@ -210,7 +220,7 @@ class MessageServiceTest {
                 .thenReturn(java.util.List.of(new MentionResponse("USER", 6L, "bob", 0, 4)));
 
         MessageResponse response = messageService.create(channelId,
-                new CreateMessageRequest("@bob look", null, null, 90L), "alice");
+                new CreateMessageRequest("@bob look", null, 90L), "alice");
 
         assertEquals(1, response.mentions().size());
         assertEquals(0, response.mentions().get(0).start());
@@ -222,8 +232,10 @@ class MessageServiceTest {
         Channel channel = new Channel("general", ChannelType.TEXT);
         channel.setId(channelId);
         User author = new User("alice", "hash");
-        Message saved = new Message(channel, author, null, "attachments/abc/pic.png", "pic.png");
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        Message saved = new Message(channel, author, null);
         saved.setId(101L);
+        saved.setAttachments(attachmentListCodec.write(java.util.List.of(pic)));
 
         when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
@@ -232,14 +244,69 @@ class MessageServiceTest {
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.create(channelId,
-                new CreateMessageRequest(null, "attachments/abc/pic.png", "pic.png", null), "alice");
+                new CreateMessageRequest(null, java.util.List.of(pic), null), "alice");
 
         assertNull(response.content());
-        assertEquals("pic.png", response.attachmentFileName());
-        assertEquals("https://minio/get/pic.png", response.attachmentUrl());
+        assertEquals(1, response.attachments().size());
+        assertEquals("pic.png", response.attachments().get(0).fileName());
+        assertEquals("https://minio/get/pic.png", response.attachments().get(0).url());
         verify(attachmentUrlSigner).presignedGetUrl("attachments/abc/pic.png");
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId), any(MessageResponse.class));
+    }
+
+    @Test
+    void createSignsEveryAttachmentOfAMultiAttachmentMessage() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        AttachmentRef doc = new AttachmentRef("attachments/abc/doc.pdf", "doc.pdf");
+        Message saved = new Message(channel, author, "two files");
+        saved.setId(102L);
+        saved.setAttachments(attachmentListCodec.write(java.util.List.of(pic, doc)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
+        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/pic.png")).thenReturn("https://minio/get/pic.png");
+        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/doc.pdf")).thenReturn("https://minio/get/doc.pdf");
+        when(messageRepository.save(any(Message.class))).thenReturn(saved);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.create(channelId,
+                new CreateMessageRequest("two files", java.util.List.of(pic, doc), null), "alice");
+
+        java.util.List<AttachmentResponse> attachments = response.attachments();
+        assertEquals(2, attachments.size());
+        assertEquals("pic.png", attachments.get(0).fileName());
+        assertEquals("https://minio/get/pic.png", attachments.get(0).url());
+        assertEquals("doc.pdf", attachments.get(1).fileName());
+        assertEquals("https://minio/get/doc.pdf", attachments.get(1).url());
+        verify(attachmentUrlSigner).presignedGetUrl("attachments/abc/pic.png");
+        verify(attachmentUrlSigner).presignedGetUrl("attachments/abc/doc.pdf");
+    }
+
+    @Test
+    void createRejectsMoreThanTenAttachments() {
+        java.util.List<AttachmentRef> eleven = new java.util.ArrayList<>();
+        for (int attachmentIndex = 0; attachmentIndex < 11; attachmentIndex++) {
+            eleven.add(new AttachmentRef("attachments/abc/file-" + attachmentIndex, "file-" + attachmentIndex));
+        }
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.create(7L, new CreateMessageRequest("too many", eleven, null), "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+    }
+
+    @Test
+    void createRejectsAttachmentWithBlankKey() {
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.create(7L,
+                        new CreateMessageRequest("no key", java.util.List.of(new AttachmentRef("  ", "pic.png")), null),
+                        "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
     }
 
     @Test
@@ -430,7 +497,7 @@ class MessageServiceTest {
     }
 
     @Test
-    void forwardIntraInstanceCopiesPayloadAndCanonicalOrigin() {
+    void forwardIntraInstanceCopiesAllAttachmentsAndCanonicalOrigin() {
         Long targetId = 7L;
         Long sourceId = 90L;
         Channel target = new Channel("target", ChannelType.TEXT);
@@ -441,9 +508,12 @@ class MessageServiceTest {
         actor.setId(5L);
         User sourceAuthor = new User("bob", "hash");
         sourceAuthor.setId(6L);
-        Message source = new Message(sourceChannel, sourceAuthor, "original text",
-                "attachments/abc/pic.png", "pic.png");
+        // TWO attachments: the intra-instance copy must carry the whole list, keys shared.
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
+        AttachmentRef doc = new AttachmentRef("attachments/abc/doc.pdf", "doc.pdf");
+        Message source = new Message(sourceChannel, sourceAuthor, "original text");
         source.setId(sourceId);
+        source.setAttachments(attachmentListCodec.write(java.util.List.of(pic, doc)));
         source.setCreatedAt(java.time.Instant.parse("2026-01-01T10:00:00Z"));
         ServerProfile profile = org.mockito.Mockito.mock(ServerProfile.class);
         when(profile.getName()).thenReturn("OAK Dev");
@@ -453,6 +523,8 @@ class MessageServiceTest {
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(actor));
         when(messageRepository.findById(sourceId)).thenReturn(Optional.of(source));
         when(serverProfileRepository.singleton()).thenReturn(profile);
+        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/pic.png")).thenReturn("https://minio/get/pic.png");
+        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/doc.pdf")).thenReturn("https://minio/get/doc.pdf");
         when(messageRepository.save(any(Message.class))).thenAnswer(inv -> {
             savedRef.set(inv.getArgument(0));
             return inv.getArgument(0);
@@ -460,13 +532,20 @@ class MessageServiceTest {
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.forward(targetId,
-                new ForwardMessageRequest(sourceId, "client content ignored", null, null,
+                new ForwardMessageRequest(sourceId, "client content ignored",
+                        java.util.List.of(new AttachmentRef("client/fake.png", "fake.png")),
                         "Fake Server", "fake-channel", 99L, "faker", null, null),
                 "alice");
 
-        // Payload copied from the source, not from the client-supplied fields.
+        // Payload copied from the source, not from the client-supplied fields — ALL attachments.
         assertEquals("original text", response.content());
-        assertEquals("pic.png", response.attachmentFileName());
+        assertEquals(2, response.attachments().size());
+        assertEquals("pic.png", response.attachments().get(0).fileName());
+        assertEquals("doc.pdf", response.attachments().get(1).fileName());
+        assertEquals("https://minio/get/pic.png", response.attachments().get(0).url());
+        assertEquals("https://minio/get/doc.pdf", response.attachments().get(1).url());
+        verify(attachmentUrlSigner).presignedGetUrl("attachments/abc/pic.png");
+        verify(attachmentUrlSigner).presignedGetUrl("attachments/abc/doc.pdf");
         // Canonical origin: profile name + source channel + source author + source time.
         assertEquals("OAK Dev", response.forward().serverName());
         assertEquals("src", response.forward().channelName());
@@ -497,7 +576,7 @@ class MessageServiceTest {
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
 
         MessageResponse response = messageService.forward(targetId,
-                new ForwardMessageRequest(null, "cross-instance text", null, null,
+                new ForwardMessageRequest(null, "cross-instance text", null,
                         "Other Server", "their-channel", 42L, "carol",
                         java.time.Instant.parse("2026-02-02T12:00:00Z"), null),
                 "alice");
@@ -525,7 +604,7 @@ class MessageServiceTest {
 
         ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
                 messageService.forward(targetId,
-                        new ForwardMessageRequest(90L, "text", null, null, null, null, null, null, null, null),
+                        new ForwardMessageRequest(90L, "text", null, null, null, null, null, null, null),
                         "alice"));
         assertEquals(HttpStatus.FORBIDDEN, thrown.getStatusCode());
         verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));

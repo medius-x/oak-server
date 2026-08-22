@@ -179,7 +179,7 @@ class ReplyForwardIntegrationTest {
                                 + ",\"originServer\":\"Fake\",\"originChannel\":\"fake\"}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.content").value("forward me"))
-                .andExpect(jsonPath("$.attachmentFileName").value("pic.png"))
+                .andExpect(jsonPath("$.attachments[0].fileName").value("pic.png"))
                 .andExpect(jsonPath("$.authorUsername").value("alice"))
                 .andExpect(jsonPath("$.forward.serverName").value("OAK Server"))
                 .andExpect(jsonPath("$.forward.channelName").value("source"))
@@ -212,11 +212,11 @@ class ReplyForwardIntegrationTest {
         // Attachment-only snapshot (no content) is a legal forward.
         mockMvc.perform(post("/api/channels/" + targetChannelId + "/messages/forward")
                         .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
-                        .content("{\"attachmentKey\":\"attachments/x/y.png\","
-                                + "\"attachmentFileName\":\"y.png\",\"originServer\":\"Other Server\","
+                        .content("{\"attachments\":[{\"key\":\"attachments/x/y.png\",\"fileName\":\"y.png\"}],"
+                                + "\"originServer\":\"Other Server\","
                                 + "\"originChannel\":\"their-channel\",\"originAuthorName\":\"carol\"}"))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.attachmentFileName").value("y.png"));
+                .andExpect(jsonPath("$.attachments[0].fileName").value("y.png"));
     }
 
     @Test
@@ -488,7 +488,7 @@ class ReplyForwardIntegrationTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
                         .content(String.format(
-                                "{\"content\":\"%s\",\"attachmentKey\":\"%s\",\"attachmentFileName\":\"%s\"}",
+                                "{\"content\":\"%s\",\"attachments\":[{\"key\":\"%s\",\"fileName\":\"%s\"}]}",
                                 content, attachmentKey, attachmentFileName)))
                 .andExpect(status().isCreated())
                 .andReturn();
