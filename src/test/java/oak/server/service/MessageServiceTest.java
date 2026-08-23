@@ -611,8 +611,16 @@ class MessageServiceTest {
                 any(oak.server.dto.ReactionEvent.class));
     }
 
-    @Test
-    void forwardIntraInstanceCopiesAllAttachmentsAndCanonicalOrigin() {
+    /** The shared fixture of the intra-instance forward tests: a TWO-attachment source message
+     *  ("original text" by bob in channel "src" of this instance) plus the target/actor stubs.
+     *  The stubs only the HAPPY paths need are lenient — the 400-cases below never reach them
+     *  (strict stubs would flag them unused). */
+    private record ForwardFixture(Long targetId, Long sourceId, AttachmentRef pic, AttachmentRef doc,
+                                  Message source,
+                                  java.util.concurrent.atomic.AtomicReference<Message> savedRef) {
+    }
+
+    private ForwardFixture seedForwardSource() {
         Long targetId = 7L;
         Long sourceId = 90L;
         Channel target = new Channel("target", ChannelType.TEXT);
@@ -623,7 +631,6 @@ class MessageServiceTest {
         actor.setId(5L);
         User sourceAuthor = new User("bob", "hash");
         sourceAuthor.setId(6L);
-        // TWO attachments: the intra-instance copy must carry the whole list, keys shared.
         AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png");
         AttachmentRef doc = new AttachmentRef("attachments/abc/doc.pdf", "doc.pdf");
         Message source = new Message(sourceChannel, sourceAuthor, "original text");
@@ -631,28 +638,113 @@ class MessageServiceTest {
         source.setAttachments(attachmentListCodec.write(java.util.List.of(pic, doc)));
         source.setCreatedAt(java.time.Instant.parse("2026-01-01T10:00:00Z"));
         ServerProfile profile = org.mockito.Mockito.mock(ServerProfile.class);
-        when(profile.getName()).thenReturn("OAK Dev");
+        org.mockito.Mockito.lenient().when(profile.getName()).thenReturn("OAK Dev");
         java.util.concurrent.atomic.AtomicReference<Message> savedRef = new java.util.concurrent.atomic.AtomicReference<>();
 
         when(channelRepository.findById(targetId)).thenReturn(Optional.of(target));
         when(userRepository.findByUsername("alice")).thenReturn(Optional.of(actor));
         when(messageRepository.findById(sourceId)).thenReturn(Optional.of(source));
-        when(serverProfileRepository.singleton()).thenReturn(profile);
-        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/pic.png")).thenReturn("https://minio/get/pic.png");
-        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/doc.pdf")).thenReturn("https://minio/get/doc.pdf");
-        when(messageRepository.save(any(Message.class))).thenAnswer(inv -> {
+        org.mockito.Mockito.lenient().when(serverProfileRepository.singleton()).thenReturn(profile);
+        org.mockito.Mockito.lenient().when(attachmentUrlSigner.presignedGetUrl("attachments/abc/pic.png"))
+                .thenReturn("https://minio/get/pic.png");
+        org.mockito.Mockito.lenient().when(attachmentUrlSigner.presignedGetUrl("attachments/abc/doc.pdf"))
+                .thenReturn("https://minio/get/doc.pdf");
+        org.mockito.Mockito.lenient().when(messageRepository.save(any(Message.class))).thenAnswer(inv -> {
             savedRef.set(inv.getArgument(0));
             return inv.getArgument(0);
         });
-        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+        org.mockito.Mockito.lenient().when(mentionParser.parse(any(), any(), any()))
+                .thenReturn(java.util.List.of());
+        return new ForwardFixture(targetId, sourceId, pic, doc, source, savedRef);
+    }
 
-        MessageResponse response = messageService.forward(targetId,
-                new ForwardMessageRequest(sourceId, "client content ignored",
-                        java.util.List.of(new AttachmentRef("client/fake.png", "fake.png")),
-                        "Fake Server", "fake-channel", 99L, "faker", null, null),
+    @Test
+    void forwardIntraInstanceSubsetCopiesOnlyChosenAttachment() {
+        ForwardFixture fixture = seedForwardSource();
+
+        MessageResponse response = messageService.forward(fixture.targetId(),
+                new ForwardMessageRequest(fixture.sourceId(), null,
+                        java.util.List.of(fixture.pic()), null, null, null, null, null, null),
                 "alice");
 
-        // Payload copied from the source, not from the client-supplied fields — ALL attachments.
+        // The image viewer's "forward the image": ONLY the chosen file, and the source's text is
+        // dropped (it was written about all the images).
+        assertNull(response.content());
+        assertEquals(1, response.attachments().size());
+        assertEquals("pic.png", response.attachments().get(0).fileName());
+        assertEquals("https://minio/get/pic.png", response.attachments().get(0).url());
+        verify(attachmentUrlSigner, org.mockito.Mockito.never()).presignedGetUrl("attachments/abc/doc.pdf");
+        // Canonical TRUSTED origin still derived server-side.
+        assertEquals("OAK Dev", response.forward().serverName());
+        assertEquals("src", response.forward().channelName());
+        assertEquals(6L, response.forward().authorId());
+        assertEquals("bob", response.forward().authorUsername());
+        assertEquals(fixture.source().getCreatedAt(), response.forward().createdAt());
+        assertTrue(response.forward().trusted());
+        // The saved row mirrors the response.
+        assertNull(fixture.savedRef().get().getContent());
+        assertEquals(1, attachmentListCodec.read(fixture.savedRef().get().getAttachments()).size());
+        assertTrue(fixture.savedRef().get().getForwardTrusted());
+        assertNull(fixture.savedRef().get().getRepliedToId());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + fixture.targetId()), any(MessageResponse.class));
+    }
+
+    @Test
+    void forwardIntraInstanceSubsetRejectsForeignKey() {
+        ForwardFixture fixture = seedForwardSource();
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.forward(fixture.targetId(),
+                        new ForwardMessageRequest(fixture.sourceId(), null,
+                                java.util.List.of(new AttachmentRef("client/fake.png", "fake.png")),
+                                null, null, null, null, null, null),
+                        "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+        verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    @Test
+    void forwardIntraInstanceSubsetRejectsDuplicate() {
+        ForwardFixture fixture = seedForwardSource();
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.forward(fixture.targetId(),
+                        new ForwardMessageRequest(fixture.sourceId(), null,
+                                java.util.List.of(fixture.pic(), fixture.pic()),
+                                null, null, null, null, null, null),
+                        "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+    }
+
+    @Test
+    void forwardIntraInstanceSubsetRejectsEmptyList() {
+        ForwardFixture fixture = seedForwardSource();
+
+        // An empty subset would drop the content AND the attachments — fail with a clear 400
+        // instead of the generic content-or-attachment one at the bottom of forward().
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.forward(fixture.targetId(),
+                        new ForwardMessageRequest(fixture.sourceId(), null, java.util.List.of(),
+                                null, null, null, null, null, null),
+                        "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+    }
+
+    @Test
+    void forwardIntraInstanceNullAttachmentListCopiesAll() {
+        ForwardFixture fixture = seedForwardSource();
+
+        MessageResponse response = messageService.forward(fixture.targetId(),
+                new ForwardMessageRequest(fixture.sourceId(), "client content ignored",
+                        null, "Fake Server", "fake-channel", 99L, "faker", null, null),
+                "alice");
+
+        // Legacy whole-message forward: null attachments = copy EVERYTHING, client-supplied
+        // payload/origin fields ignored.
         assertEquals("original text", response.content());
         assertEquals(2, response.attachments().size());
         assertEquals("pic.png", response.attachments().get(0).fileName());
@@ -666,15 +758,15 @@ class MessageServiceTest {
         assertEquals("src", response.forward().channelName());
         assertEquals(6L, response.forward().authorId());
         assertEquals("bob", response.forward().authorUsername());
-        assertEquals(source.getCreatedAt(), response.forward().createdAt());
+        assertEquals(fixture.source().getCreatedAt(), response.forward().createdAt());
         assertTrue(response.forward().trusted());
         // A forward is never a reply.
         assertNull(response.reply());
-        assertNull(savedRef.get().getRepliedToId());
-        assertTrue(savedRef.get().getForwardTrusted());
+        assertNull(fixture.savedRef().get().getRepliedToId());
+        assertTrue(fixture.savedRef().get().getForwardTrusted());
         // Rides the BASE topic (the full MessageResponse needs no suffix of its own).
         verify(messagingTemplate).convertAndSend(
-                eq(MessageService.CHANNEL_TOPIC_PREFIX + targetId), any(MessageResponse.class));
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + fixture.targetId()), any(MessageResponse.class));
     }
 
     @Test

@@ -34,6 +34,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -275,7 +276,10 @@ public class MessageService {
      *  forwarder. Two modes — intra-instance ({@code sourceMessageId} set: the server derives the
      *  payload AND every origin field canonically, {@code trusted=true}) and cross-instance
      *  snapshot (client-supplied payload+origin on trust, {@code trusted=false}) — see
-     *  {@link ForwardMessageRequest}. Gates: READ_MESSAGE_HISTORY on the source channel (mode a
+     *  {@link ForwardMessageRequest}. In mode (a) a non-null {@code request.attachments()} selects
+     *  a SUBSET of the source's attachments (the image viewer's "forward the image": only the
+     *  chosen files are copied and the source text is dropped); null copies everything (legacy
+     *  behaviour). Gates: READ_MESSAGE_HISTORY on the source channel (mode a
      *  only; in a DM that is the participant check), SEND_MESSAGES (+ ATTACH_FILES when the copy
      *  carries an attachment) on the TARGET channel. Broadcast rides the base channel topic — the
      *  full {@code MessageResponse} needs no topic of its own. A forward is never a reply
@@ -301,11 +305,20 @@ public class MessageService {
             Message source = messageRepository.findById(request.sourceMessageId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source message not found"));
             auth.requireInChannel(actor, source.getChannel(), Permission.READ_MESSAGE_HISTORY);
-            content = source.getContent();
-            // Verbatim copy: ALL keys are shared with the source (MinIO objects are never
-            // deleted with messages), no per-attachment re-sign or upload. A stored row cannot
-            // exceed MAX_ATTACHMENTS, so no cap re-check here.
-            attachments = attachmentListCodec.read(source.getAttachments());
+            // Verbatim copy: keys are shared with the source (MinIO objects are never deleted
+            // with messages), no per-attachment re-sign or upload. A stored row cannot exceed
+            // MAX_ATTACHMENTS, so no cap re-check here.
+            List<AttachmentRef> sourceAttachments = attachmentListCodec.read(source.getAttachments());
+            if (request.attachments() != null) {
+                // The image viewer's "forward the image": the client picked PART of the source's
+                // attachments. Content is dropped — the source text was written about ALL the
+                // images, and a non-empty subset keeps the content-or-attachment gate satisfied.
+                attachments = subsetOf(request.attachments(), sourceAttachments);
+                content = null;
+            } else {
+                attachments = sourceAttachments;
+                content = source.getContent();
+            }
             originServer = serverProfileRepository.singleton().getName();
             originChannel = source.getChannel().getName();
             originAuthorId = source.getAuthor().getId();
@@ -593,6 +606,34 @@ public class MessageService {
             }
         }
         return kept;
+    }
+
+    /** Validates a client-selected attachment subset for an intra-instance forward (the image
+     *  viewer's "forward the image"): every key must be one of the SOURCE's current keys (the
+     *  picker can only choose what the message carries — a foreign key would smuggle an unlisted
+     *  MinIO object into a new message), no duplicates, and the list must be non-empty (the
+     *  subset mode drops the content, so an empty subset would violate content-or-attachment —
+     *  fail here with a clear 400 instead of the generic one at the bottom of {@code forward}).
+     *  The edit() subset checks are the direct precedent. */
+    private List<AttachmentRef> subsetOf(List<AttachmentRef> requested, List<AttachmentRef> sourceAttachments) {
+        if (requested.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Forward must select at least one attachment");
+        }
+        Set<String> sourceKeys = sourceAttachments.stream()
+                .map(AttachmentRef::key).filter(Objects::nonNull).collect(Collectors.toSet());
+        Set<String> seenKeys = new HashSet<>();
+        for (AttachmentRef ref : requested) {
+            if (ref == null || ref.key() == null || !sourceKeys.contains(ref.key())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Unknown attachment: " + (ref == null ? null : ref.key()));
+            }
+            if (!seenKeys.add(ref.key())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Duplicate attachment: " + ref.key());
+            }
+        }
+        return List.copyOf(requested);
     }
 
     /** Appends the reply ping (Discord-style): replying to someone's message mentions them
