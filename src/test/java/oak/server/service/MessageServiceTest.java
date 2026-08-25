@@ -256,6 +256,41 @@ class MessageServiceTest {
     }
 
     @Test
+    void createSignsTheVideoPreviewAlongsideTheVideo() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        AttachmentRef clip = new AttachmentRef("attachments/abc/clip.mp4", "clip.mp4",
+                "attachments/def/clip-thumb.jpg", 65_000L);
+        Message saved = new Message(channel, author, null);
+        saved.setId(103L);
+        saved.setAttachments(attachmentListCodec.write(java.util.List.of(clip)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
+        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/clip.mp4"))
+                .thenReturn("https://minio/get/clip.mp4");
+        when(attachmentUrlSigner.presignedGetUrl("attachments/def/clip-thumb.jpg"))
+                .thenReturn("https://minio/get/clip-thumb.jpg");
+        when(messageRepository.save(any(Message.class))).thenReturn(saved);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.create(channelId,
+                new CreateMessageRequest(null, java.util.List.of(clip), null), "alice");
+
+        AttachmentResponse attachment = response.attachments().get(0);
+        assertEquals("attachments/def/clip-thumb.jpg", attachment.thumbnailKey());
+        assertEquals("https://minio/get/clip-thumb.jpg", attachment.thumbnailUrl());
+        assertEquals(65_000L, attachment.durationMillis());
+        verify(attachmentUrlSigner).presignedGetUrl("attachments/def/clip-thumb.jpg");
+        // The preview metadata persists into the JSON column, not just the response.
+        java.util.List<AttachmentRef> stored =
+                attachmentListCodec.read(saved.getAttachments());
+        assertEquals("attachments/def/clip-thumb.jpg", stored.get(0).thumbnailKey());
+    }
+
+    @Test
     void createSignsEveryAttachmentOfAMultiAttachmentMessage() {
         Long channelId = 7L;
         Channel channel = new Channel("general", ChannelType.TEXT);

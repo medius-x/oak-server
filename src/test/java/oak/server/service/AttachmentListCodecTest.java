@@ -33,6 +33,29 @@ class AttachmentListCodecTest {
     }
 
     @Test
+    void roundTripsVideoPreviewMetadata() {
+        List<AttachmentRef> attachments = List.of(new AttachmentRef(
+                "attachments/abc/clip.mp4", "clip.mp4", "attachments/def/clip-thumb.jpg", 65_000L));
+
+        List<AttachmentRef> back = codec.read(codec.write(attachments));
+
+        assertEquals(attachments, back);
+        assertEquals("attachments/def/clip-thumb.jpg", back.get(0).thumbnailKey());
+        assertEquals(65_000L, back.get(0).durationMillis());
+    }
+
+    @Test
+    void prePreviewRowsReadWithNullMetadata() {
+        // Rows written before the preview feature carry only key/fileName — the lenient reader
+        // must surface them with null preview fields, not fail.
+        List<AttachmentRef> back = codec.read(
+                "[{\"key\":\"attachments/abc/clip.mp4\",\"fileName\":\"clip.mp4\"}]");
+        assertEquals(1, back.size());
+        assertNull(back.get(0).thumbnailKey());
+        assertNull(back.get(0).durationMillis());
+    }
+
+    @Test
     void emptyListWritesToEmptyJsonArrayAndBack() {
         assertEquals(List.of(), codec.read(codec.write(List.of())));
     }

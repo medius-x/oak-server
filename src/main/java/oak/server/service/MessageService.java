@@ -471,7 +471,13 @@ public class MessageService {
                                        Map<Long, Message> replyOriginals) {
         List<AttachmentResponse> attachments = attachmentListCodec.read(message.getAttachments()).stream()
                 .map(ref -> new AttachmentResponse(ref.fileName(),
-                        attachmentUrlSigner.presignedGetUrl(ref.key()), ref.key()))
+                        attachmentUrlSigner.presignedGetUrl(ref.key()), ref.key(),
+                        ref.thumbnailKey(),
+                        // The preview JPEG is re-signed like any attachment — a thumbnail key
+                        // mentioned in the JSON column resolves through the same capability model.
+                        ref.thumbnailKey() == null ? null
+                                : attachmentUrlSigner.presignedGetUrl(ref.thumbnailKey()),
+                        ref.durationMillis()))
                 .toList();
         ReplyInfo reply = replyInfo(message, replyOriginals, MAX_QUOTE_DEPTH);
         List<MentionResponse> mentions = withReplyMention(message, mentionParser.parse(

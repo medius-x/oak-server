@@ -102,6 +102,37 @@ class AttachmentIntegrationTest {
                 "the re-signed URL is structurally present (null only under the noop signer)");
     }
 
+    /** The video-preview wire fields: a message posted with {@code thumbnailKey} +
+     *  {@code durationMillis} echoes them out, and the THUMBNAIL key itself resolves through
+     *  the fresh-link endpoint (the native LIKE over the JSON column finds keys in any field —
+     *  a preview overrunning its hour-old URL re-mints like any attachment). */
+    @Test
+    void videoPreviewFieldsRoundTripAndThumbnailKeyResolvesFreshLink() throws Exception {
+        String token = registerAndLogin("carol", "supersecret");
+        Long channelId = createChannel(token, "video", "TEXT");
+        MvcResult created = mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"attachments/abc/clip.mp4\","
+                                + "\"fileName\":\"clip.mp4\",\"thumbnailKey\":\"attachments/def/clip-thumb.jpg\","
+                                + "\"durationMillis\":65000}]}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.attachments[0].thumbnailKey").value("attachments/def/clip-thumb.jpg"))
+                .andExpect(jsonPath("$.attachments[0].durationMillis").value(65000))
+                .andReturn();
+        assertNull(JsonPath.read(created.getResponse().getContentAsString(), "$.attachments[0].thumbnailUrl"),
+                "thumbnailUrl is structurally present (null only under the noop signer)");
+
+        // the preview's OWN key re-mints through the same capability model
+        MvcResult freshLink = mockMvc.perform(
+                        get("/api/attachments/link?key=attachments/def/clip-thumb.jpg")
+                                .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+        assertNull(JsonPath.read(freshLink.getResponse().getContentAsString(), "$.url"),
+                "the preview's fresh link is structurally present (null only under the noop signer)");
+    }
+
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
