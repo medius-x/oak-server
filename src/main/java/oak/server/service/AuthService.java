@@ -1,6 +1,7 @@
 package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.LoginRequest;
 import oak.server.dto.RegisterRequest;
@@ -22,12 +23,15 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
@@ -41,6 +45,7 @@ import java.util.UUID;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class AuthService {
 
     private final UserRepository userRepository;
@@ -117,11 +122,22 @@ public class AuthService {
     @Transactional(noRollbackFor = ResponseStatusException.class)
     public AuthResponse refresh(String rawRefreshToken) {
         RefreshToken stored = refreshTokenRepository.findByTokenHash(hashToken(rawRefreshToken))
-                .orElseThrow(() -> unauthorized("Invalid refresh token"));
+                .orElseThrow(() -> {
+                    log.warn("[auth-refresh] rejected UNKNOWN token fp={} from {}",
+                            fingerprint(rawRefreshToken), remoteAddress());
+                    return unauthorized("Invalid refresh token");
+                });
 
         if (stored.isRevoked()) {
             // Reuse of an already-rotated token → revoke the whole family so the breach is contained.
+            // The log is the forensics for the periodic "session expired" mystery: tokenAge shows HOW
+            // STALE the re-presented copy was (an ancient copy = some holder never refreshed — a second
+            // process/device; a fresh one = a genuine in-flight race), fp matches the client's own log.
             String familyId = stored.getFamilyId();
+            log.warn("[auth-refresh] REUSE — user={} family={} presentedId={} tokenAge={} fp={} from {}: family revoked",
+                    stored.getUser().getUsername(), familyId, stored.getId(),
+                    Duration.between(stored.getCreatedAt(), Instant.now()),
+                    fingerprint(rawRefreshToken), remoteAddress());
             if (familyId != null) {
                 refreshTokenRepository.findByFamilyId(familyId)
                         .forEach(token -> token.setRevoked(true));
@@ -133,16 +149,27 @@ public class AuthService {
             // so refuse the refresh and revoke the family to stop the churn (noRollbackFor keeps the
             // revoke, same as the reuse branch above).
             String familyId = stored.getFamilyId();
+            log.warn("[auth-refresh] BANNED — user={} family={} presentedId={} from {}: family revoked",
+                    stored.getUser().getUsername(), familyId, stored.getId(), remoteAddress());
             if (familyId != null) {
                 refreshTokenRepository.findByFamilyId(familyId).forEach(token -> token.setRevoked(true));
             }
             throw unauthorized("This account is banned");
         }
         if (stored.getExpiresAt().isBefore(Instant.now())) {
+            log.info("[auth-refresh] rejected EXPIRED token user={} presentedId={} tokenAge={} fp={} from {}",
+                    stored.getUser().getUsername(), stored.getId(),
+                    Duration.between(stored.getCreatedAt(), Instant.now()),
+                    fingerprint(rawRefreshToken), remoteAddress());
             throw unauthorized("Refresh token expired");
         }
         stored.setRevoked(true); // rotate: the presented refresh is single-use
-        return issueTokens(stored.getUser(), stored.getFamilyId());
+        AuthResponse response = issueTokens(stored.getUser(), stored.getFamilyId());
+        log.info("[auth-refresh] rotated user={} family={} presentedId={} tokenAge={} fp={} from {}",
+                stored.getUser().getUsername(), stored.getFamilyId(), stored.getId(),
+                Duration.between(stored.getCreatedAt(), Instant.now()),
+                fingerprint(rawRefreshToken), remoteAddress());
+        return response;
     }
 
     /**
@@ -215,5 +242,23 @@ public class AuthService {
 
     private static ResponseStatusException forbidden(String reason) {
         return new ResponseStatusException(HttpStatus.FORBIDDEN, reason);
+    }
+
+    /** 8 chars of the RAW token — enough to correlate an {@code [auth-refresh]} line with the
+     *  client's own log (which prints the same fingerprint), far too little to reconstruct it. */
+    private static String fingerprint(String rawToken) {
+        if (rawToken == null) {
+            return "null";
+        }
+        return rawToken.substring(0, Math.min(8, rawToken.length()));
+    }
+
+    /** The caller's address — distinguishes machines if a token ever shows up from somewhere
+     *  unexpected. "no-request" covers a future non-HTTP caller (none today). */
+    private static String remoteAddress() {
+        if (RequestContextHolder.getRequestAttributes() instanceof ServletRequestAttributes servletAttributes) {
+            return servletAttributes.getRequest().getRemoteAddr();
+        }
+        return "no-request";
     }
 }

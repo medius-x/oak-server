@@ -11,6 +11,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -63,6 +65,41 @@ class AttachmentIntegrationTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON).content("{\"content\":\"\"}"))
                 .andExpect(status().isBadRequest());
+    }
+
+    /** The fresh-link re-mint (a streamed playback that outlived its hour-old presigned URL):
+     *  auth-gated, 404 on an unknown key, and for a key a message actually references it
+     *  returns the re-signed URL field (null under the noop signer — structurally present). */
+    @Test
+    void freshLinkRequiresAuthKnownKeyAndReSigns() throws Exception {
+        String token = registerAndLogin("bob", "supersecret");
+        Long channelId = createChannel(token, "media", "TEXT");
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"attachments/abc/song.mp3\",\"fileName\":\"song.mp3\"}]}"))
+                .andExpect(status().isCreated());
+
+        // no token -> 401
+        mockMvc.perform(get("/api/attachments/link?key=attachments/abc/song.mp3"))
+                .andExpect(status().isUnauthorized());
+
+        // unknown key -> 404 (the slashes in the key are why this is a query param)
+        mockMvc.perform(get("/api/attachments/link?key=attachments/xyz/missing.mp4")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/attachments/link")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isNotFound());
+
+        // the referenced key -> 200 with the url field present (null under the noop signer —
+        // MockMvc's jsonPath().exists() treats an explicit null as absent, so read it directly)
+        MvcResult freshLink = mockMvc.perform(get("/api/attachments/link?key=attachments/abc/song.mp3")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andReturn();
+        assertNull(JsonPath.read(freshLink.getResponse().getContentAsString(), "$.url"),
+                "the re-signed URL is structurally present (null only under the noop signer)");
     }
 
     private String registerAndLogin(String username, String password) throws Exception {

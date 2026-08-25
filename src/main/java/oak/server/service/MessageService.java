@@ -636,6 +636,17 @@ public class MessageService {
         return List.copyOf(requested);
     }
 
+    /** Does any message reference this attachment key? Backs the fresh-link re-mint endpoint:
+     *  an unknown key 404s there instead of handing out a signature for arbitrary input. The
+     *  attachments column is JSON text and keys embed a random UUID, so the LIKE in the repo
+     *  only ever matches a real reference. */
+    public boolean attachmentExists(String key) {
+        if (key == null || key.isBlank()) {
+            return false;
+        }
+        return messageRepository.countByAttachmentsTextLike("%" + key + "%") > 0;
+    }
+
     /** Appends the reply ping (Discord-style): replying to someone's message mentions them
      *  without an {@code @token} in the text. Skipped for own messages, deleted originals, and
      *  when the parsed mentions already carry a USER mention of the same author (no double ping).

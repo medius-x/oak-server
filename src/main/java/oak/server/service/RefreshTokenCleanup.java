@@ -36,6 +36,11 @@ public class RefreshTokenCleanup {
     }
 
     @Scheduled(fixedDelayString = "${oak.security.refresh-cleanup-interval:PT6H}")
+    @Transactional   // the scheduler enters HERE through the proxy, but purgeExpired() is then a
+    // SELF-invocation that bypasses it — the transaction must be opened at this entry point.
+    // Without it every purge died with TransactionRequiredException (a live bug since birth:
+    // the cleanup never actually deleted anything; the existing test called purgeExpired()
+    // externally, through the proxy, and so never saw it).
     void scheduledPurge() {
         purgeExpired();
     }

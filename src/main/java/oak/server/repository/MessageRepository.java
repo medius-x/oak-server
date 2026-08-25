@@ -4,6 +4,8 @@ import oak.server.entity.Message;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -40,4 +42,12 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
      *  reject the channel DELETE. Runs in the caller's transaction. */
     @Transactional
     void deleteByChannelId(Long channelId);
+
+    /** Messages whose attachment list (the JSON-text {@code attachments} column) contains the
+     *  pattern. Native SQL because JPQL sees the converter type ({@code List<AttachmentRef>}),
+     *  not the stored text; keys embed a random UUID, so a {@code LIKE %key%} hit is a real
+     *  reference, never a substring of ANOTHER key (a {@code _} in a file name can only cause a
+     *  harmless false positive that later 404s at MinIO). */
+    @Query(value = "SELECT COUNT(*) FROM messages WHERE attachments LIKE :pattern", nativeQuery = true)
+    long countByAttachmentsTextLike(@Param("pattern") String pattern);
 }
