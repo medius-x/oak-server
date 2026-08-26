@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
 import oak.server.entity.ChannelType;
+import oak.server.entity.ChannelUserOverride;
 import oak.server.entity.Permission;
 import oak.server.entity.Permissions;
 import oak.server.entity.Role;
@@ -11,6 +12,7 @@ import oak.server.entity.RoleKind;
 import oak.server.entity.User;
 import oak.server.repository.ChannelParticipantRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
+import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import org.springframework.http.HttpStatus;
@@ -36,8 +38,11 @@ import java.util.Set;
  *
  * <p><b>Resolution</b> (Discord-style): the base mask is the OR of {@code @everyone} and the member's
  * roles; the OWNER role or the {@code ADMINISTRATOR} bit short-circuits to "all". Channel overrides
- * (per role, including {@code @everyone}) layer on top: a deny bit wins, then an allow bit, else the
- * base permission; {@code ADMINISTRATOR} bypasses overrides entirely.
+ * then apply in LAYERS (see {@link #resolveChannelMask}): the channel's {@code @everyone} row, then
+ * the member's own role rows (deny beats allow within the layer), then the member's personal row —
+ * a later layer overrides an earlier one, which is what makes private channels possible (a role or
+ * member ALLOW beats an {@code @everyone} DENY). Finally, {@code VIEW_CHANNEL} is the master gate:
+ * without it every other channel permission resolves to false.
  */
 @Service
 @RequiredArgsConstructor
@@ -46,6 +51,9 @@ public class AuthorizationService {
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
     private final ChannelRoleOverrideRepository overrideRepository;
+    /** Member-level (per-user) channel overrides — the top resolution layer of
+     *  {@link #resolveChannelMask}. */
+    private final ChannelUserOverrideRepository userOverrideRepository;
     /** DM membership — the single authority for DM / group-DM access (the branch in {@link #hasInChannel}). */
     private final ChannelParticipantRepository participantRepository;
 
@@ -104,9 +112,10 @@ public class AuthorizationService {
     }
 
     /**
-     * Channel-scoped permission with override resolution. ADMINISTRATOR bypasses overrides; otherwise
-     * gather the overrides of every role the member has (including {@code @everyone}): a deny bit
-     * wins, then an allow bit, else fall back to the base permission.
+     * Channel-scoped permission with layered override resolution and the VIEW_CHANNEL master gate.
+     * ADMINISTRATOR bypasses overrides entirely (admins see and use every non-DM channel). DM /
+     * group-DM stays membership-only. Every other permission requires VIEW_CHANNEL — a hidden
+     * channel denies everything, even where the @everyone base still grants READ/SEND/CONNECT.
      */
     public boolean hasInChannel(User user, Channel channel, Permission permission) {
         if (channel == null) {
@@ -119,17 +128,42 @@ public class AuthorizationService {
         if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
             return participantRepository.existsByChannelIdAndUserId(channel.getId(), user.getId());
         }
-        long base = effectiveBase(user);
-        if (Permissions.has(base, Permission.ADMINISTRATOR)) {
-            return true;
+        long mask = resolveChannelMask(user, channel);
+        boolean canView = Permissions.has(mask, Permission.VIEW_CHANNEL);
+        return permission == Permission.VIEW_CHANNEL
+                ? canView
+                : canView && Permissions.has(mask, permission);
+    }
+
+    /**
+     * The member's effective permission bitmask on one TEXT/VOICE channel, layered Discord-style:
+     * <ol>
+     *   <li>base = OR of {@code @everyone} and the member's roles (OWNER/ADMINISTRATOR → all,
+     *       returned immediately — admins bypass every override).</li>
+     *   <li>Layer 1 — the channel's {@code @everyone} override row.</li>
+     *   <li>Layer 2 — the override rows of the member's own roles (allows OR-ed, denies OR-ed, deny
+     *       wins within the layer).</li>
+     *   <li>Layer 3 — the member's personal override row, applied last: a member allow beats any
+     *       role/@everyone deny.</li>
+     * </ol>
+     * Later layers override earlier ones ({@code (mask | allow) & ~deny} per layer) — the property
+     * the private-channel grants depend on. DM channels are NOT mask-resolvable: their authority
+     * is membership (see {@link #hasInChannel}), not a bitmask.
+     */
+    public long resolveChannelMask(User user, Channel channel) {
+        long mask = effectiveBase(user);
+        if (Permissions.has(mask, Permission.ADMINISTRATOR)) {
+            return Permissions.ALL;
         }
         // Load @everyone once (its id marks the always-applying override); comparing override role ids
         // by id is proxy-safe (getId() does not initialize the LAZY role) — no N+1.
         Long everyoneRoleId = everyone().getId();
         Set<Long> memberRoleIds = roleIdsOf(user);
 
-        long allow = Permissions.NONE;
-        long deny = Permissions.NONE;
+        long everyoneAllow = Permissions.NONE;
+        long everyoneDeny = Permissions.NONE;
+        long roleAllow = Permissions.NONE;
+        long roleDeny = Permissions.NONE;
         List<ChannelRoleOverride> overrides = overrideRepository.findByChannelId(channel.getId());
         for (ChannelRoleOverride override : overrides) {
             Role overrideRole = override.getRole();
@@ -137,18 +171,22 @@ public class AuthorizationService {
                 continue;
             }
             Long roleId = overrideRole.getId();
-            if (everyoneRoleId.equals(roleId) || memberRoleIds.contains(roleId)) {
-                allow |= override.getAllow();
-                deny |= override.getDeny();
+            if (everyoneRoleId.equals(roleId)) {
+                everyoneAllow |= override.getAllow();
+                everyoneDeny |= override.getDeny();
+            } else if (memberRoleIds.contains(roleId)) {
+                roleAllow |= override.getAllow();
+                roleDeny |= override.getDeny();
             }
         }
-        if (Permissions.has(deny, permission)) {
-            return false;
+        mask = (mask | everyoneAllow) & ~everyoneDeny;
+        mask = (mask | roleAllow) & ~roleDeny;
+        ChannelUserOverride userOverride = userOverrideRepository
+                .findByChannelIdAndUserId(channel.getId(), user.getId()).orElse(null);
+        if (userOverride != null) {
+            mask = (mask | userOverride.getAllow()) & ~userOverride.getDeny();
         }
-        if (Permissions.has(allow, permission)) {
-            return true;
-        }
-        return Permissions.has(base, permission);
+        return mask;
     }
 
     private Set<Long> roleIdsOf(User user) {

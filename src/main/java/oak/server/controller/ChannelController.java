@@ -31,9 +31,11 @@ public class ChannelController {
 
     private final ChannelService channelService;
 
+    /** The caller's viewer-filtered channel list: hidden channels (no VIEW_CHANNEL) are omitted,
+     *  channels they can see but not use carry {@code locked=true}. */
     @GetMapping
-    public List<ChannelResponse> list() {
-        return channelService.list();
+    public List<ChannelResponse> list(@AuthenticationPrincipal UserDetails principal) {
+        return channelService.list(principal.getUsername());
     }
 
     @PostMapping

@@ -8,7 +8,8 @@ package oak.server.entity;
  *
  * <p><b>Stability contract:</b> never reorder these constants and never insert one above another —
  * the ordinal <i>is</i> the persisted bit position, so reordering would silently remap every stored
- * role's permissions. Add new permissions by <i>appending</i> at the end of a group. Constants marked
+ * role's permissions. Add new permissions ONLY by appending at the very END of the enum — inserting
+ * "at the end of a group" would shift every later group's bits. Constants marked
  * {@code future} in the catalog already have a bit and a UI checkbox, but no enforcement point yet —
  * they light up as the matching feature (reactions, emojis, audit log …) lands.
  */
@@ -47,7 +48,14 @@ public enum Permission {
     USE_VAD(Group.VOICE),                  // voice activity (vs push-to-talk)
     PRIORITY_SPEAKER(Group.VOICE),
     STREAM(Group.VOICE),                   // screen share
-    REQUEST_TO_SPEAK(Group.VOICE);         // future: stage channels
+    REQUEST_TO_SPEAK(Group.VOICE),         // future: stage channels
+
+    // --- Channel access (labeled GENERAL for the catalog; bit position at the very END —
+    // an in-group insert would remap every later group's persisted bits) ---
+    VIEW_CHANNEL(Group.GENERAL);           // see a channel at all: private channels deny it for
+                                           // @everyone (hidden) or deny read/connect (locked, visible);
+                                           // AuthorizationService treats it as the master gate for
+                                           // every other channel permission
 
     public enum Group { GENERAL, TEXT, VOICE }
 

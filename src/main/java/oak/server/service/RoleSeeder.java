@@ -50,7 +50,8 @@ public class RoleSeeder implements ApplicationRunner {
             Permission.ADD_REACTIONS.bit,
             Permission.CONNECT.bit,
             Permission.SPEAK.bit,
-            Permission.USE_VAD.bit);
+            Permission.USE_VAD.bit,
+            Permission.VIEW_CHANNEL.bit);
 
     private final RoleRepository roleRepository;
     private final UserRepository userRepository;
@@ -59,6 +60,7 @@ public class RoleSeeder implements ApplicationRunner {
     @Transactional
     public void run(ApplicationArguments args) {
         seedEveryone();
+        ensureEveryoneViewChannel();
         seedOwner();
         ensureOwnerAssigned();
     }
@@ -70,6 +72,25 @@ public class RoleSeeder implements ApplicationRunner {
         Role everyone = new Role("@everyone", 0, EVERYONE_DEFAULTS, false, false, RoleKind.EVERYONE);
         roleRepository.save(everyone);
         log.info("[RBAC] Seeded @everyone role");
+    }
+
+    /** Unconditionally re-grants {@link Permission#VIEW_CHANNEL} to the stored @everyone row on every
+     *  boot. VIEW is treated as <i>infrastructure</i>: @everyone must hold it server-wide (private
+     *  channels deny it per-channel / per-role, never on the base row), so a database seeded before
+     *  the bit existed — or one where the bit was flipped off by hand — would otherwise turn EVERY
+     *  channel invisible for every non-owner the moment the master gate ships. Unlike the
+     *  ADD_REACTIONS manual-migration precedent, this failure mode is instance-wide darkness, hence
+     *  the automatic repair. Public for a direct integration test. */
+    public void ensureEveryoneViewChannel() {
+        roleRepository.findByKind(RoleKind.EVERYONE).ifPresent(everyone -> {
+            if ((everyone.getPermissions() & Permission.VIEW_CHANNEL.bit) != 0) {
+                return;
+            }
+            everyone.setPermissions(everyone.getPermissions() | Permission.VIEW_CHANNEL.bit);
+            roleRepository.save(everyone);
+            log.warn("[RBAC] @everyone was missing VIEW_CHANNEL — re-granted (private channels stay "
+                    + "managed by per-channel overrides only)");
+        });
     }
 
     private void seedOwner() {

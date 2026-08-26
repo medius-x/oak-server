@@ -7,11 +7,13 @@ import oak.server.dto.CreateChannelRequest;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
 import oak.server.entity.Permission;
+import oak.server.entity.Permissions;
 import oak.server.entity.User;
 import oak.server.repository.ChannelParticipantRepository;
 import oak.server.repository.ChannelReadStateRepository;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
+import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.MessageRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -19,6 +21,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -36,22 +39,46 @@ public class ChannelService {
      *  indistinguishable from a create on the client. */
     public static final String CHANNELS_DELETED_TOPIC = "/topic/channels.deleted";
 
+    /** STOMP topic pinging clients that channel VISIBILITY changed (an override was written) so they
+     *  refetch their viewer-filtered channel list. The body is a bare timestamp — no channel data is
+     *  broadcast, so the ping leaks nothing to clients that must not learn which channel changed. */
+    public static final String CHANNELS_CHANGED_TOPIC = "/topic/channels.changed";
+
     private final ChannelRepository channelRepository;
     private final MessageRepository messageRepository;
     private final ChannelRoleOverrideRepository channelRoleOverrideRepository;
+    private final ChannelUserOverrideRepository channelUserOverrideRepository;
     private final ChannelParticipantRepository channelParticipantRepository;
     private final ChannelReadStateRepository channelReadStateRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
 
+    /**
+     * The channel list AS SEEN BY ONE VIEWER: channels the member cannot VIEW (hidden) are omitted
+     * entirely, and channels they can see but not use carry {@code locked=true} (no history read for
+     * text / no connect for voice — the client's lock badge). DM / group-DM channels never appear
+     * here: their access is membership-based (the DM branch in
+     * {@code AuthorizationService.hasInChannel}), surfaced separately via the DM-channel endpoints.
+     */
     @Transactional(readOnly = true)
-    public List<ChannelResponse> list() {
-        // DM / group-DM channels are private — never appear in the public channel sidebar. Their access
-        // is membership-based (the DM branch in AuthorizationService.hasInChannel), surfaced separately
-        // via the DM-channel endpoints.
-        return channelRepository.findByTypeNotInOrderByIdAsc(List.of(ChannelType.DM, ChannelType.GROUP_DM)).stream()
-                .map(ChannelResponse::from)
-                .toList();
+    public List<ChannelResponse> list(String viewerUsername) {
+        User viewer = auth.requireUser(viewerUsername);
+        List<Channel> channels = channelRepository.findByTypeNotInOrderByIdAsc(
+                List.of(ChannelType.DM, ChannelType.GROUP_DM));
+        List<ChannelResponse> visible = new ArrayList<>(channels.size());
+        for (Channel channel : channels) {
+            // One mask per channel covers both the visibility filter and the locked flag (the
+            // ReadStateService.snapshot precedent — a per-channel override load either way).
+            long mask = auth.resolveChannelMask(viewer, channel);
+            if (!Permissions.has(mask, Permission.VIEW_CHANNEL)) {
+                continue;
+            }
+            boolean locked = channel.getType() == ChannelType.VOICE
+                    ? !Permissions.has(mask, Permission.CONNECT)
+                    : !Permissions.has(mask, Permission.READ_MESSAGE_HISTORY);
+            visible.add(ChannelResponse.from(channel, locked));
+        }
+        return visible;
     }
 
     @Transactional
@@ -95,6 +122,7 @@ public class ChannelService {
         // is a cheap no-op for public channels and keeps the admin DELETE path safe on a DM channel.
         messageRepository.deleteByChannelId(channelId);
         channelRoleOverrideRepository.deleteByChannelId(channelId);
+        channelUserOverrideRepository.deleteByChannelId(channelId);
         channelParticipantRepository.deleteByChannelId(channelId);
         channelReadStateRepository.deleteByChannelId(channelId);
         channelRepository.delete(channel);

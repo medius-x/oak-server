@@ -2,16 +2,22 @@ package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.ChannelOverrideResponse;
+import oak.server.dto.ChannelUserOverrideResponse;
 import oak.server.dto.UpsertOverrideRequest;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
+import oak.server.entity.ChannelUserOverride;
 import oak.server.entity.Permissions;
 import oak.server.entity.Permission;
 import oak.server.entity.Role;
+import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
+import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
+import oak.server.repository.UserRepository;
 import org.springframework.http.HttpStatus;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -20,8 +26,11 @@ import java.util.List;
 
 /**
  * Per-channel permission overrides (Discord-style private channels). All mutations require
- * {@link Permission#MANAGE_CHANNELS}. An override is keyed by (channel, role) and upserted —
- * {@code allow}/{@code deny} are stored as bitmasks and decoded to/from permission names at the edges.
+ * {@link Permission#MANAGE_CHANNELS}. Role overrides are keyed by (channel, role) and member
+ * overrides by (channel, user) — both upserted; {@code allow}/{@code deny} are stored as bitmasks
+ * and decoded to/from permission names at the edges. Every successful mutation pings
+ * {@link ChannelService#CHANNELS_CHANGED_TOPIC} so clients refetch their viewer-filtered channel
+ * list (visibility / lock state may have flipped for someone).
  */
 @Service
 @RequiredArgsConstructor
@@ -29,8 +38,11 @@ public class ChannelOverrideService {
 
     private final ChannelRepository channelRepository;
     private final RoleRepository roleRepository;
+    private final UserRepository userRepository;
     private final ChannelRoleOverrideRepository overrideRepository;
+    private final ChannelUserOverrideRepository userOverrideRepository;
     private final AuthorizationService auth;
+    private final SimpMessagingTemplate messagingTemplate;
 
     @Transactional(readOnly = true)
     public List<ChannelOverrideResponse> list(Long channelId) {
@@ -53,6 +65,7 @@ public class ChannelOverrideService {
         override.setAllow(allow);
         override.setDeny(deny);
         override = overrideRepository.save(override);
+        pingChannelsChanged();
         return ChannelOverrideResponse.from(override);
     }
 
@@ -61,6 +74,47 @@ public class ChannelOverrideService {
         auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         overrideRepository.findByChannelIdAndRoleId(channelId, roleId)
                 .ifPresent(overrideRepository::delete);
+        pingChannelsChanged();
+    }
+
+    // --- member-level (per-user) overrides: the private-channel "allow these specific people" ---
+
+    @Transactional(readOnly = true)
+    public List<ChannelUserOverrideResponse> listUserOverrides(Long channelId) {
+        requireChannel(channelId);
+        return userOverrideRepository.findWithUserByChannelId(channelId).stream()
+                .map(ChannelUserOverrideResponse::from)
+                .toList();
+    }
+
+    @Transactional
+    public ChannelUserOverrideResponse upsertUserOverride(Long channelId, Long userId,
+            UpsertOverrideRequest request, String actorUsername) {
+        auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
+        Channel channel = requireChannel(channelId);
+        User target = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
+        long allow = Permissions.fromNames(request.allow());
+        long deny = Permissions.fromNames(request.deny());
+        ChannelUserOverride override = userOverrideRepository.findByChannelIdAndUserId(channelId, userId)
+                .orElseGet(() -> new ChannelUserOverride(channel, target, 0L, 0L));
+        override.setAllow(allow);
+        override.setDeny(deny);
+        override = userOverrideRepository.save(override);
+        pingChannelsChanged();
+        return ChannelUserOverrideResponse.from(override);
+    }
+
+    @Transactional
+    public void deleteUserOverride(Long channelId, Long userId, String actorUsername) {
+        auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
+        userOverrideRepository.findByChannelIdAndUserId(channelId, userId)
+                .ifPresent(userOverrideRepository::delete);
+        pingChannelsChanged();
+    }
+
+    private void pingChannelsChanged() {
+        messagingTemplate.convertAndSend(ChannelService.CHANNELS_CHANGED_TOPIC, System.currentTimeMillis());
     }
 
     private Channel requireChannel(Long channelId) {
