@@ -13,6 +13,7 @@ import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
+import oak.server.websocket.VoiceAccessEnforcer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -55,6 +56,8 @@ class ChannelOverrideServiceTest {
     private AuthorizationService auth;
     @Mock
     private SimpMessagingTemplate messagingTemplate;
+    @Mock
+    private VoiceAccessEnforcer voiceEnforcer;
 
     @InjectMocks
     private ChannelOverrideService channelOverrideService;
@@ -79,6 +82,7 @@ class ChannelOverrideServiceTest {
         assertEquals(3L, response.roleId());
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
+        verify(voiceEnforcer).enforceConnect(7L, "alice");
     }
 
     @Test
@@ -92,6 +96,7 @@ class ChannelOverrideServiceTest {
 
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
+        verify(voiceEnforcer).enforceConnect(7L, "alice");
     }
 
     @Test
@@ -108,6 +113,7 @@ class ChannelOverrideServiceTest {
 
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
+        verify(voiceEnforcer).enforceConnect(7L, "alice");
     }
 
     @Test
@@ -121,6 +127,7 @@ class ChannelOverrideServiceTest {
 
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
+        verify(voiceEnforcer).enforceConnect(7L, "alice");
     }
 
     @Test
@@ -136,6 +143,9 @@ class ChannelOverrideServiceTest {
 
         org.mockito.Mockito.verify(messagingTemplate, org.mockito.Mockito.never())
                 .convertAndSend(anyString(), any(Object.class));
+        // A denied mutation enforces nothing either — no eviction may fire for it.
+        org.mockito.Mockito.verify(voiceEnforcer, org.mockito.Mockito.never())
+                .enforceConnect(any(), anyString());
     }
 
     // --- fixtures ---

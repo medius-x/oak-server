@@ -16,6 +16,7 @@ import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
+import oak.server.websocket.VoiceAccessEnforcer;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -30,7 +31,9 @@ import java.util.List;
  * overrides by (channel, user) — both upserted; {@code allow}/{@code deny} are stored as bitmasks
  * and decoded to/from permission names at the edges. Every successful mutation pings
  * {@link ChannelService#CHANNELS_CHANGED_TOPIC} so clients refetch their viewer-filtered channel
- * list (visibility / lock state may have flipped for someone).
+ * list (visibility / lock state may have flipped for someone) — and re-enforces CONNECT on the
+ * channel's LIVE voice session ({@link VoiceAccessEnforcer}): members who just lost access are
+ * force-evicted from the room they are already sitting in, not merely locked out of re-entry.
  */
 @Service
 @RequiredArgsConstructor
@@ -43,6 +46,7 @@ public class ChannelOverrideService {
     private final ChannelUserOverrideRepository userOverrideRepository;
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
+    private final VoiceAccessEnforcer voiceEnforcer;
 
     @Transactional(readOnly = true)
     public List<ChannelOverrideResponse> list(Long channelId) {
@@ -66,6 +70,7 @@ public class ChannelOverrideService {
         override.setDeny(deny);
         override = overrideRepository.save(override);
         pingChannelsChanged();
+        voiceEnforcer.enforceConnect(channelId, actorUsername);
         return ChannelOverrideResponse.from(override);
     }
 
@@ -75,6 +80,7 @@ public class ChannelOverrideService {
         overrideRepository.findByChannelIdAndRoleId(channelId, roleId)
                 .ifPresent(overrideRepository::delete);
         pingChannelsChanged();
+        voiceEnforcer.enforceConnect(channelId, actorUsername);
     }
 
     // --- member-level (per-user) overrides: the private-channel "allow these specific people" ---
@@ -102,6 +108,7 @@ public class ChannelOverrideService {
         override.setDeny(deny);
         override = userOverrideRepository.save(override);
         pingChannelsChanged();
+        voiceEnforcer.enforceConnect(channelId, actorUsername);
         return ChannelUserOverrideResponse.from(override);
     }
 
@@ -111,6 +118,7 @@ public class ChannelOverrideService {
         userOverrideRepository.findByChannelIdAndUserId(channelId, userId)
                 .ifPresent(userOverrideRepository::delete);
         pingChannelsChanged();
+        voiceEnforcer.enforceConnect(channelId, actorUsername);
     }
 
     private void pingChannelsChanged() {

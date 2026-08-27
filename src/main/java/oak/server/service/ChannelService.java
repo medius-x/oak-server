@@ -15,6 +15,7 @@ import oak.server.repository.ChannelRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.MessageRepository;
+import oak.server.websocket.VoiceAccessEnforcer;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -52,6 +53,7 @@ public class ChannelService {
     private final ChannelReadStateRepository channelReadStateRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
+    private final VoiceAccessEnforcer voiceEnforcer;
 
     /**
      * The channel list AS SEEN BY ONE VIEWER: channels the member cannot VIEW (hidden) are omitted
@@ -108,13 +110,21 @@ public class ChannelService {
     }
 
     /** Deletes a channel and everything tied to it (messages + per-channel overrides), then broadcasts
-     *  the deleted id so every connected client drops it from their sidebar. Requires
+     *  the deleted id so every connected client drops it from their sidebar. Anyone sitting in the
+     *  channel's voice room is force-evicted first ({@link VoiceAccessEnforcer} — registry + Janus +
+     *  cooperative push): the {@code channels.deleted} broadcast only honest clients act on, and a
+     *  rogue one would otherwise keep the ephemeral Janus room alive single-handedly. Requires
      *  {@code MANAGE_CHANNELS} (OWNER/ADMINISTRATOR short-circuit applies). */
     @Transactional
     public void delete(Long channelId, String actorUsername) {
         auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        // Evict every live voice session BEFORE destroying the channel's data: the LEFT/KICKED pushes
+        // then reference a channel that still exists for concurrent readers, and a later FK/rollback
+        // failure of the purge at worst evicts members of a still-existing channel (they can rejoin —
+        // self-healing). kickAll never queries the database, so it adds no rollback surface here.
+        voiceEnforcer.kickAll(channelId, actorUsername);
         // The FKs messages.channel_id, channel_role_overrides.channel_id, channel_participants.channel_id,
         // and channel_read_states.channel_id have no ON DELETE CASCADE (ddl-auto=update never adds
         // cascade), so the children must go first or the channel DELETE fails with a FK violation.

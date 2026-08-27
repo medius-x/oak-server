@@ -4,25 +4,41 @@ import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
+import oak.server.entity.User;
+import oak.server.repository.ChannelParticipantRepository;
+import oak.server.repository.ChannelReadStateRepository;
 import oak.server.repository.ChannelRepository;
+import oak.server.repository.ChannelRoleOverrideRepository;
+import oak.server.repository.ChannelUserOverrideRepository;
+import oak.server.repository.MessageRepository;
+import oak.server.websocket.VoiceAccessEnforcer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Mockito tests for the channel-creation push wiring: creating a channel persists it and
- * broadcasts it on the STOMP channels topic, so every connected client adds it to its sidebar
- * live (the same REST-write → push pattern as {@code MessageService}).
+ * Mockito tests for the channel lifecycle wiring: creating a channel persists it and broadcasts it
+ * on the STOMP channels topic, so every connected client adds it to its sidebar live (the same
+ * REST-write → push pattern as {@code MessageService}); deleting one evicts its live voice room
+ * BEFORE the data purge ({@code VoiceAccessEnforcer}) and then broadcasts the deleted id.
  */
 @ExtendWith(MockitoExtension.class)
 class ChannelServiceTest {
@@ -30,9 +46,21 @@ class ChannelServiceTest {
     @Mock
     private ChannelRepository channelRepository;
     @Mock
+    private MessageRepository messageRepository;
+    @Mock
+    private ChannelRoleOverrideRepository channelRoleOverrideRepository;
+    @Mock
+    private ChannelUserOverrideRepository channelUserOverrideRepository;
+    @Mock
+    private ChannelParticipantRepository channelParticipantRepository;
+    @Mock
+    private ChannelReadStateRepository channelReadStateRepository;
+    @Mock
     private SimpMessagingTemplate messagingTemplate;
     @Mock
     private AuthorizationService auth;
+    @Mock
+    private VoiceAccessEnforcer voiceEnforcer;
 
     @InjectMocks
     private ChannelService channelService;
@@ -63,5 +91,42 @@ class ChannelServiceTest {
         verify(messagingTemplate).convertAndSend(eq(ChannelService.CHANNELS_TOPIC), captor.capture());
         assertEquals(ChannelType.TEXT, captor.getValue().type());
         assertEquals("lounge", captor.getValue().name());
+    }
+
+    @Test
+    void deleteEvictsLiveVoiceSessionsBeforePurgingChildren() {
+        // The eviction must precede the purge: the LEFT/KICKED pushes then reference a channel
+        // that still exists for concurrent readers.
+        Channel channel = new Channel("temp", ChannelType.VOICE);
+        channel.setId(42L);
+        when(channelRepository.findById(42L)).thenReturn(Optional.of(channel));
+        when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+
+        channelService.delete(42L, "alice");
+
+        InOrder order = inOrder(voiceEnforcer, messageRepository);
+        order.verify(voiceEnforcer).kickAll(42L, "alice");
+        order.verify(messageRepository).deleteByChannelId(42L);
+        verify(messagingTemplate).convertAndSend(eq(ChannelService.CHANNELS_DELETED_TOPIC), eq(42L));
+    }
+
+    @Test
+    void deleteOfAMissingChannelKicksNobody() {
+        // The 404 short-circuit gates the eviction — a no-op delete on a missing channel must
+        // never evict a (stale) room.
+        when(channelRepository.findById(42L)).thenReturn(Optional.empty());
+        when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+
+        assertThrows(ResponseStatusException.class, () -> channelService.delete(42L, "alice"));
+
+        verify(voiceEnforcer, never()).kickAll(any(), anyString());
+    }
+
+    // --- fixtures ---
+
+    private static User user(Long id, String username) {
+        User user = new User(username, "hash");
+        user.setId(id);
+        return user;
     }
 }

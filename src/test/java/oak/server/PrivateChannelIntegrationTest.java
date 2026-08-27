@@ -1,6 +1,7 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import oak.server.dto.VoiceChannelMembersDto;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
 import oak.server.entity.ChannelUserOverride;
@@ -14,6 +15,8 @@ import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.service.RoleSeeder;
+import oak.server.websocket.VoiceMembershipTracker;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,6 +27,11 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -61,6 +69,19 @@ class PrivateChannelIntegrationTest {
     private ChannelUserOverrideRepository channelUserOverrideRepository;
     @Autowired
     private RoleSeeder roleSeeder;
+    @Autowired
+    private VoiceMembershipTracker voiceTracker;
+
+    /** Sessions staged into the voice registry by {@link #stageInVoice} — the tracker is a singleton
+     *  of the cached Spring context and NOT transactional, so without this cleanup a keeper's
+     *  session would leak into every later test in the class. */
+    private final List<String> stagedVoiceSessions = new ArrayList<>();
+
+    @AfterEach
+    void clearStagedVoiceSessions() {
+        stagedVoiceSessions.forEach(voiceTracker::exit);
+        stagedVoiceSessions.clear();
+    }
 
     /** A database seeded before the VIEW_CHANNEL bit existed would turn every channel invisible for
      *  every non-owner — the boot-time re-grant in {@link RoleSeeder} is the repair. Reproduce the
@@ -271,6 +292,68 @@ class PrivateChannelIntegrationTest {
     }
 
     // --- helpers (the RbacIntegrationTest idiom) ---
+
+    /** Live-session enforcement: rewriting an override evicts a member who just lost CONNECT from
+     *  the room they are ALREADY sitting in (registry exit + forced layers + KICKED push — the
+     *  noop-Janus test profile keeps the forced layers silent), while a member whose layer-3 user
+     *  allow still grants CONNECT stays put. */
+    @Test
+    void overrideMutationEvictsLiveSessionsWithoutConnect() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        register("carol", "supersecret");
+        Long channelId = createChannel(ownerToken, "vip-lounge", "VOICE");
+
+        Channel channel = channelRepository.findById(channelId).orElseThrow();
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(channel, everyone, 0L, Permission.CONNECT.bit));
+        stageInVoice("bob", channelId);
+        stageInVoice("carol", channelId);
+
+        // carol gets a personal allow (layer 3 beats the @everyone deny); bob gets nothing — the
+        // mutation itself is the trigger, no separate REST call per member.
+        Long carolId = userRepository.findByUsername("carol").orElseThrow().getId();
+        mockMvc.perform(put("/api/channels/" + channelId + "/overrides/users/" + carolId)
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"allow\":[\"CONNECT\"],\"deny\":[]}"))
+                .andExpect(status().isOk());
+
+        assertTrue(voiceSnapshotUsernames(channelId).contains("carol"), "carol keeps her allow — stays");
+        assertFalse(voiceSnapshotUsernames(channelId).contains("bob"), "bob lost CONNECT — evicted live");
+    }
+
+    /** Deleting a channel force-evicts everyone sitting in its voice room — the channels.deleted
+     *  broadcast only honest clients act on, the eviction also covers the rest. */
+    @Test
+    void channelDeletionEvictsEveryoneInVoice() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        Long channelId = createChannel(ownerToken, "temp", "VOICE");
+        stageInVoice("bob", channelId);
+
+        mockMvc.perform(delete("/api/channels/" + channelId)
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isNoContent());
+
+        assertFalse(voiceSnapshotUsernames(channelId).contains("bob"), "the room is gone — bob is evicted");
+    }
+
+    /** Stages a user into the live-voice registry the way a STOMP {@code /app/voice.join} would —
+     *  the registry is the enforcement's input, so tests drive it directly (MockMvc cannot SEND). */
+    private void stageInVoice(String username, Long channelId) {
+        String sessionId = "test-session-" + username;
+        voiceTracker.enter(sessionId, username, channelId);
+        stagedVoiceSessions.add(sessionId);
+    }
+
+    private List<String> voiceSnapshotUsernames(Long channelId) {
+        return voiceTracker.snapshot().stream()
+                .filter(room -> channelId.equals(room.channelId()))
+                .findFirst()
+                .map(VoiceChannelMembersDto::usernames)
+                .orElse(List.of());
+    }
 
     private String registerAndLogin(String username, String password) throws Exception {
         register(username, password);

@@ -2,13 +2,11 @@ package oak.server.websocket;
 
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.VoiceControlCommand;
-import oak.server.dto.VoiceControlEvent;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.service.AuthorizationService;
 import oak.server.service.JanusVoiceAccessService;
 import org.springframework.messaging.handler.annotation.MessageMapping;
-import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
 
 import java.security.Principal;
@@ -17,9 +15,10 @@ import java.util.Optional;
 /**
  * Server-side voice control: a member with the matching permission mutes/deafens/kicks another in a
  * voice room. Mute/deafen set state in {@link VoiceMembershipTracker} (which broadcasts the new state on
- * {@code /topic/voice.state} so everyone — including the target, who complies — sees it); kick force-exits
- * the target's sessions (→ {@code LEFT} on {@code /topic/voice}) and pushes a targeted {@code KICKED}
- * command to the target ({@code /user/queue/voice.control}) so its client tears down its Janus connection.
+ * {@code /topic/voice.state} so everyone — including the target, who complies — sees it); kick delegates
+ * to {@link VoiceAccessEnforcer#forceLeave} — the shared four-step forced-exit recipe (registry exit →
+ * Janus plugin-kick → token revocation → targeted {@code KICKED} push on
+ * {@code /user/queue/voice.control}) also used to evict members who lost channel access live.
  *
  * <p><b>Forced layer</b> (works against a rogue client ignoring the cooperative pushes): every action
  * ALSO goes to Janus through {@link JanusVoiceAccessService} — mute maps to videoroom {@code moderate}
@@ -38,13 +37,10 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class VoiceControlHandler {
 
-    /** Per-member queue a kick command is pushed to (the target's client disconnects its voice). */
-    public static final String VOICE_CONTROL_QUEUE = "/queue/voice.control";
-
     private final VoiceMembershipTracker tracker;
     private final AuthorizationService auth;
     private final JanusVoiceAccessService voiceAccess;
-    private final SimpMessagingTemplate messagingTemplate;
+    private final VoiceAccessEnforcer voiceEnforcer;
 
     @MessageMapping("/voice.mute")
     public void mute(VoiceControlCommand command, Principal actor) {
@@ -70,11 +66,7 @@ public class VoiceControlHandler {
         if (!canControl(command, actor, Permission.MOVE_MEMBERS)) {
             return;
         }
-        tracker.kick(command.channelId(), command.targetUsername());
-        voiceAccess.forceKick(command.channelId(), command.targetUsername());
-        voiceAccess.revokeTokens(command.channelId(), command.targetUsername());
-        messagingTemplate.convertAndSendToUser(command.targetUsername(), VOICE_CONTROL_QUEUE,
-                new VoiceControlEvent("KICKED", command.channelId(), actor.getName()));
+        voiceEnforcer.forceLeave(command.channelId(), command.targetUsername(), actor.getName());
     }
 
     /** Resolves actor + target, checks the permission and the role hierarchy (canActOn). */
