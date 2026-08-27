@@ -64,6 +64,8 @@ oak:
     rest-url: ${JANUS_REST_URL:http://localhost:8088/janus}  # server -> Janus REST
     ws-url: ${JANUS_WS_URL:ws://localhost:8188}              # client -> Janus WebSocket
     admin-secret: ${JANUS_ADMIN_SECRET:janus_admin_secret}
+    admin-url: ${JANUS_ADMIN_URL:http://localhost:7088/admin}  # Admin API (token bookkeeping)
+    admin-enabled: ${JANUS_ADMIN_ENABLED:true}                # false in tests -> noop service
 
   # Coturn — TURN server for P2P fallback (1-on-1 calls behind NAT).
   # These are handed to WebRTC clients as part of their ICE config.

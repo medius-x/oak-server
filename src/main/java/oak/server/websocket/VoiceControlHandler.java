@@ -6,6 +6,7 @@ import oak.server.dto.VoiceControlEvent;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.service.AuthorizationService;
+import oak.server.service.JanusVoiceAccessService;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
@@ -20,8 +21,16 @@ import java.util.Optional;
  * the target's sessions (→ {@code LEFT} on {@code /topic/voice}) and pushes a targeted {@code KICKED}
  * command to the target ({@code /user/queue/voice.control}) so its client tears down its Janus connection.
  *
+ * <p><b>Forced layer</b> (works against a rogue client ignoring the cooperative pushes): every action
+ * ALSO goes to Janus through {@link JanusVoiceAccessService} — mute maps to videoroom {@code moderate}
+ * (the gateway stops relaying the target's audio), kick maps to plugin-level {@code kick} (media torn
+ * down instantly) plus token revocation (blocks re-entry until a fresh /room). Both are fire-and-forget
+ * on a dedicated executor — this handler runs on the STOMP {@code clientInboundChannel} and must not
+ * block. Deafen has NO forced counterpart: {@code moderate} only gates the target's outgoing m-lines,
+ * so "making a rogue deaf" is impossible without kicking them — it stays cooperative (documented).
+ *
  * <p>Must be {@code @Controller} (Spring scans {@code @MessageMapping} only on {@code @Controller} beans —
- * see {@link CallSignalingHandler}). Permission + hierarchy checks go through {@link AuthorizationService},
+ * see {@code CallSignalingHandler}). Permission + hierarchy checks go through {@link AuthorizationService},
  * whose {@code findUser} eager-fetches roles, so this is safe on the STOMP {@code clientInboundChannel}
  * thread (no OpenEntityManagerInView there). A denied control is a silent no-op.
  */
@@ -34,6 +43,7 @@ public class VoiceControlHandler {
 
     private final VoiceMembershipTracker tracker;
     private final AuthorizationService auth;
+    private final JanusVoiceAccessService voiceAccess;
     private final SimpMessagingTemplate messagingTemplate;
 
     @MessageMapping("/voice.mute")
@@ -41,7 +51,9 @@ public class VoiceControlHandler {
         if (!canControl(command, actor, Permission.MUTE_MEMBERS)) {
             return;
         }
-        tracker.setMuted(command.channelId(), command.targetUsername(), Boolean.TRUE.equals(command.muted()));
+        boolean mute = Boolean.TRUE.equals(command.muted());
+        tracker.setMuted(command.channelId(), command.targetUsername(), mute);
+        voiceAccess.moderateAudio(command.channelId(), command.targetUsername(), mute);
     }
 
     @MessageMapping("/voice.deafen")
@@ -49,6 +61,7 @@ public class VoiceControlHandler {
         if (!canControl(command, actor, Permission.DEAFEN_MEMBERS)) {
             return;
         }
+        // Cooperative only — see the class javadoc (no forced counterpart exists).
         tracker.setDeafened(command.channelId(), command.targetUsername(), Boolean.TRUE.equals(command.deafened()));
     }
 
@@ -58,6 +71,8 @@ public class VoiceControlHandler {
             return;
         }
         tracker.kick(command.channelId(), command.targetUsername());
+        voiceAccess.forceKick(command.channelId(), command.targetUsername());
+        voiceAccess.revokeTokens(command.channelId(), command.targetUsername());
         messagingTemplate.convertAndSendToUser(command.targetUsername(), VOICE_CONTROL_QUEUE,
                 new VoiceControlEvent("KICKED", command.channelId(), actor.getName()));
     }

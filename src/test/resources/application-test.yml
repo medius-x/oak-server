@@ -30,7 +30,9 @@ oak:
     user: oak
     password: test-secret
     realm: oak.local
-  janus:             # Janus SFU config (test values)
+  janus:             # Janus SFU config (test values); admin disabled -> noop voice-access service
     rest-url: http://localhost:8088/janus
     ws-url: ws://localhost:8188
     admin-secret: test-secret
+    admin-url: http://localhost:7088/admin
+    admin-enabled: false

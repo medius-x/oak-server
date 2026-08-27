@@ -44,7 +44,10 @@ class RoomControllerIntegrationTest {
         mockMvc.perform(get("/api/channels/" + channelId + "/room").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.janusUrl").value("http://localhost:8088/janus"))
-                .andExpect(jsonPath("$.roomId").value(channelId));
+                .andExpect(jsonPath("$.roomId").value(channelId))
+                // noop voice-access service (admin-enabled=false in the test profile)
+                .andExpect(jsonPath("$.token").value("test-token"))
+                .andExpect(jsonPath("$.pin").value("test-pin"));
     }
 
     @Test

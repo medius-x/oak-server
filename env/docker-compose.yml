@@ -70,7 +70,16 @@ services:
   # the JavaFX client connects directly via WebSocket (port 8188).
   # Running on the canyan image defaults: videoroom + websocket transport enabled.
   janus:
-    image: canyan/janus-gateway:latest
+    # Locally built image: canyan/janus-gateway + janus/janus.jcfg with
+    # token_auth = true (every API request must carry a token minted by
+    # oak-server via the Admin API; see JanusVoiceAccessService) and
+    # admin_secret = "janus_admin_secret" (matches JANUS_ADMIN_SECRET in .env —
+    # the stock default "janusoverlord" is a live hole with 7088 host-mapped).
+    # BAKED IN, not bind-mounted: a bind-mounted janus.jcfg wedges janus on
+    # Docker Desktop file sharing (live bug — see janus/Dockerfile). Rebuild
+    # after editing the config: docker compose build janus.
+    build: ./janus
+    image: oak-janus:secured
     container_name: oak-janus
     restart: unless-stopped
     ports:
