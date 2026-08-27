@@ -231,6 +231,41 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
         }));
     }
 
+    @Override
+    public Map<Long, List<String>> tokenHoldersByChannel() {
+        Map<Long, java.util.TreeSet<String>> byChannel = new HashMap<>();
+        synchronized (tokensByUserChannel) {
+            for (Map.Entry<String, Map<Long, Deque<String>>> user : tokensByUserChannel.entrySet()) {
+                for (Long channelId : user.getValue().keySet()) {
+                    byChannel.computeIfAbsent(channelId, channel -> new java.util.TreeSet<>())
+                            .add(user.getKey());
+                }
+            }
+        }
+        Map<Long, List<String>> snapshot = new HashMap<>();
+        for (Map.Entry<Long, java.util.TreeSet<String>> room : byChannel.entrySet()) {
+            snapshot.put(room.getKey(), List.copyOf(room.getValue()));
+        }
+        return snapshot;
+    }
+
+    @Override
+    public void destroyRoom(long channelId) {
+        submitAction(() -> destroyRoomNow(channelId));
+    }
+
+    /** Synchronous core of {@link #destroyRoom} — package-private for the unit test. */
+    void destroyRoomNow(long channelId) {
+        withControlHandle(control -> {
+            Map<String, Object> destroy = new HashMap<>();
+            destroy.put("request", "destroy");
+            destroy.put("room", channelId);
+            destroy.put("secret", roomSecret(channelId));
+            JsonNode response = client.message(control.sessionId(), control.handleId(), destroy, control.token());
+            logResult("destroy room " + channelId, response);
+        });
+    }
+
     // --- control-session plumbing ---
 
     /** An attached-but-not-joined videoroom handle plus the throwaway token that opened it. */

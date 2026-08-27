@@ -3,6 +3,9 @@ package oak.server.service;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
+import java.util.Map;
+
 /**
  * Stand-in {@link JanusVoiceAccessService} used when the Janus Admin API is disabled (the test
  * profile). Deterministic constants keep {@code RoomController} structurally testable; the real
@@ -42,6 +45,16 @@ public class NoopJanusVoiceAccessService implements JanusVoiceAccessService {
 
     @Override
     public void moderateAudio(long channelId, String username, boolean mute) {
+        // No-op.
+    }
+
+    @Override
+    public Map<Long, List<String>> tokenHoldersByChannel() {
+        return Map.of();
+    }
+
+    @Override
+    public void destroyRoom(long channelId) {
         // No-op.
     }
 }

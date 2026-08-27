@@ -54,6 +54,7 @@ public class ChannelService {
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
     private final VoiceAccessEnforcer voiceEnforcer;
+    private final JanusVoiceAccessService voiceAccess;
 
     /**
      * The channel list AS SEEN BY ONE VIEWER: channels the member cannot VIEW (hidden) are omitted
@@ -125,6 +126,11 @@ public class ChannelService {
         // failure of the purge at worst evicts members of a still-existing channel (they can rejoin —
         // self-healing). kickAll never queries the database, so it adds no rollback surface here.
         voiceEnforcer.kickAll(channelId, actorUsername);
+        // Then tear down the gateway room itself: the registry sweep only reaches STOMP-visible
+        // members, while a non-STOMP rogue would otherwise hold the ephemeral room alive until the
+        // gateway restarts. Fire-and-forget on the SAME single-thread executor as the evictions —
+        // submitted after them, so it runs after them.
+        voiceAccess.destroyRoom(channelId);
         // The FKs messages.channel_id, channel_role_overrides.channel_id, channel_participants.channel_id,
         // and channel_read_states.channel_id have no ON DELETE CASCADE (ddl-auto=update never adds
         // cascade), so the children must go first or the channel DELETE fails with a FK violation.

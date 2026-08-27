@@ -27,6 +27,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
@@ -61,6 +62,8 @@ class ChannelServiceTest {
     private AuthorizationService auth;
     @Mock
     private VoiceAccessEnforcer voiceEnforcer;
+    @Mock
+    private JanusVoiceAccessService voiceAccess;
 
     @InjectMocks
     private ChannelService channelService;
@@ -104,8 +107,11 @@ class ChannelServiceTest {
 
         channelService.delete(42L, "alice");
 
-        InOrder order = inOrder(voiceEnforcer, messageRepository);
+        // Registry eviction first, then the gateway room teardown (same executor, submission
+        // order), then the data purge.
+        InOrder order = inOrder(voiceEnforcer, voiceAccess, messageRepository);
         order.verify(voiceEnforcer).kickAll(42L, "alice");
+        order.verify(voiceAccess).destroyRoom(42L);
         order.verify(messageRepository).deleteByChannelId(42L);
         verify(messagingTemplate).convertAndSend(eq(ChannelService.CHANNELS_DELETED_TOPIC), eq(42L));
     }
@@ -113,13 +119,14 @@ class ChannelServiceTest {
     @Test
     void deleteOfAMissingChannelKicksNobody() {
         // The 404 short-circuit gates the eviction — a no-op delete on a missing channel must
-        // never evict a (stale) room.
+        // never evict a (stale) room or destroy anything.
         when(channelRepository.findById(42L)).thenReturn(Optional.empty());
         when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
 
         assertThrows(ResponseStatusException.class, () -> channelService.delete(42L, "alice"));
 
         verify(voiceEnforcer, never()).kickAll(any(), anyString());
+        verify(voiceAccess, never()).destroyRoom(anyLong());
     }
 
     // --- fixtures ---

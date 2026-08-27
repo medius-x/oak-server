@@ -10,6 +10,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -109,6 +110,25 @@ class JanusVoiceAccessServiceTest {
         verify(client, never()).removeToken(bobRoom5);
     }
 
+    @Test
+    void tokenHoldersByChannelMirrorsTheLiveTokenRegistry() {
+        when(client.addToken(anyString())).thenReturn(success());
+        service.issueVoiceToken("alice", 5L);
+        service.issueVoiceToken("alice", 6L);
+        service.issueVoiceToken("bob", 5L);
+
+        Map<Long, List<String>> holders = service.tokenHoldersByChannel();
+
+        // Sorted usernames per channel — the enforcement sweep input for non-STOMP rogues.
+        assertEquals(List.of("alice", "bob"), holders.get(5L));
+        assertEquals(List.of("alice"), holders.get(6L));
+
+        service.revokeTokensNow(5L, "alice");
+
+        assertEquals(List.of("bob"), service.tokenHoldersByChannel().get(5L));
+        assertEquals(List.of("alice"), service.tokenHoldersByChannel().get(6L));
+    }
+
     // --- room credentials ---
 
     @Test
@@ -183,5 +203,23 @@ class JanusVoiceAccessServiceTest {
 
         verify(client, never()).message(anyLong(), anyLong(),
                 argThat(body -> "create".equals(body.get("request"))), anyString());
+    }
+
+    @Test
+    void destroyRoomSignsTheAdminRequestWithTheRoomSecret() {
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(success());
+
+        // The synchronous core — the public method only wraps it in the executor.
+        service.destroyRoomNow(5L);
+
+        verify(client).message(eq(1L), eq(2L), argThat(body ->
+                        "destroy".equals(body.get("request"))
+                                && Long.valueOf(5L).equals(body.get("room"))
+                                && HttpJanusVoiceAccessService.hmacSha256("unit-secret", "oak-voice-secret:5")
+                                        .equals(body.get("secret"))),
+                anyString());
     }
 }

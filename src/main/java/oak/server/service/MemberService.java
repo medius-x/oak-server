@@ -10,6 +10,7 @@ import oak.server.entity.RoleKind;
 import oak.server.entity.User;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
+import oak.server.websocket.VoiceAccessEnforcer;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -26,7 +27,9 @@ import java.util.Set;
  * there is no membership entity to revoke, so "kick" is cooperative — it pushes a
  * {@code /queue/member.kick} command to the member's client to disconnect (and {@code banned=true}
  * when banning). "Ban" flags the account ({@link User#isBanned()}) so the member cannot log in or
- * open a STOMP connection again. All mutations broadcast a {@link MemberEvent}.
+ * open a STOMP connection again. All mutations broadcast a {@link MemberEvent}. Replacing a
+ * member's roles also re-enforces CONNECT on that member's live voice sessions
+ * ({@link VoiceAccessEnforcer}) — only their effective mask changed, so only their rooms recheck.
  */
 @Service
 @RequiredArgsConstructor
@@ -42,6 +45,7 @@ public class MemberService {
     private final AuthorizationService auth;
     private final AttachmentUrlSigner signer;
     private final SimpMessagingTemplate messagingTemplate;
+    private final VoiceAccessEnforcer voiceEnforcer;
 
     @Transactional(readOnly = true)
     public List<MemberResponse> list() {
@@ -95,6 +99,9 @@ public class MemberService {
         target.getRoles().clear();
         target.getRoles().addAll(newRoles);
         userRepository.save(target);
+        // The member's effective mask may have just lost CONNECT — evict them from rooms they no
+        // longer belong in (same in-transaction visibility as the override hooks; see VoiceAccessEnforcer).
+        voiceEnforcer.enforceConnectForUser(target.getUsername(), actorUsername);
         publish("rolesChanged", target.getId());
         return MemberResponse.from(target, signer, auth.isOwner(target));
     }

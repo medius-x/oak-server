@@ -6,6 +6,7 @@ import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
 import oak.server.entity.ChannelUserOverride;
 import oak.server.entity.Permission;
+import oak.server.entity.Permissions;
 import oak.server.entity.Role;
 import oak.server.entity.RoleKind;
 import oak.server.entity.User;
@@ -29,10 +30,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
@@ -337,6 +340,81 @@ class PrivateChannelIntegrationTest {
                 .andExpect(status().isNoContent());
 
         assertFalse(voiceSnapshotUsernames(channelId).contains("bob"), "the room is gone — bob is evicted");
+    }
+
+    /** The role-mask hook: editing a role's permissions (here @everyone's base CONNECT) sweeps
+     *  every occupied room; a cosmetic-only edit of the same role must not. */
+    @Test
+    void rolePermissionEditEvictsLiveVoiceSessions() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        Long channelId = createChannel(ownerToken, "lounge", "VOICE");
+        stageInVoice("bob", channelId);
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        Long everyoneId = everyone.getId();
+
+        // Cosmetic-only edit (mentionable): the mask is untouched — nobody is evicted.
+        mockMvc.perform(patch("/api/roles/" + everyoneId)
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"mentionable\":true}"))
+                .andExpect(status().isOk());
+        assertTrue(voiceSnapshotUsernames(channelId).contains("bob"), "mask untouched — bob stays");
+
+        // Strip CONNECT from @everyone: bob loses it in every room (OWNER alice bypasses).
+        long withoutConnect = roleRepository.findById(everyoneId).orElseThrow().getPermissions()
+                & ~Permission.CONNECT.bit;
+        String permissionsJson = Permissions.names(withoutConnect).stream()
+                .map(name -> "\"" + name + "\"")
+                .collect(Collectors.joining(","));
+        mockMvc.perform(patch("/api/roles/" + everyoneId)
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"permissions\":[" + permissionsJson + "]}"))
+                .andExpect(status().isOk());
+
+        assertFalse(voiceSnapshotUsernames(channelId).contains("bob"), "CONNECT stripped — bob evicted");
+    }
+
+    /** The member-roles hook: replacing one member's roles rechecks only THAT member — the one
+     *  stripped of the CONNECT-granting role is evicted, the still-holding member keeps talking. */
+    @Test
+    void memberRoleRemovalEvictsOnlyThatMember() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        register("carol", "supersecret");
+        Long channelId = createChannel(ownerToken, "vip-lounge", "VOICE");
+
+        // Private: @everyone denied CONNECT; a "Vip" role with a channel allow carries it.
+        Channel channel = channelRepository.findById(channelId).orElseThrow();
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(channel, everyone, 0L, Permission.CONNECT.bit));
+        Long roleId = createRole(ownerToken, "Vip", "CONNECT");
+        Role vip = roleRepository.findByName("Vip").orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(channel, vip, Permission.CONNECT.bit, 0L));
+        User bob = userRepository.findByUsername("bob").orElseThrow();
+        User carol = userRepository.findByUsername("carol").orElseThrow();
+        mockMvc.perform(put("/api/members/" + bob.getId() + "/roles")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"roleIds\":[" + roleId + "]}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(put("/api/members/" + carol.getId() + "/roles")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"roleIds\":[" + roleId + "]}"))
+                .andExpect(status().isOk());
+        stageInVoice("bob", channelId);
+        stageInVoice("carol", channelId);
+        assertTrue(voiceSnapshotUsernames(channelId).contains("bob"));
+        assertTrue(voiceSnapshotUsernames(channelId).contains("carol"));
+
+        // Strip carol's roles: she falls back to the @everyone deny — evicted; bob keeps Vip.
+        mockMvc.perform(put("/api/members/" + carol.getId() + "/roles")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"roleIds\":[]}"))
+                .andExpect(status().isOk());
+
+        assertFalse(voiceSnapshotUsernames(channelId).contains("carol"), "carol lost Vip — evicted");
+        assertTrue(voiceSnapshotUsernames(channelId).contains("bob"), "bob still holds Vip — stays");
     }
 
     /** Stages a user into the live-voice registry the way a STOMP {@code /app/voice.join} would —

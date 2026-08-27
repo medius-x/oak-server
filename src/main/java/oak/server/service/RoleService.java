@@ -14,6 +14,7 @@ import oak.server.entity.User;
 import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
+import oak.server.websocket.VoiceAccessEnforcer;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Service;
@@ -28,7 +29,10 @@ import java.util.List;
  * have dense integer positions managed by {@link #reorder}; a newly created role is placed at the top
  * of the custom ones. The {@code @everyone} and {@code OWNER} built-ins are protected (cannot be
  * deleted/renamed; {@code @everyone}'s permissions may be edited, {@code OWNER} is immutable). Every
- * mutation broadcasts a {@link RoleEvent} so connected clients refetch.
+ * mutation broadcasts a {@link RoleEvent} so connected clients refetch. A mask edit that changes the
+ * permissions and a role deletion also re-enforce CONNECT on live voice sessions
+ * ({@link VoiceAccessEnforcer}) — a role touches an arbitrary set of holders in an arbitrary set of
+ * rooms, so those sweeps go everywhere.
  */
 @Service
 @RequiredArgsConstructor
@@ -42,6 +46,7 @@ public class RoleService {
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
     private final ChannelRoleOverrideRepository channelRoleOverrideRepository;
+    private final VoiceAccessEnforcer voiceEnforcer;
 
     @Transactional(readOnly = true)
     public List<RoleResponse> list() {
@@ -96,6 +101,7 @@ public class RoleService {
             }
         }
         // @everyone: only permissions (and mentionable) are editable, never name/color/hoist
+        long permissionsBefore = role.getPermissions();
         if (request.permissions() != null) {
             role.setPermissions(Permissions.fromNames(request.permissions()));
         }
@@ -103,6 +109,10 @@ public class RoleService {
             role.setMentionable(request.mentionable());
         }
         role = roleRepository.save(role);
+        if (role.getPermissions() != permissionsBefore) {
+            // Only a real mask change can evict anyone — a rename/colour/hoist-only edit rechecks nothing.
+            voiceEnforcer.enforceEverywhere(actorUsername);
+        }
         publish("updated", role.getId());
         return RoleResponse.from(role);
     }
@@ -128,6 +138,8 @@ public class RoleService {
         channelRoleOverrideRepository.deleteAll(channelRoleOverrideRepository.findByRole_Id(roleId));
         channelRoleOverrideRepository.flush();
         roleRepository.delete(role);
+        // Holders lost the role (and the channel overrides died with it) — recheck every occupied room.
+        voiceEnforcer.enforceEverywhere(actorUsername);
         publish("deleted", roleId);
     }
 

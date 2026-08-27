@@ -1,5 +1,8 @@
 package oak.server.service;
 
+import java.util.List;
+import java.util.Map;
+
 /**
  * Voice-room access control against the Janus SFU, plus the FORCED layer of moderator actions that
  * works even against a rogue client ignoring the cooperative STOMP pushes.
@@ -37,4 +40,21 @@ public interface JanusVoiceAccessService {
 
     /** Server-side mutes (or unmutes) the user's outgoing audio — {@code moderate} with {@code mute=true/false}. */
     void moderateAudio(long channelId, String username, boolean mute);
+
+    /**
+     * Snapshot of live tokens: channelId → usernames still holding a non-revoked token. The enforcement
+     * input besides the STOMP membership registry — a rogue talking to Janus DIRECTLY never appears in
+     * the STOMP tracker, but its token was minted through {@code /room} under a real username, so it
+     * IS in this map and a permission sweep can still reach it.
+     */
+    Map<Long, List<String>> tokenHoldersByChannel();
+
+    /**
+     * Destroys the channel's videoroom (admin-secret signed) together with everyone still inside it —
+     * the forced-layer counterpart of channel deletion: registry eviction only pushes, while a
+     * non-STOMP rogue holds the room alive until the gateway restarts. Fire-and-forget; on the same
+     * single-thread executor as the other forced actions, so it runs after the evictions submitted
+     * before it.
+     */
+    void destroyRoom(long channelId);
 }

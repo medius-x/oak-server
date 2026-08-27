@@ -13,20 +13,30 @@ import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Enforces channel-permission changes against <b>already-live</b> voice sessions. The join-time
  * gates ({@code RoomController}'s {@code /room} REST gate and {@code VoiceMembershipHandler}'s STOMP
  * join) check {@link Permission#CONNECT} only when ENTERING — without this component, a member
  * already sitting in a room survived an admin flipping the channel private (or dropping their
- * allow) indefinitely. Every override mutation ({@code ChannelOverrideService}) and every channel
- * deletion ({@code ChannelService}) now re-resolves the live room here: members who no longer hold
- * CONNECT are evicted with the same forced-exit recipe as a moderator kick
- * ({@code VoiceControlHandler}) — both call {@link #forceLeave}.
+ * allow) indefinitely. Trigger points: every override mutation ({@code ChannelOverrideService}), a
+ * role-mask edit or role deletion ({@code RoleService} — affects every holder in every room), a
+ * member's role-set replacement ({@code MemberService}), and channel deletion
+ * ({@code ChannelService}). Members who no longer hold CONNECT are evicted with the same
+ * forced-exit recipe as a moderator kick ({@code VoiceControlHandler}) — both call
+ * {@link #forceLeave}.
+ *
+ * <p><b>Two registries feed the sweeps:</b> the STOMP membership tracker (honest clients) and the
+ * Janus token registry ({@code tokenHoldersByChannel} — a rogue talking to the gateway DIRECTLY,
+ * without a STOMP voice.join, is invisible to the tracker, but its token was minted through
+ * {@code /room} under a real username). The union covers both.
  *
  * <p>Runs on whatever thread the caller is on: the HTTP thread inside a {@code @Transactional}
- * override mutation, or the STOMP {@code clientInboundChannel} for moderator kicks. Both are safe —
+ * mutation, or the STOMP {@code clientInboundChannel} for moderator kicks. Both are safe —
  * {@link AuthorizationService#findUser} eager-fetches roles,
  * {@link VoiceMembershipTracker} publishes outside its lock, and the Janus calls are
  * fire-and-forget on the {@code oak-janus-admin} executor.
@@ -46,7 +56,8 @@ public class VoiceAccessEnforcer {
 
     /**
      * Evicts every live member of {@code channelId} who no longer holds {@link Permission#CONNECT}
-     * (a missing user row counts — a deleted user sitting in voice has no permissions by definition).
+     * (a missing user row counts — a deleted user sitting in voice has no permissions by
+     * definition). Input is the union of the STOMP registry and the channel's live token holders.
      *
      * <p>Called INSIDE the caller's {@code @Transactional} mutation, deliberately: the mask
      * re-resolution runs on the caller's persistence context, so the just-written
@@ -58,20 +69,58 @@ public class VoiceAccessEnforcer {
      * change then rolled back simply re-joins.
      */
     public void enforceConnect(Long channelId, String actorUsername) {
-        List<String> members = liveMembers(channelId);
+        Set<String> members = new TreeSet<>(liveMembers(channelId));
+        members.addAll(liveTokenHolders(channelId));
         if (members.isEmpty()) {
-            return; // nobody in voice (the common mutation) — skip the DB roundtrip entirely
+            return; // nobody in voice and no live tokens (the common mutation) — skip the DB roundtrip
         }
         Channel channel = channelRepository.findById(channelId).orElse(null);
         if (channel == null) {
             return; // unreachable from the override hooks (they just loaded/validated it); defensive
         }
         for (String username : members) {
-            Optional<User> member = auth.findUser(username);
-            if (member.isPresent() && auth.hasInChannel(member.get(), channel, Permission.CONNECT)) {
-                continue; // still holds CONNECT (the VIEW master gate included) — stays
+            evictIfLostConnect(channel, username, actorUsername);
+        }
+    }
+
+    /**
+     * Rechecks ONE member across every room they occupy (both registries) — the hook for a member's
+     * role-set replacement ({@code MemberService}): only that member's effective mask changed, so
+     * only their rooms are worth a database look.
+     */
+    public void enforceConnectForUser(String username, String actorUsername) {
+        Set<Long> channelIds = new TreeSet<>();
+        for (VoiceChannelMembersDto room : tracker.snapshot()) {
+            if (room.usernames().contains(username)) {
+                channelIds.add(room.channelId());
             }
-            forceLeave(channelId, username, actorUsername);
+        }
+        for (Map.Entry<Long, List<String>> room : voiceAccess.tokenHoldersByChannel().entrySet()) {
+            if (room.getValue().contains(username)) {
+                channelIds.add(room.getKey());
+            }
+        }
+        for (Long channelId : channelIds) {
+            channelRepository.findById(channelId).ifPresent(channel ->
+                    evictIfLostConnect(channel, username, actorUsername));
+        }
+    }
+
+    /**
+     * Rechecks EVERY occupied room (both registries) — the hook for a role-mask edit or role
+     * deletion ({@code RoleService}): a role touches an arbitrary set of holders in an arbitrary
+     * set of channels, so the only correct scope is everything. Cost is bounded by the occupied
+     * rooms (an unoccupied channel costs one in-memory snapshot read) — the same small-instance
+     * trade-off as the per-member override rechecks.
+     */
+    public void enforceEverywhere(String actorUsername) {
+        Set<Long> channelIds = new TreeSet<>();
+        for (VoiceChannelMembersDto room : tracker.snapshot()) {
+            channelIds.add(room.channelId());
+        }
+        channelIds.addAll(voiceAccess.tokenHoldersByChannel().keySet());
+        for (Long channelId : channelIds) {
+            enforceConnect(channelId, actorUsername);
         }
     }
 
@@ -114,5 +163,19 @@ public class VoiceAccessEnforcer {
                 .findFirst()
                 .map(VoiceChannelMembersDto::usernames)
                 .orElse(List.of());
+    }
+
+    /** Usernames still holding a live gateway token for the channel — the non-STOMP half of the sweep. */
+    private List<String> liveTokenHolders(Long channelId) {
+        return voiceAccess.tokenHoldersByChannel().getOrDefault(channelId, List.of());
+    }
+
+    /** Stays if the member still resolves and holds CONNECT (the VIEW master gate included). */
+    private void evictIfLostConnect(Channel channel, String username, String actorUsername) {
+        Optional<User> member = auth.findUser(username);
+        if (member.isPresent() && auth.hasInChannel(member.get(), channel, Permission.CONNECT)) {
+            return;
+        }
+        forceLeave(channel.getId(), username, actorUsername);
     }
 }
