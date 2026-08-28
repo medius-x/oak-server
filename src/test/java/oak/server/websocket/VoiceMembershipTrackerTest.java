@@ -228,6 +228,53 @@ class VoiceMembershipTrackerTest {
         assertFalse(states.get(2).selfDeafened());
     }
 
+    @Test
+    void deafenImpliesMuteAndUndeafenClearsOnlyTheImpliedPart() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setSelfDeafened(CHANNEL_A, "alice", true);   // implied self-mute arrives with it
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"));
+
+        tracker.setSelfMuted(CHANNEL_A, "alice", true);      // an EXPLICIT self-mute on top
+        tracker.setSelfDeafened(CHANNEL_A, "alice", false);  // undeafen — only the implied part lifts
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"), "the explicit mute survives the undeafen");
+
+        tracker.setSelfMuted(CHANNEL_A, "alice", false);
+        assertFalse(tracker.isMuted(CHANNEL_A, "alice"));
+
+        List<VoiceControlState> states = captureStates(4);
+        assertTrue(states.get(0).muted(), "the deafen publishes an already-muted union");
+        assertTrue(states.get(0).selfMuted(), "...with the implied mute attributed to the self origin");
+        assertTrue(states.get(0).deafened());
+        assertTrue(states.get(2).muted(), "after the undeafen the union stays muted (explicit self-mute)");
+        assertFalse(states.get(2).deafened());
+    }
+
+    @Test
+    void selfDeafenImpliedMuteDropsWithTheLeave() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setSelfDeafened(CHANNEL_A, "alice", true);
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"));
+        tracker.exit("s1");
+        assertFalse(tracker.isMuted(CHANNEL_A, "alice"), "the implied self-mute dies with its deafen");
+    }
+
+    @Test
+    void moderatorDeafenImpliedMuteSurvivesRejoin() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setDeafened(CHANNEL_A, "alice", true);
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"), "a server-deafen mutes the mic too");
+        tracker.exit("s1");
+        tracker.enter("s2", "alice", CHANNEL_A);
+
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"), "the implied moderator mute outlives the rejoin");
+        List<VoiceControlState> states = captureStates(2); // deafen, rejoin republish
+        VoiceControlState republished = states.get(1);
+        assertTrue(republished.muted());
+        assertTrue(republished.modMuted(), "the rejoin republish carries the implied mute as mod-origin");
+        assertTrue(republished.deafened());
+        assertTrue(republished.modDeafened());
+    }
+
     // --- helpers ---
 
     private List<VoiceMemberEvent> captureEvents(int expectedCount) {

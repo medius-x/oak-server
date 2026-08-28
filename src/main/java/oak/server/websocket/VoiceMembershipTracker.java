@@ -58,11 +58,19 @@ public class VoiceMembershipTracker {
      *  toggle) and moderator-applied state are kept in SEPARATE sets — a self-unmute must never
      *  lift a moderator's mute; everything published exposes the union. The self sets drop when the
      *  user leaves; the moderator sets SURVIVE (a server-mute outlives a rejoin) and are
-     *  re-published on the next join. */
+     *  re-published on the next join.
+     *
+     * <p><b>Deafen implies mute</b> (Discord semantics: a deafened member must not keep
+     * broadcasting — they cannot hear the room and don't know what their mic leaks). The implied
+     * mute lives in its own sets per origin, written and cleared together with the deafen: an
+     * EXPLICIT mute set beside the deafen survives the undeafen, and no client needs to remember
+     * anything — {@link #isMuted} and the published origin flags expose the union. */
     private final Map<Long, Set<String>> selfMutedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> modMutedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> selfDeafenedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> modDeafenedByChannel = new HashMap<>();
+    private final Map<Long, Set<String>> impliedSelfMutedByChannel = new HashMap<>();
+    private final Map<Long, Set<String>> impliedModMutedByChannel = new HashMap<>();
     private final Object lock = new Object();
 
     /** Records that {@code sessionId} (authenticated as {@code username}) is now in {@code channelId}. */
@@ -88,6 +96,7 @@ public class VoiceMembershipTracker {
                 // rejoining) — so a rejoin re-publishes it: everyone dropped the marks on the LEFT
                 // delta, and the rejoiner (fresh session, devices on) must comply again.
                 republishModeratorState = stateIn(modMutedByChannel, channelId, username)
+                        || stateIn(impliedModMutedByChannel, channelId, username)
                         || stateIn(modDeafenedByChannel, channelId, username);
             }
         }
@@ -120,18 +129,25 @@ public class VoiceMembershipTracker {
     }
 
     public void setDeafened(Long channelId, String username, boolean deafened) {
-        publishStateIfChanged(applyState(modDeafenedByChannel, channelId, username, deafened), channelId, username);
+        boolean deafenChanged = applyState(modDeafenedByChannel, channelId, username, deafened);
+        // The deafen implies a moderator mute of the same origin — written and cleared together.
+        boolean impliedChanged = applyState(impliedModMutedByChannel, channelId, username, deafened);
+        publishStateIfChanged(deafenChanged || impliedChanged, channelId, username);
     }
 
     /** Self-deafen toggle (the member's own panel button) — see {@link #setSelfMuted}. */
     public void setSelfDeafened(Long channelId, String username, boolean deafened) {
-        publishStateIfChanged(applyState(selfDeafenedByChannel, channelId, username, deafened), channelId, username);
+        boolean deafenChanged = applyState(selfDeafenedByChannel, channelId, username, deafened);
+        boolean impliedChanged = applyState(impliedSelfMutedByChannel, channelId, username, deafened);
+        publishStateIfChanged(deafenChanged || impliedChanged, channelId, username);
     }
 
     public boolean isMuted(Long channelId, String username) {
         synchronized (lock) {
             return stateIn(selfMutedByChannel, channelId, username)
-                    || stateIn(modMutedByChannel, channelId, username);
+                    || stateIn(modMutedByChannel, channelId, username)
+                    || stateIn(impliedSelfMutedByChannel, channelId, username)
+                    || stateIn(impliedModMutedByChannel, channelId, username);
         }
     }
 
@@ -162,9 +178,13 @@ public class VoiceMembershipTracker {
             if (!changed) {
                 return;
             }
-            boolean selfMuted = stateIn(selfMutedByChannel, channelId, username);
+            // Origin flags include the deafen-IMPLIED mute (a deafened member shows both marks, in
+            // the deafen's own colour); muted/deafened are the full unions (compliance semantics).
+            boolean selfMuted = stateIn(selfMutedByChannel, channelId, username)
+                    || stateIn(impliedSelfMutedByChannel, channelId, username);
+            boolean modMuted = stateIn(modMutedByChannel, channelId, username)
+                    || stateIn(impliedModMutedByChannel, channelId, username);
             boolean selfDeafened = stateIn(selfDeafenedByChannel, channelId, username);
-            boolean modMuted = stateIn(modMutedByChannel, channelId, username);
             boolean modDeafened = stateIn(modDeafenedByChannel, channelId, username);
             state = new VoiceControlState(username, channelId,
                     selfMuted || modMuted, selfDeafened || modDeafened,
@@ -222,11 +242,13 @@ public class VoiceMembershipTracker {
             if (users.isEmpty()) {
                 channelUserCount.remove(channelId);
             }
-            // last session gone — the SELF toggles reset (a rejoin starts with devices on), but
-            // the MODERATOR state deliberately SURVIVES: a server-mute must outlive the target
-            // leaving/rejoining/kick, until a moderator lifts it (re-published on the next join).
-            // Remove from the real (mutable) sets only — Set.of() from getOrDefault is immutable.
-            for (Map<Long, Set<String>> byChannel : List.of(selfMutedByChannel, selfDeafenedByChannel)) {
+            // last session gone — the SELF toggles reset (a rejoin starts with devices on; the implied
+            // self-mute dies with its deafen), but the MODERATOR state deliberately SURVIVES — implied
+            // mute included: a server-deafen outlives the target leaving/rejoining/kick just like an
+            // explicit mute (re-published on the next join). Remove from the real (mutable) sets only
+            // — Set.of() from getOrDefault is immutable.
+            for (Map<Long, Set<String>> byChannel
+                    : List.of(selfMutedByChannel, selfDeafenedByChannel, impliedSelfMutedByChannel)) {
                 Set<String> usernames = byChannel.get(channelId);
                 if (usernames != null) {
                     usernames.remove(username);

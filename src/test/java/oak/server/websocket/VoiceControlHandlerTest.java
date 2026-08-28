@@ -46,6 +46,7 @@ class VoiceControlHandlerTest {
 
     @Test
     void selfMuteNeedsNoPermissionAndStillForcesTheGateway() {
+        when(tracker.isMuted(7L, "alice")).thenReturn(true);   // the forced layer follows the UNION
         handler.mute(command(7L, "alice", true, null), principal("alice"));
 
         verify(tracker).setSelfMuted(7L, "alice", true);
@@ -54,11 +55,14 @@ class VoiceControlHandlerTest {
     }
 
     @Test
-    void selfDeafenNeedsNoPermissionAndStaysCooperative() {
+    void selfDeafenNeedsNoPermissionAndForcesTheImpliedMute() {
+        // A deafen implies a mute of the same origin — the forced layer enforces the resulting union.
+        when(tracker.isMuted(7L, "alice")).thenReturn(true);
         handler.deafen(command(7L, "alice", null, true), principal("alice"));
 
         verify(tracker).setSelfDeafened(7L, "alice", true);
-        verifyNoInteractions(auth, voiceAccess); // deafen has no forced counterpart (documented)
+        verify(voiceAccess).moderateAudio(7L, "alice", true);
+        verifyNoInteractions(auth);
     }
 
     @Test

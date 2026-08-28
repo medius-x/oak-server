@@ -27,8 +27,10 @@ import java.util.Optional;
  * (the gateway stops relaying the target's audio), kick maps to plugin-level {@code kick} (media torn
  * down instantly) plus token revocation (blocks re-entry until a fresh /room). Both are fire-and-forget
  * on a dedicated executor — this handler runs on the STOMP {@code clientInboundChannel} and must not
- * block. Deafen has NO forced counterpart: {@code moderate} only gates the target's outgoing m-lines,
- * so "making a rogue deaf" is impossible without kicking them — it stays cooperative (documented).
+ * block. A deafen implies a mute of the same origin (see {@link VoiceMembershipTracker}), so the MUTE
+ * half of a deafen is forced through {@code moderate} like any mute; the "cannot hear" half has no
+ * forced counterpart ({@code moderate} only gates the target's OUTGOING m-lines) and stays
+ * cooperative (documented).
  *
  * <p>Must be {@code @Controller} (Spring scans {@code @MessageMapping} only on {@code @Controller} beans —
  * see {@code CallSignalingHandler}). Permission + hierarchy checks go through {@link AuthorizationService},
@@ -50,32 +52,45 @@ public class VoiceControlHandler {
             // Self-mute needs no permission (everyone may silence their own mic, Discord-style) and
             // no DB lookup — the STOMP principal is already authenticated. Touches only the SELF
             // state set: a self-unmute can never lift a moderator's mute (see VoiceMembershipTracker).
-            boolean mute = Boolean.TRUE.equals(command.muted());
-            tracker.setSelfMuted(command.channelId(), command.targetUsername(), mute);
-            voiceAccess.moderateAudio(command.channelId(), command.targetUsername(), mute);
+            tracker.setSelfMuted(command.channelId(), command.targetUsername(),
+                    Boolean.TRUE.equals(command.muted()));
+            // The forced layer follows the UNION, not the toggled value: an explicit unmute under a
+            // surviving deafen-implied mute must not re-open the member's audio at the gateway.
+            voiceAccess.moderateAudio(command.channelId(), command.targetUsername(),
+                    tracker.isMuted(command.channelId(), command.targetUsername()));
             return;
         }
         if (!canControl(command, actor, Permission.MUTE_MEMBERS)) {
             return;
         }
-        boolean mute = Boolean.TRUE.equals(command.muted());
-        tracker.setMuted(command.channelId(), command.targetUsername(), mute);
-        voiceAccess.moderateAudio(command.channelId(), command.targetUsername(), mute);
+        tracker.setMuted(command.channelId(), command.targetUsername(),
+                Boolean.TRUE.equals(command.muted()));
+        voiceAccess.moderateAudio(command.channelId(), command.targetUsername(),
+                tracker.isMuted(command.channelId(), command.targetUsername()));
     }
 
     @MessageMapping("/voice.deafen")
     public void deafen(VoiceControlCommand command, Principal actor) {
         if (isSelf(command, actor)) {
-            // Self-deafen: no permission needed, cooperative only (see the class javadoc).
+            // Self-deafen: no permission needed. The tracker writes a deafen-IMPLIED self-mute with
+            // it (a deafened member must not keep broadcasting — they can't hear what their mic
+            // leaks), so the forced layer follows the resulting union like any mute.
             tracker.setSelfDeafened(command.channelId(), command.targetUsername(),
                     Boolean.TRUE.equals(command.deafened()));
+            voiceAccess.moderateAudio(command.channelId(), command.targetUsername(),
+                    tracker.isMuted(command.channelId(), command.targetUsername()));
             return;
         }
         if (!canControl(command, actor, Permission.DEAFEN_MEMBERS)) {
             return;
         }
-        // Cooperative only — see the class javadoc (no forced counterpart exists).
-        tracker.setDeafened(command.channelId(), command.targetUsername(), Boolean.TRUE.equals(command.deafened()));
+        // The deafen implies a moderator mute (the tracker writes both) — the forced layer now has
+        // something to enforce: a deafened member's mic goes dark at the gateway, not just in their
+        // client. The "cannot hear" half stays cooperative (see the class javadoc).
+        tracker.setDeafened(command.channelId(), command.targetUsername(),
+                Boolean.TRUE.equals(command.deafened()));
+        voiceAccess.moderateAudio(command.channelId(), command.targetUsername(),
+                tracker.isMuted(command.channelId(), command.targetUsername()));
     }
 
     @MessageMapping("/voice.kick")
