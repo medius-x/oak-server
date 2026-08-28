@@ -162,11 +162,21 @@ class VoiceMembershipTrackerTest {
     }
 
     @Test
-    void leavingDropsMuteState() {
+    void leavingDropsSelfTogglesButKeepsModeratorState() {
         tracker.enter("s1", "alice", CHANNEL_A);
-        tracker.setMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "alice", true);     // moderator — must SURVIVE the leave
+        tracker.setSelfMuted(CHANNEL_A, "alice", true); // self — resets on rejoin
         tracker.exit("s1");
-        assertFalse(tracker.isMuted(CHANNEL_A, "alice"));
+
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"), "a server-mute outlives the target rejoining");
+
+        // The rejoin republishes the surviving moderator state (compliance + everyone's marks).
+        tracker.enter("s2", "alice", CHANNEL_A);
+        List<VoiceControlState> states = captureStates(3); // mod-mute, self-mute, rejoin republish
+        VoiceControlState republished = states.get(2);
+        assertTrue(republished.muted());
+        assertTrue(republished.modMuted());
+        assertFalse(republished.selfMuted(), "the self toggle reset with the leave");
     }
 
     @Test
@@ -204,12 +214,18 @@ class VoiceMembershipTrackerTest {
     }
 
     @Test
-    void leavingDropsSelfAndModeratorDeafenState() {
+    void leavingDropsSelfDeafenButKeepsModeratorDeafen() {
         tracker.enter("s1", "alice", CHANNEL_A);
         tracker.setSelfDeafened(CHANNEL_A, "alice", true);
         tracker.setDeafened(CHANNEL_A, "alice", true);
         tracker.exit("s1");
-        assertFalse(tracker.isDeafened(CHANNEL_A, "alice"));
+        assertTrue(tracker.isDeafened(CHANNEL_A, "alice"), "a server-deafen outlives the leave");
+        // The self toggle dropped with the leave.
+        tracker.enter("s2", "alice", CHANNEL_A);
+        List<VoiceControlState> states = captureStates(3); // self, mod, rejoin republish
+        assertTrue(states.get(2).deafened());
+        assertTrue(states.get(2).modDeafened());
+        assertFalse(states.get(2).selfDeafened());
     }
 
     // --- helpers ---

@@ -56,7 +56,9 @@ public class VoiceMembershipTracker {
     private final Map<Long, Map<String, Integer>> channelUserCount = new HashMap<>();
     /** Mute/deafen state per origin: channelId &rarr; usernames. Self-applied (the member's own
      *  toggle) and moderator-applied state are kept in SEPARATE sets — a self-unmute must never
-     *  lift a moderator's mute; everything published exposes the union. Dropped when the user leaves. */
+     *  lift a moderator's mute; everything published exposes the union. The self sets drop when the
+     *  user leaves; the moderator sets SURVIVE (a server-mute outlives a rejoin) and are
+     *  re-published on the next join. */
     private final Map<Long, Set<String>> selfMutedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> modMutedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> selfDeafenedByChannel = new HashMap<>();
@@ -66,6 +68,7 @@ public class VoiceMembershipTracker {
     /** Records that {@code sessionId} (authenticated as {@code username}) is now in {@code channelId}. */
     public void enter(String sessionId, String username, Long channelId) {
         List<VoiceMemberEvent> toPublish = new ArrayList<>();
+        boolean republishModeratorState = false;
         synchronized (lock) {
             Long current = sessionToChannel.get(sessionId);
             if (current != null && current.equals(channelId)) {
@@ -81,9 +84,17 @@ public class VoiceMembershipTracker {
                     .merge(username, 1, Integer::sum);
             if (openSessions == 1) {
                 toPublish.add(new VoiceMemberEvent(username, channelId, VoiceMemberStatus.JOINED));
+                // The moderator state SURVIVES a leave (a server-mute must outlive the target
+                // rejoining) — so a rejoin re-publishes it: everyone dropped the marks on the LEFT
+                // delta, and the rejoiner (fresh session, devices on) must comply again.
+                republishModeratorState = stateIn(modMutedByChannel, channelId, username)
+                        || stateIn(modDeafenedByChannel, channelId, username);
             }
         }
         toPublish.forEach(this::publish);
+        if (republishModeratorState) {
+            publishStateIfChanged(true, channelId, username);
+        }
     }
 
     /** Records that {@code sessionId} has left whatever room it was in (no-op if it was in none). */
@@ -211,10 +222,11 @@ public class VoiceMembershipTracker {
             if (users.isEmpty()) {
                 channelUserCount.remove(channelId);
             }
-            // last session gone — drop any mute/deafen state (both origins) for this (channel, user).
+            // last session gone — the SELF toggles reset (a rejoin starts with devices on), but
+            // the MODERATOR state deliberately SURVIVES: a server-mute must outlive the target
+            // leaving/rejoining/kick, until a moderator lifts it (re-published on the next join).
             // Remove from the real (mutable) sets only — Set.of() from getOrDefault is immutable.
-            for (Map<Long, Set<String>> byChannel
-                    : List.of(selfMutedByChannel, modMutedByChannel, selfDeafenedByChannel, modDeafenedByChannel)) {
+            for (Map<Long, Set<String>> byChannel : List.of(selfMutedByChannel, selfDeafenedByChannel)) {
                 Set<String> usernames = byChannel.get(channelId);
                 if (usernames != null) {
                     usernames.remove(username);
