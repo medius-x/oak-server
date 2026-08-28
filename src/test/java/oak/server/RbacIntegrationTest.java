@@ -11,6 +11,7 @@ import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -392,6 +394,44 @@ class RbacIntegrationTest {
 
         // deleting the now-non-existent channel -> 404
         mockMvc.perform(delete("/api/channels/" + channelId).header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void renameChannel_requiresManageChannels_andValidatesTheName() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        registerAndLogin("bob", "supersecret"); // @everyone only
+        String bobToken = login("bob", "supersecret");
+        Long channelId = createChannel(ownerToken, "general", "TEXT");
+
+        // bob (no MANAGE_CHANNELS) -> 403, name untouched
+        mockMvc.perform(patch("/api/channels/" + channelId + "/name")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON).content("{\"name\":\"hacked\"}"))
+                .andExpect(status().isForbidden());
+        assertEquals("general", channelRepository.findById(channelId).orElseThrow().getName());
+
+        // owner renames -> the response carries the fresh name (and the actor's own locked flag)
+        mockMvc.perform(patch("/api/channels/" + channelId + "/name")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"name\":\"  lounge  \"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(channelId))
+                .andExpect(jsonPath("$.name").value("lounge"));
+        assertEquals("lounge", channelRepository.findById(channelId).orElseThrow().getName());
+
+        // validation: blank -> 400, over-100 -> 400, unknown id -> 404
+        mockMvc.perform(patch("/api/channels/" + channelId + "/name")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"name\":\"   \"}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/channels/" + channelId + "/name")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"name\":\"" + "x".repeat(101) + "\"}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/channels/999999/name")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"name\":\"ghost\"}"))
                 .andExpect(status().isNotFound());
     }
 

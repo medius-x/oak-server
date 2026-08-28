@@ -5,12 +5,14 @@ import lombok.RequiredArgsConstructor;
 import oak.server.dto.ChannelMyPermissions;
 import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
+import oak.server.dto.RenameChannelRequest;
 import oak.server.service.ChannelService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -51,6 +53,16 @@ public class ChannelController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable Long id, @AuthenticationPrincipal UserDetails principal) {
         channelService.delete(id, principal.getUsername());
+    }
+
+    /** Renames a TEXT/VOICE channel ({@code MANAGE_CHANNELS}); the route sits one segment deeper than
+     *  the group-DM rename ({@code PATCH /api/channels/{id}}, owned by DmChannelController) so the two
+     *  mappings never collide. DM ids are rejected with 400 by the service. */
+    @PatchMapping("/{id}/name")
+    public ChannelResponse rename(@PathVariable Long id,
+                                  @RequestBody @Valid RenameChannelRequest request,
+                                  @AuthenticationPrincipal UserDetails principal) {
+        return channelService.rename(id, request.name(), principal.getUsername());
     }
 
     /** The signed-in member's resolved (override-aware) SEND_MESSAGES / ATTACH_FILES on this channel —

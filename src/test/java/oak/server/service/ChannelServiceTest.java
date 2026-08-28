@@ -26,6 +26,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -127,6 +128,44 @@ class ChannelServiceTest {
 
         verify(voiceEnforcer, never()).kickAll(any(), anyString());
         verify(voiceAccess, never()).destroyRoom(anyLong());
+    }
+
+    @Test
+    void renameTrimsPingsChannelsChangedAndReturnsViewerLocked() {
+        Channel channel = new Channel("general", ChannelType.VOICE);
+        channel.setId(42L);
+        User actor = user(1L, "alice");
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(channelRepository.findById(42L)).thenReturn(Optional.of(channel));
+        when(channelRepository.save(any(Channel.class))).thenReturn(channel);
+        when(auth.resolveChannelMask(actor, channel)).thenReturn(0L); // no CONNECT → locked
+
+        ChannelResponse response = channelService.rename(42L, "  lounge  ", "alice");
+
+        assertEquals("lounge", response.name());
+        assertTrue(response.locked(), "the response carries the actor's own locked flag");
+        verify(messagingTemplate).convertAndSend(
+                eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
+    }
+
+    @Test
+    void renameOfAMissingChannelThrows404() {
+        when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+        when(channelRepository.findById(42L)).thenReturn(Optional.empty());
+
+        assertThrows(ResponseStatusException.class, () -> channelService.rename(42L, "lounge", "alice"));
+    }
+
+    @Test
+    void renameRejectsDmChannels() {
+        // DM renames belong to the participants (PATCH /api/channels/{id}); the admin route must
+        // refuse DM ids — otherwise an admin could rename someone's private conversation.
+        Channel dm = new Channel("dm", ChannelType.DM);
+        dm.setId(9L);
+        when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+        when(channelRepository.findById(9L)).thenReturn(Optional.of(dm));
+
+        assertThrows(ResponseStatusException.class, () -> channelService.rename(9L, "nope", "alice"));
     }
 
     // --- fixtures ---

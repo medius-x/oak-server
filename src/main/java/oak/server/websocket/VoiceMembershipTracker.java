@@ -33,6 +33,11 @@ import java.util.TreeMap;
  * <p><b>Idempotency:</b> a duplicate join for the same (session, channel) is a no-op, and a second
  * exit/disconnect for a session is a no-op (removal keyed by session id). Boundary decisions are made
  * under a single lock; publishing happens outside it so broker dispatch never blocks the registry.
+ *
+ * <p><b>Mute/deafen state is split by origin</b> (self toggle vs moderator action): a self-unmute
+ * must never lift a moderator's mute (Discord's guild-mute/self-mute distinction), so the two live
+ * in separate sets while {@link #isMuted}/{@link #isDeafened} and the {@link VoiceControlState}
+ * broadcast expose the UNION — the wire shape is unchanged.
  */
 @Component
 @RequiredArgsConstructor
@@ -49,10 +54,13 @@ public class VoiceMembershipTracker {
     private final Map<String, Long> sessionToChannel = new HashMap<>();
     /** channelId &rarr; (username &rarr; open-session count) — a refcount per (channel, user). */
     private final Map<Long, Map<String, Integer>> channelUserCount = new HashMap<>();
-    /** Server-side mute state: channelId &rarr; muted usernames (dropped when the user leaves). */
-    private final Map<Long, Set<String>> mutedByChannel = new HashMap<>();
-    /** Server-side deafen state: channelId &rarr; deafened usernames. */
-    private final Map<Long, Set<String>> deafenedByChannel = new HashMap<>();
+    /** Mute/deafen state per origin: channelId &rarr; usernames. Self-applied (the member's own
+     *  toggle) and moderator-applied state are kept in SEPARATE sets — a self-unmute must never
+     *  lift a moderator's mute; everything published exposes the union. Dropped when the user leaves. */
+    private final Map<Long, Set<String>> selfMutedByChannel = new HashMap<>();
+    private final Map<Long, Set<String>> modMutedByChannel = new HashMap<>();
+    private final Map<Long, Set<String>> selfDeafenedByChannel = new HashMap<>();
+    private final Map<Long, Set<String>> modDeafenedByChannel = new HashMap<>();
     private final Object lock = new Object();
 
     /** Records that {@code sessionId} (authenticated as {@code username}) is now in {@code channelId}. */
@@ -89,24 +97,37 @@ public class VoiceMembershipTracker {
 
     // --- server-side mute / deafen / kick ---
 
-    /** Server-mutes (or un-mutes) {@code username} in {@code channelId}; publishes the resulting state. */
+    /** Moderator-mutes (or un-mutes) {@code username} in {@code channelId}; publishes the resulting state. */
     public void setMuted(Long channelId, String username, boolean muted) {
-        publishStateIfChanged(applyState(mutedByChannel, channelId, username, muted), channelId, username);
+        publishStateIfChanged(applyState(modMutedByChannel, channelId, username, muted), channelId, username);
+    }
+
+    /** Self-mute toggle (the member's own panel button): touches ONLY the self set — a self-unmute
+     *  must not lift a moderator's mute; the published union is what everyone sees. */
+    public void setSelfMuted(Long channelId, String username, boolean muted) {
+        publishStateIfChanged(applyState(selfMutedByChannel, channelId, username, muted), channelId, username);
     }
 
     public void setDeafened(Long channelId, String username, boolean deafened) {
-        publishStateIfChanged(applyState(deafenedByChannel, channelId, username, deafened), channelId, username);
+        publishStateIfChanged(applyState(modDeafenedByChannel, channelId, username, deafened), channelId, username);
+    }
+
+    /** Self-deafen toggle (the member's own panel button) — see {@link #setSelfMuted}. */
+    public void setSelfDeafened(Long channelId, String username, boolean deafened) {
+        publishStateIfChanged(applyState(selfDeafenedByChannel, channelId, username, deafened), channelId, username);
     }
 
     public boolean isMuted(Long channelId, String username) {
         synchronized (lock) {
-            return mutedByChannel.getOrDefault(channelId, Set.of()).contains(username);
+            return stateIn(selfMutedByChannel, channelId, username)
+                    || stateIn(modMutedByChannel, channelId, username);
         }
     }
 
     public boolean isDeafened(Long channelId, String username) {
         synchronized (lock) {
-            return deafenedByChannel.getOrDefault(channelId, Set.of()).contains(username);
+            return stateIn(selfDeafenedByChannel, channelId, username)
+                    || stateIn(modDeafenedByChannel, channelId, username);
         }
     }
 
@@ -130,11 +151,19 @@ public class VoiceMembershipTracker {
             if (!changed) {
                 return;
             }
-            boolean muted = mutedByChannel.getOrDefault(channelId, Set.of()).contains(username);
-            boolean deafened = deafenedByChannel.getOrDefault(channelId, Set.of()).contains(username);
-            state = new VoiceControlState(username, channelId, muted, deafened);
+            boolean selfMuted = stateIn(selfMutedByChannel, channelId, username);
+            boolean selfDeafened = stateIn(selfDeafenedByChannel, channelId, username);
+            boolean modMuted = stateIn(modMutedByChannel, channelId, username);
+            boolean modDeafened = stateIn(modDeafenedByChannel, channelId, username);
+            state = new VoiceControlState(username, channelId,
+                    selfMuted || modMuted, selfDeafened || modDeafened,
+                    selfMuted, selfDeafened, modMuted, modDeafened);
         }
         messagingTemplate.convertAndSend(VOICE_STATE_TOPIC, state);
+    }
+
+    private static boolean stateIn(Map<Long, Set<String>> byChannel, Long channelId, String username) {
+        return byChannel.getOrDefault(channelId, Set.of()).contains(username);
     }
 
     /** Must run under {@link #lock}: toggles a state set, returning whether it actually changed. */
@@ -182,15 +211,14 @@ public class VoiceMembershipTracker {
             if (users.isEmpty()) {
                 channelUserCount.remove(channelId);
             }
-            // last session gone — drop any server-mute/deafen state for this (channel, user).
-            // Remove from the real (mutable) set only — Set.of() from getOrDefault is immutable.
-            Set<String> muted = mutedByChannel.get(channelId);
-            if (muted != null) {
-                muted.remove(username);
-            }
-            Set<String> deafened = deafenedByChannel.get(channelId);
-            if (deafened != null) {
-                deafened.remove(username);
+            // last session gone — drop any mute/deafen state (both origins) for this (channel, user).
+            // Remove from the real (mutable) sets only — Set.of() from getOrDefault is immutable.
+            for (Map<Long, Set<String>> byChannel
+                    : List.of(selfMutedByChannel, modMutedByChannel, selfDeafenedByChannel, modDeafenedByChannel)) {
+                Set<String> usernames = byChannel.get(channelId);
+                if (usernames != null) {
+                    usernames.remove(username);
+                }
             }
             toPublish.add(new VoiceMemberEvent(username, channelId, VoiceMemberStatus.LEFT));
         }

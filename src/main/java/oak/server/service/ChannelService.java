@@ -76,12 +76,39 @@ public class ChannelService {
             if (!Permissions.has(mask, Permission.VIEW_CHANNEL)) {
                 continue;
             }
-            boolean locked = channel.getType() == ChannelType.VOICE
-                    ? !Permissions.has(mask, Permission.CONNECT)
-                    : !Permissions.has(mask, Permission.READ_MESSAGE_HISTORY);
-            visible.add(ChannelResponse.from(channel, locked));
+            visible.add(ChannelResponse.from(channel, lockedFor(channel, mask)));
         }
         return visible;
+    }
+
+    /** The viewer's lock flag: may SEE the channel but not USE it (no READ for TEXT / no CONNECT for
+     *  VOICE). Derived from a mask already resolved for that exact viewer. */
+    private static boolean lockedFor(Channel channel, long viewerMask) {
+        return channel.getType() == ChannelType.VOICE
+                ? !Permissions.has(viewerMask, Permission.CONNECT)
+                : !Permissions.has(viewerMask, Permission.READ_MESSAGE_HISTORY);
+    }
+
+    /** Renames a TEXT/VOICE channel. {@code MANAGE_CHANNELS}, consistent with create/delete (all
+     *  server-scoped today). DM ids are rejected — their rename belongs to the participants
+     *  ({@code PATCH /api/channels/{id}}), and a 1:1 DM has no editable name at all. Broadcasts the
+     *  bare {@link #CHANNELS_CHANGED_TOPIC} ping: clients refetch their viewer-filtered list, and a
+     *  broadcast {@link ChannelResponse} could not carry the per-viewer {@code locked} flag. The
+     *  response DOES carry the actor's own {@code locked} so an optimistic client update doesn't
+     *  flash a locked channel unlocked before the ping refetch lands. */
+    @Transactional
+    public ChannelResponse rename(Long channelId, String name, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.MANAGE_CHANNELS);
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a server channel");
+        }
+        channel.setName(name.trim());
+        channel = channelRepository.save(channel);
+        messagingTemplate.convertAndSend(CHANNELS_CHANGED_TOPIC, System.currentTimeMillis());
+        return ChannelResponse.from(channel, lockedFor(channel, auth.resolveChannelMask(actor, channel)));
     }
 
     @Transactional

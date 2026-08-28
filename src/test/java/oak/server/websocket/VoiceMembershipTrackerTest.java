@@ -169,6 +169,49 @@ class VoiceMembershipTrackerTest {
         assertFalse(tracker.isMuted(CHANNEL_A, "alice"));
     }
 
+    @Test
+    void selfUnmuteDoesNotLiftModeratorMute() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setMuted(CHANNEL_A, "alice", true);    // moderator mute
+        tracker.setSelfMuted(CHANNEL_A, "alice", true);
+        tracker.setSelfMuted(CHANNEL_A, "alice", false); // self-unmute — the mod mute must survive
+
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"));
+        List<VoiceControlState> states = captureStates(3);
+        assertTrue(states.get(2).muted(), "the union stays muted after a self-unmute");
+        assertFalse(states.get(2).selfMuted(), "the origin flags tell the client it is a moderator mute");
+    }
+
+    @Test
+    void selfAndModeratorMuteCombineAndClearTogether() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setSelfMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "alice", false);   // mod lift — self still holds
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"));
+        tracker.setSelfMuted(CHANNEL_A, "alice", false); // last origin cleared — fully unmuted
+
+        List<VoiceControlState> states = captureStates(4);
+        // Both origins held simultaneously: the explicit mod flag must survive alongside self —
+        // a union-minus-self derivation is exactly here ambiguous (the bug this pins).
+        assertTrue(states.get(1).modMuted(), "the moderator flag is explicit while both hold");
+        assertTrue(states.get(1).selfMuted(), "...alongside the self flag");
+        assertTrue(states.get(2).muted(), "mod lift publishes the still-muted union");
+        assertTrue(states.get(2).selfMuted(), "...and names the surviving origin as self");
+        assertFalse(states.get(2).modMuted(), "the moderator origin is gone after its lift");
+        assertFalse(states.get(3).muted(), "the final clear publishes muted=false");
+        assertFalse(tracker.isMuted(CHANNEL_A, "alice"));
+    }
+
+    @Test
+    void leavingDropsSelfAndModeratorDeafenState() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setSelfDeafened(CHANNEL_A, "alice", true);
+        tracker.setDeafened(CHANNEL_A, "alice", true);
+        tracker.exit("s1");
+        assertFalse(tracker.isDeafened(CHANNEL_A, "alice"));
+    }
+
     // --- helpers ---
 
     private List<VoiceMemberEvent> captureEvents(int expectedCount) {

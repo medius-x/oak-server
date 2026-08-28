@@ -14,7 +14,9 @@ import java.util.Optional;
 
 /**
  * Server-side voice control: a member with the matching permission mutes/deafens/kicks another in a
- * voice room. Mute/deafen set state in {@link VoiceMembershipTracker} (which broadcasts the new state on
+ * voice room — or toggles mute/deafen on THEMSELVES (no permission needed, Discord-style; the self
+ * path writes the tracker's SELF state set, so a self-unmute never lifts a moderator's mute).
+ * Mute/deafen set state in {@link VoiceMembershipTracker} (which broadcasts the new state on
  * {@code /topic/voice.state} so everyone — including the target, who complies — sees it); kick delegates
  * to {@link VoiceAccessEnforcer#forceLeave} — the shared four-step forced-exit recipe (registry exit →
  * Janus plugin-kick → token revocation → targeted {@code KICKED} push on
@@ -44,6 +46,15 @@ public class VoiceControlHandler {
 
     @MessageMapping("/voice.mute")
     public void mute(VoiceControlCommand command, Principal actor) {
+        if (isSelf(command, actor)) {
+            // Self-mute needs no permission (everyone may silence their own mic, Discord-style) and
+            // no DB lookup — the STOMP principal is already authenticated. Touches only the SELF
+            // state set: a self-unmute can never lift a moderator's mute (see VoiceMembershipTracker).
+            boolean mute = Boolean.TRUE.equals(command.muted());
+            tracker.setSelfMuted(command.channelId(), command.targetUsername(), mute);
+            voiceAccess.moderateAudio(command.channelId(), command.targetUsername(), mute);
+            return;
+        }
         if (!canControl(command, actor, Permission.MUTE_MEMBERS)) {
             return;
         }
@@ -54,6 +65,12 @@ public class VoiceControlHandler {
 
     @MessageMapping("/voice.deafen")
     public void deafen(VoiceControlCommand command, Principal actor) {
+        if (isSelf(command, actor)) {
+            // Self-deafen: no permission needed, cooperative only (see the class javadoc).
+            tracker.setSelfDeafened(command.channelId(), command.targetUsername(),
+                    Boolean.TRUE.equals(command.deafened()));
+            return;
+        }
         if (!canControl(command, actor, Permission.DEAFEN_MEMBERS)) {
             return;
         }
@@ -67,6 +84,13 @@ public class VoiceControlHandler {
             return;
         }
         voiceEnforcer.forceLeave(command.channelId(), command.targetUsername(), actor.getName());
+    }
+
+    /** True for a well-formed command whose target is the actor themself — the self-toggle path
+     *  (no permission, no hierarchy, no DB lookup; the STOMP principal is already authenticated). */
+    private static boolean isSelf(VoiceControlCommand command, Principal actor) {
+        return command != null && command.channelId() != null && command.targetUsername() != null
+                && actor != null && command.targetUsername().equals(actor.getName());
     }
 
     /** Resolves actor + target, checks the permission and the role hierarchy (canActOn). */
