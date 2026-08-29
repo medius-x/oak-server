@@ -7,6 +7,7 @@ import oak.server.dto.AttachmentUploadResponse;
 import oak.server.dto.AvatarKeysRequest;
 import oak.server.dto.AvatarOriginalResponse;
 import oak.server.dto.ServerProfileResponse;
+import oak.server.dto.UpdateConnectionInfoRequest;
 import oak.server.dto.UpdateServerNameRequest;
 import oak.server.entity.Permission;
 import oak.server.entity.ServerProfile;
@@ -64,6 +65,32 @@ public class ServerProfileController {
         requireManageServer(principal);
         ServerProfile profile = profile();
         profile.setName(request.name().trim());
+        serverProfileRepository.save(profile);
+        return publish(profile);
+    }
+
+    /**
+     * Sets the advertised client-connection address (host + port — what a member types into
+     * "Add server"). {@code MANAGE_SERVER}; null fields leave the stored part unchanged. The write
+     * path is the future remote-provisioning flow (the setup client pushes the address here) and the
+     * manual fill for rows seeded before the fields existed. Separate segment from the name
+     * {@code PATCH /api/server} so neither request shape grows optional-field ambiguity.
+     */
+    @PatchMapping("/connection")
+    @Transactional
+    public ServerProfileResponse updateConnection(@AuthenticationPrincipal UserDetails principal,
+                                                  @RequestBody @Valid UpdateConnectionInfoRequest request) {
+        requireManageServer(principal);
+        if (request.connectionHost() != null && request.connectionHost().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Connection host must not be blank");
+        }
+        ServerProfile profile = profile();
+        if (request.connectionHost() != null) {
+            profile.setConnectionHost(request.connectionHost().trim());
+        }
+        if (request.connectionPort() != null) {
+            profile.setConnectionPort(request.connectionPort());
+        }
         serverProfileRepository.save(profile);
         return publish(profile);
     }

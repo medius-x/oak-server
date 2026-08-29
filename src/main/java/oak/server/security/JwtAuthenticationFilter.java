@@ -10,6 +10,7 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -38,7 +39,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         if (StringUtils.hasText(token) && tokenProvider.isValid(token)) {
             String username = tokenProvider.extractUsername(token);
             if (username != null && SecurityContextHolder.getContext().getAuthentication() == null) {
-                UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+                // A cryptographically valid JWT whose subject no longer resolves (the user was renamed
+                // — the subject IS the username — or deleted) is just an unauthenticated request, not a
+                // 500: treat it exactly like an absent token and let the security chain answer 401.
+                // The rename flow makes this a NORMAL, expected state for up to 8h of token lifetime.
+                UserDetails userDetails;
+                try {
+                    userDetails = userDetailsService.loadUserByUsername(username);
+                } catch (UsernameNotFoundException renamedOrDeleted) {
+                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "unknown user");
+                    return;
+                }
                 // A banned account's still-valid access JWT must not reach any REST endpoint: ban takes
                 // effect now, not on the next login/CONNECT. Short-circuit (no filterChain.doFilter) so
                 // the protected resource is never served.

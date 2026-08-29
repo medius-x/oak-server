@@ -51,6 +51,7 @@ public class RoleSeeder implements ApplicationRunner {
             Permission.CONNECT.bit,
             Permission.SPEAK.bit,
             Permission.USE_VAD.bit,
+            Permission.CHANGE_NICKNAME.bit,
             Permission.VIEW_CHANNEL.bit);
 
     private final RoleRepository roleRepository;
@@ -61,6 +62,7 @@ public class RoleSeeder implements ApplicationRunner {
     public void run(ApplicationArguments args) {
         seedEveryone();
         ensureEveryoneViewChannel();
+        ensureEveryoneChangeNickname();
         seedOwner();
         ensureOwnerAssigned();
     }
@@ -90,6 +92,24 @@ public class RoleSeeder implements ApplicationRunner {
             roleRepository.save(everyone);
             log.warn("[RBAC] @everyone was missing VIEW_CHANNEL — re-granted (private channels stay "
                     + "managed by per-channel overrides only)");
+        });
+    }
+
+    /** Unconditionally re-grants {@link Permission#CHANGE_NICKNAME} to the stored @everyone row on
+     *  every boot, mirroring {@link #ensureEveryoneViewChannel()}. The self-rename feature is meant
+     *  to be live for every ordinary member (Discord semantics — the owner may still revoke the bit
+     *  per-role/per-channel), and databases seeded before the bit was added to {@link
+     *  #EVERYONE_DEFAULTS} would otherwise show the feature only to OWNER. Unlike VIEW_CHANNEL this
+     *  is not infrastructure — but the same one-line repair beats a manual SQL migration note. */
+    public void ensureEveryoneChangeNickname() {
+        roleRepository.findByKind(RoleKind.EVERYONE).ifPresent(everyone -> {
+            if ((everyone.getPermissions() & Permission.CHANGE_NICKNAME.bit) != 0) {
+                return;
+            }
+            everyone.setPermissions(everyone.getPermissions() | Permission.CHANGE_NICKNAME.bit);
+            roleRepository.save(everyone);
+            log.warn("[RBAC] @everyone was missing CHANGE_NICKNAME — re-granted (self-rename stays "
+                    + "available to ordinary members)");
         });
     }
 

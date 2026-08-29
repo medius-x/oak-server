@@ -9,8 +9,11 @@ import oak.server.dto.AvatarOriginalResponse;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.ChangePasswordRequest;
 import oak.server.dto.MyPermissions;
+import oak.server.dto.RenameUsernameRequest;
+import oak.server.dto.UserRenamedResponse;
 import oak.server.dto.UserResponse;
 import oak.server.dto.UserSummary;
+import oak.server.entity.Permission;
 import oak.server.entity.Permissions;
 import oak.server.entity.User;
 import oak.server.repository.UserRepository;
@@ -24,6 +27,7 @@ import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -90,6 +94,26 @@ public class UserController {
     public AuthResponse changePassword(@AuthenticationPrincipal UserDetails principal,
                                        @RequestBody @Valid ChangePasswordRequest request) {
         return authService.changePassword(principal.getUsername(), request.oldPassword(), request.newPassword());
+    }
+
+    /**
+     * Self-service username rename, gated by {@code CHANGE_NICKNAME}. Uniqueness is enforced
+     * server-side (409 on a taken name). Because the JWT subject is the username, a successful rename
+     * invalidates every issued access token of this user — the response carries a fresh access +
+     * refresh pair (all refresh tokens revoked, a new family, like a password change) and the client
+     * restarts its WebSocket session. Pushes the updated {@link UserSummary} to {@value #USERS_TOPIC}
+     * so every connected client replaces its roster entry by id (presence moves to the new name once
+     * the renamed user reconnects — the old STOMP principal is stale until then).
+     */
+    @PatchMapping("/me/username")
+    @Transactional
+    public UserRenamedResponse changeUsername(@AuthenticationPrincipal UserDetails principal,
+                                              @RequestBody @Valid RenameUsernameRequest request) {
+        User user = requireUser(principal);
+        auth.requireServer(user, Permission.CHANGE_NICKNAME);
+        AuthResponse fresh = authService.changeUsername(user, request.username());
+        publishUserUpdate(user);
+        return new UserRenamedResponse(UserResponse.from(user, attachmentUrlSigner), fresh);
     }
 
     /**

@@ -25,6 +25,11 @@ public class ServerProfileSeeder implements ApplicationRunner {
     /** Default instance name until an owner renames it via {@code PATCH /api/server}. */
     public static final String DEFAULT_NAME = "OAK Server";
 
+    /** Manual/test connection info for fresh rows — the future provisioning flow will overwrite these
+     *  with the real advertised address; rows created before the fields existed stay null until set. */
+    public static final String DEFAULT_CONNECTION_HOST = "localhost";
+    public static final int DEFAULT_CONNECTION_PORT = 8080;
+
     private final ServerProfileRepository repository;
 
     @Override
@@ -33,7 +38,10 @@ public class ServerProfileSeeder implements ApplicationRunner {
         if (repository.findFirstByOrderByIdAsc().isPresent()) {
             return;
         }
-        repository.save(new ServerProfile(DEFAULT_NAME));
+        ServerProfile profile = new ServerProfile(DEFAULT_NAME);
+        profile.setConnectionHost(DEFAULT_CONNECTION_HOST);
+        profile.setConnectionPort(DEFAULT_CONNECTION_PORT);
+        repository.save(profile);
         log.info("[Server] Seeded default server profile (name='{}')", DEFAULT_NAME);
     }
 }

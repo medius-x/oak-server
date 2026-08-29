@@ -45,6 +45,16 @@ public class ServerProfile {
     @Column(name = "avatar_original_key", length = 512)
     private String avatarOriginalKey;
 
+    /** Host the instance ADVERTISES for client connections — what a member types into "Add server".
+     *  Storage for the future remote-provisioning flow (the setup client will push it here); seeded
+     *  with a manual/test value on fresh rows, null on rows created before the field existed. */
+    @Column(name = "connection_host", length = 255)
+    private String connectionHost;
+
+    /** TCP port the advertised host is reached on (e.g. 8080 — REST and WS share it). Null = not set. */
+    @Column(name = "connection_port")
+    private Integer connectionPort;
+
     public ServerProfile(String name) {
         this.name = name;
     }

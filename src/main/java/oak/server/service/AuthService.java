@@ -196,6 +196,38 @@ public class AuthService {
         return issueTokens(user, newFamilyId());
     }
 
+    /**
+     * Self-service username rename. Uniqueness: explicit {@code existsByUsername} check → 409, plus
+     * the unique constraint as the real authority against the check/INSERT race (same belt-and-braces
+     * as {@link #register}). Token rotation mirrors {@link #changePassword}: the JWT subject IS the
+     * username, so after the rename every previously issued access token stops resolving and every
+     * refresh token is revoked — this session gets a fresh pair (a new family) in the response and
+     * must also restart its WebSocket (the STOMP principal was stamped from the old subject).
+     * Permission enforcement (CHANGE_NICKNAME) lives in the controller, like MANAGE_SERVER in
+     * ServerProfileController.
+     */
+    @Transactional
+    public AuthResponse changeUsername(User user, String newUsername) {
+        String trimmed = newUsername.trim();
+        if (trimmed.equals(user.getUsername())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "New username must be different from the current one");
+        }
+        if (userRepository.existsByUsername(trimmed)) {
+            throw conflict("Username already taken: " + trimmed);
+        }
+        user.setUsername(trimmed);
+        try {
+            userRepository.save(user);
+        } catch (DataIntegrityViolationException race) {
+            // The exists-check above races a concurrent registration on the same name; the unique
+            // constraint is the real authority.
+            throw conflict("Username already exists");
+        }
+        refreshTokenRepository.findByUser(user).forEach(token -> token.setRevoked(true));
+        return issueTokens(user, newFamilyId());
+    }
+
     /** Issues a fresh access JWT + a new (persisted, hashed) refresh token for {@code user}. */
     private AuthResponse issueTokens(User user, String familyId) {
         String accessToken = tokenProvider.generateToken(user.getUsername());

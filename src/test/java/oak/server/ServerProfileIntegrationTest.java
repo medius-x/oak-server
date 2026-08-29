@@ -55,7 +55,43 @@ class ServerProfileIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.name").value("OAK Server"))
                 .andExpect(jsonPath("$.avatarKey").isEmpty())   // no icon set
-                .andExpect(jsonPath("$.avatarUrl").isEmpty());  // noop signer
+                .andExpect(jsonPath("$.avatarUrl").isEmpty())   // noop signer
+                .andExpect(jsonPath("$.connectionHost").value("localhost"))
+                .andExpect(jsonPath("$.connectionPort").value(8080));
+    }
+
+    @Test
+    void ownerCanSetConnectionInfoPartiallyAndEchoesIt() throws Exception {
+        String token = registerAndLogin("alice", "supersecret");   // alice = first = OWNER
+
+        // set both parts
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content(
+                                "{\"connectionHost\":\"oak.example.com\",\"connectionPort\":8443}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.connectionHost").value("oak.example.com"))
+                .andExpect(jsonPath("$.connectionPort").value(8443));
+        ServerProfile after = serverProfileRepository.singleton();
+        assertEquals("oak.example.com", after.getConnectionHost());
+        assertEquals(8443, after.getConnectionPort());
+
+        // a null field leaves the stored part unchanged
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"connectionPort\":9000}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.connectionHost").value("oak.example.com"))
+                .andExpect(jsonPath("$.connectionPort").value(9000));
+
+        // blank host and out-of-range ports are rejected by the endpoint / bean validation
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"connectionHost\":\"   \"}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"connectionPort\":0}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"connectionPort\":70000}"))
+                .andExpect(status().isBadRequest());
     }
 
     @Test
@@ -112,6 +148,11 @@ class ServerProfileIntegrationTest {
         // bob cannot rename
         mockMvc.perform(patch("/api/server").header("Authorization", "Bearer " + bobToken)
                         .contentType(JSON).content("{\"name\":\"Hacked\"}"))
+                .andExpect(status().isForbidden());
+
+        // bob cannot set the connection address
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON).content("{\"connectionHost\":\"evil.example.com\"}"))
                 .andExpect(status().isForbidden());
 
         // bob cannot touch the icon: slot / confirm / remove / lazy-original all 403

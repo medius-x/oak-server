@@ -8,19 +8,25 @@ import oak.server.service.AttachmentUrlSigner;
  * as a stable disk-cache key, since the presigned URL below changes on every fetch); {@code avatarUrl}
  * is a freshly-signed presigned GET URL when an icon is set, otherwise null — built by
  * {@link #from(ServerProfile, AttachmentUrlSigner)} so it is re-signed per request. Mirrors
- * {@link UserResponse}.
+ * {@link UserResponse}. {@code connectionHost}/{@code connectionPort} are the advertised
+ * client-connection address (what a member types into "Add server") — storage for the future
+ * remote-provisioning flow; null parts mean "not set".
+ *
+ * <p><b>Wire:</b> fields append at the END only; the client mirror changes in the same deploy.
  */
-public record ServerProfileResponse(Long id, String name, String avatarKey, String avatarUrl) {
+public record ServerProfileResponse(Long id, String name, String avatarKey, String avatarUrl,
+                                    String connectionHost, Integer connectionPort) {
 
     /** No avatar URL — used where no signer is available. */
     public static ServerProfileResponse from(ServerProfile profile) {
         return new ServerProfileResponse(profile.getId(), profile.getName(),
-                profile.getAvatarKey(), null);
+                profile.getAvatarKey(), null, profile.getConnectionHost(), profile.getConnectionPort());
     }
 
     public static ServerProfileResponse from(ServerProfile profile, AttachmentUrlSigner signer) {
         return new ServerProfileResponse(profile.getId(), profile.getName(),
-                profile.getAvatarKey(), avatarUrl(profile.getAvatarKey(), signer));
+                profile.getAvatarKey(), avatarUrl(profile.getAvatarKey(), signer),
+                profile.getConnectionHost(), profile.getConnectionPort());
     }
 
     private static String avatarUrl(String avatarKey, AttachmentUrlSigner signer) {
