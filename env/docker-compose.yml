@@ -95,6 +95,15 @@ services:
   # No config file: all settings are CLI flags, with values substituted from
   # .env by Compose at parse time. (The base coturn image ships no envsubst,
   # so we avoid runtime templating of a config file.)
+  # KNOWN LIMITATION (live smoke 2026-09): behind Docker Desktop's UDP
+  # port-proxy coturn sees every client as the gateway IP (172.x.0.1), and the
+  # TURN permission machinery then drops ALL peer traffic (allocations succeed,
+  # relay candidates gather, but media never passes — rp=0/sp=0). Host
+  # networking does NOT expose the ports to the Windows host, and UDP straight
+  # to the container's docker-IP does not pass from Windows either. TURN-relay
+  # on this dev machine therefore cannot carry media; P2P host candidates work
+  # fine (all regular calls). A full RELAY/ICE-restart smoke needs coturn on a
+  # real Linux host or two machines with a reachable TURN server.
   coturn:
     image: coturn/coturn:latest
     container_name: oak-coturn
@@ -104,6 +113,8 @@ services:
       - --realm=${TURN_REALM}
       - --server-name=${TURN_REALM}
       - --listening-ip=0.0.0.0
+      # The non-standard port (34780, not 3478): Docker Desktop leaked UDP 3478
+      # on this host once (stale port-proxy), so we map 34780 -> 3478.
       - --external-ip=${TURN_EXTERNAL_IP}
       - --user=${TURN_USER}:${TURN_PASSWORD}
       - --min-port=${TURN_MIN_PORT}
@@ -114,8 +125,6 @@ services:
       - --no-cli
       - --log-file=stdout
     ports:
-      # TURN/STUN listening. Non-standard host port: Docker Desktop leaked
-      # UDP 3478 (stale port-proxy), so we map host 34780 -> container 3478.
       - "${TURN_LISTEN_PORT:-34780}:3478/tcp"
       - "${TURN_LISTEN_PORT:-34780}:3478/udp"
       - "${TURN_TLS_PORT:-5349}:5349/tcp"      # TURN over TLS
