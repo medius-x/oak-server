@@ -435,6 +435,21 @@ class RbacIntegrationTest {
                 .andExpect(status().isNotFound());
     }
 
+    @Test
+    void roleNameAllowsAnyAlphabet_butRejectsSpacesAndSymbols() throws Exception {
+        String ownerToken = registerAndLogin("alphabetowner", "supersecret");
+        byte[] cyrillic = "{\"name\":\"Модератор\",\"permissions\":[]}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        mockMvc.perform(post("/api/roles").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content(cyrillic))
+                .andExpect(status().isCreated());
+        mockMvc.perform(post("/api/roles").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"name\":\"has space\",\"permissions\":[]}".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/roles").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"name\":\"punct!ation\",\"permissions\":[]}".getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .andExpect(status().isBadRequest());
+    }
+
     // --- helpers ---
 
     private String registerAndLogin(String username, String password) throws Exception {

@@ -166,16 +166,20 @@ public class RoleService {
         publish("reordered", null);
     }
 
-    /** Custom role names are restricted to {@code [A-Za-z0-9_-]+} so the plain-text {@code @token}
-     *  mention grammar stays unambiguous (no spaces to delimit). Built-in {@code @everyone}/
+    /** Custom role names allow letters of ANY alphabet (user decision, 2026-09-11: banning
+     *  cyrillic was wrong), plus digits, underscores and hyphens — banned are only the
+     *  characters that would break text layout or the plain-text mention token (spaces,
+     *  punctuation). NOTE: the {@code @token} mention parser still matches ASCII word
+     *  characters only, so a non-latin name cannot be @-mentioned (it renders as plain
+     *  text — a documented tradeoff, not a failure). Built-in {@code @everyone}/
      *  {@code OWNER} are seeded, never created/renamed here. */
     private static final java.util.regex.Pattern ROLE_NAME_PATTERN =
-            java.util.regex.Pattern.compile("^[A-Za-z0-9_-]{1,32}$");
+            java.util.regex.Pattern.compile("^[\\p{L}\\p{N}_-]{1,32}$");
 
     private static void validateRoleName(String name) {
         if (name == null || !ROLE_NAME_PATTERN.matcher(name).matches()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Role name must be 1-32 letters, digits, underscores or hyphens (no spaces)");
+                    "Role name must be 1-32 letters (any alphabet), digits, underscores or hyphens (no spaces)");
         }
     }
 
