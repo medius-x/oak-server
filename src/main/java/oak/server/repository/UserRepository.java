@@ -27,6 +27,11 @@ public interface UserRepository extends JpaRepository<User, Long> {
 
     boolean existsByUsername(String username);
 
+    /** Lookup by the DISPLAY name — the only name @mentions resolve against. */
+    Optional<User> findByNickname(String nickname);
+
+    boolean existsByNickname(String nickname);
+
     /** All users in username order — backs the public roster ({@code GET /api/users}). */
     List<User> findAllByOrderByUsernameAsc();
 

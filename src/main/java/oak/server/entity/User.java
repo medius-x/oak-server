@@ -57,6 +57,14 @@ public class User {
     @Column(name = "avatar_key", length = 512)
     private String avatarKey;
 
+    /** The DISPLAY name — the only name the interface ever shows (chat author, roster, voice tiles);
+     *  the ONLY name @mentions resolve against (MentionParser). Distinct from {@link #username}, which
+     *  is the login handle / STOMP principal and never surfaces in the UI. Nullable UNIQUE: Postgres
+     *  treats NULLs as distinct, so the column migrates cleanly onto a populated table; the startup
+     *  seeder back-fills legacy rows from the username and every write path keeps it non-null. */
+    @Column(name = "nickname", unique = true)
+    private String nickname;
+
     /** MinIO object key of the original (pre-crop) image used for the avatar — lets the user re-crop
      *  without re-selecting a file. Loaded lazily via {@code GET /api/users/me/avatar/original}. */
     @Column(name = "avatar_original_key", length = 512)
@@ -82,5 +90,13 @@ public class User {
     public User(String username, String passwordHash) {
         this.username = username;
         this.passwordHash = passwordHash;
+        // The nickname is mandatory (it is the one addressable name) — a fresh account
+        // starts with it equal to the login, then diverges freely.
+        this.nickname = username;
+    }
+
+    /** Convenience: the name every surface displays — the nickname, login as a never-hit fallback. */
+    public String displayName() {
+        return nickname != null && !nickname.isBlank() ? nickname : username;
     }
 }

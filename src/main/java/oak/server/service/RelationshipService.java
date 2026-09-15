@@ -69,12 +69,14 @@ public class RelationshipService {
     }
 
     @Transactional
-    public RelationshipResponse sendRequest(String username, String targetUsername) {
-        if (username.equals(targetUsername)) {
+    public RelationshipResponse sendRequest(String username, String targetName) {
+        // Friends are addressed BY NICKNAME (the one visible name); logins are
+        // never matchable — a friend lookup by login would leak the login→person mapping.
+        if (username.equals(targetName)) {
             throw badRequest("You cannot add yourself as a friend");
         }
         User actor = auth.requireUser(username);
-        User target = userRepository.findByUsername(targetUsername)
+        User target = userRepository.findByNickname(targetName)
                 .orElseThrow(() -> notFound("User not found"));
         if (relationshipRepository.blockedEitherDirection(actor, target)) {
             throw forbidden("You cannot add a blocked user as a friend");

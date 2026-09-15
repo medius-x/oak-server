@@ -24,9 +24,12 @@ import java.util.regex.Pattern;
  * Parses plain-text {@code @token} mentions in a message body into structured {@link MentionResponse}s
  * and expands them to the concrete set of pinged user ids.
  *
- * <p><b>Grammar</b> (v1): a bare {@code @word} where {@code word} is {@code [A-Za-z0-9_]+}. Resolution
- * order per token (first match wins): {@code @everyone} / {@code @here} literals; a mentionable custom
- * role by name; a user by username. Permission gating matches Discord:
+ * <p><b>Grammar</b>: a bare {@code @token} where the token class is Unicode letters/digits plus
+ * {@code _} and {@code -} (no spaces) — the SAME class the nickname validation accepts, so every
+ * nickname is @mentionable by construction (Cyrillic included). Resolution order per token (first
+ * match wins): {@code @everyone} / {@code @here} literals; a mentionable custom role by name; a user
+ * by NICKNAME. The login (username) is NEVER matchable — mentioning by login would disclose the
+ * mapping login→person. Permission gating matches Discord:
  * <ul>
  *   <li>{@code @everyone} / {@code @here} require the author's {@link Permission#MENTION_EVERYONE}
  *       in the channel (override-aware); without it the literal stays plain text and no mention is
@@ -45,7 +48,7 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class MentionParser {
 
-    private static final Pattern MENTION_PATTERN = Pattern.compile("@(\\w+)");
+    private static final Pattern MENTION_PATTERN = Pattern.compile("@([\\p{L}\\p{N}_-]+)");
 
     private final RoleRepository roleRepository;
     private final UserRepository userRepository;
@@ -92,11 +95,12 @@ public class MentionParser {
                 return new MentionResponse("ROLE", role.getId(), role.getName(), 0, 0);
             }
         }
-        // @user — always allowed.
-        Optional<User> userOpt = userRepository.findByUsername(token);
+        // @user — always allowed, matched by NICKNAME only (never the login: matching by login
+        // would disclose the login→person mapping).
+        Optional<User> userOpt = userRepository.findByNickname(token);
         if (userOpt.isPresent()) {
             User target = userOpt.get();
-            return new MentionResponse("USER", target.getId(), target.getUsername(), 0, 0);
+            return new MentionResponse("USER", target.getId(), target.displayName(), 0, 0);
         }
         return null;
     }

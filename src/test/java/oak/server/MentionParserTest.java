@@ -45,12 +45,36 @@ class MentionParserTest {
     void parsesUserMentionWithOffsets() {
         User author = user(1L, "alice");
         when(auth.hasInChannel(author, null, Permission.MENTION_EVERYONE)).thenReturn(true);
-        when(userRepository.findByUsername("bob")).thenReturn(Optional.of(user(2L, "bob")));
+        when(userRepository.findByNickname("bob")).thenReturn(Optional.of(user(2L, "bob")));
 
         List<MentionResponse> mentions = parser.parse("hi @bob", author, null);
 
         assertEquals(1, mentions.size());
         assertMention(mentions.get(0), "USER", 2L, "bob", 3, 7);
+    }
+
+    @Test
+    void cyrillicNicknameIsMentionable() {
+        User author = user(1L, "alice");
+        when(auth.hasInChannel(author, null, Permission.MENTION_EVERYONE)).thenReturn(true);
+        User bob = user(2L, "vpupkin");
+        bob.setNickname("Вася");
+        when(userRepository.findByNickname("Вася")).thenReturn(Optional.of(bob));
+
+        List<MentionResponse> mentions = parser.parse("привет @Вася", author, null);
+
+        assertEquals(1, mentions.size());
+        assertMention(mentions.get(0), "USER", 2L, "Вася", 7, 12);
+    }
+
+    @Test
+    void loginIsNeverMatchable() {
+        User author = user(1L, "alice");
+        when(auth.hasInChannel(author, null, Permission.MENTION_EVERYONE)).thenReturn(true);
+        // vpupkin is the LOGIN of a user whose nickname is Вася — the login must not resolve.
+        when(userRepository.findByNickname("vpupkin")).thenReturn(Optional.empty());
+
+        assertTrue(parser.parse("@vpupkin", author, null).isEmpty());
     }
 
     @Test
@@ -103,7 +127,7 @@ class MentionParserTest {
         User author = user(1L, "alice");
         when(auth.hasInChannel(author, null, Permission.MENTION_EVERYONE)).thenReturn(false);
         when(roleRepository.findByName("devs")).thenReturn(Optional.of(role(10L, "devs", RoleKind.CUSTOM, false)));
-        when(userRepository.findByUsername("devs")).thenReturn(Optional.of(user(20L, "devs")));
+        when(userRepository.findByNickname("devs")).thenReturn(Optional.of(user(20L, "devs")));
 
         List<MentionResponse> mentions = parser.parse("@devs", author, null);
 
@@ -117,7 +141,7 @@ class MentionParserTest {
         User author = user(1L, "alice");
         when(auth.hasInChannel(author, null, Permission.MENTION_EVERYONE)).thenReturn(true);
         when(roleRepository.findByName("ghost")).thenReturn(Optional.empty());
-        when(userRepository.findByUsername("ghost")).thenReturn(Optional.empty());
+        when(userRepository.findByNickname("ghost")).thenReturn(Optional.empty());
 
         assertTrue(parser.parse("@ghost", author, null).isEmpty());
     }
@@ -126,7 +150,7 @@ class MentionParserTest {
     void duplicateMentionsKeepDistinctOffsets() {
         User author = user(1L, "alice");
         when(auth.hasInChannel(author, null, Permission.MENTION_EVERYONE)).thenReturn(true);
-        when(userRepository.findByUsername("bob")).thenReturn(Optional.of(user(2L, "bob")));
+        when(userRepository.findByNickname("bob")).thenReturn(Optional.of(user(2L, "bob")));
 
         List<MentionResponse> mentions = parser.parse("@bob @bob", author, null);
 

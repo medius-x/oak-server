@@ -4,6 +4,9 @@ import lombok.RequiredArgsConstructor;
 import oak.server.dto.AssignRolesRequest;
 import oak.server.dto.MemberEvent;
 import oak.server.dto.MemberResponse;
+import oak.server.dto.RenameMemberRequest;
+import oak.server.dto.UserSummary;
+import oak.server.controller.UserController;
 import oak.server.entity.Permission;
 import oak.server.entity.Role;
 import oak.server.entity.RoleKind;
@@ -104,6 +107,49 @@ public class MemberService {
         voiceEnforcer.enforceConnectForUser(target.getUsername(), actorUsername);
         publish("rolesChanged", target.getId());
         return MemberResponse.from(target, signer, auth.isOwner(target));
+    }
+
+    /** Sets a member's NICKNAME — the display name every surface shows and the only name mentions
+     *  resolve against. Renaming SOMEONE ELSE: {@code MANAGE_NICKNAMES} + hierarchy (strictly higher
+     *  top position; an OWNER target is immune). Renaming YOURSELF: {@code CHANGE_NICKNAME}, no
+     *  hierarchy gate (Discord semantics, mirroring the self-branch of voice mute). Uniqueness is
+     *  checked against OTHER nicknames only — a nickname may equal someone's login (logins are never
+     *  revealed: no 409 probe, no mention matching). Broadcasts {@code /topic/members} (refetch) and
+     *  a live {@code /topic/users} update so every client repaints the name instantly. */
+    @Transactional
+    public MemberResponse rename(Long userId, RenameMemberRequest request, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        User target = userRepository.findById(userId)
+                .orElseThrow(() -> notFound("User not found"));
+        if (actor.getId() != null && actor.getId().equals(target.getId())) {
+            auth.requireServer(actor, Permission.CHANGE_NICKNAME);
+        } else {
+            auth.requireServer(actor, Permission.MANAGE_NICKNAMES);
+            auth.requireCanActOn(actor, target);
+        }
+        String nickname = request.nickname().trim();
+        if (nickname.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nickname must not be blank");
+        }
+        if (userRepository.existsByNickname(nickname)
+                && userRepository.findByNickname(nickname).map(User::getId).filter(nicknameOwnerId -> nicknameOwnerId.equals(target.getId())).isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Nickname is already taken");
+        }
+        target.setNickname(nickname);
+        userRepository.save(target);
+        publish("renamed", target.getId());
+        messagingTemplate.convertAndSend(UserController.USERS_TOPIC, UserSummary.from(target, signer));
+        return MemberResponse.from(target, signer, auth.isOwner(target));
+    }
+
+    /** Resets the nickname to the member's login handle (the fresh-account default). 409 if that
+     *  name is already held as someone else's nickname. */
+    @Transactional
+    public MemberResponse resetNickname(Long userId, String actorUsername) {
+        String login = userRepository.findById(userId)
+                .orElseThrow(() -> notFound("User not found"))
+                .getUsername();
+        return rename(userId, new RenameMemberRequest(login), actorUsername);
     }
 
     @Transactional

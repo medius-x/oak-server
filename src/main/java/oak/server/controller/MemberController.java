@@ -4,11 +4,13 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.AssignRolesRequest;
 import oak.server.dto.MemberResponse;
+import oak.server.dto.RenameMemberRequest;
 import oak.server.service.MemberService;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -45,6 +47,22 @@ public class MemberController {
                                       @RequestBody @Valid AssignRolesRequest request,
                                       @AuthenticationPrincipal UserDetails principal) {
         return memberService.assignRoles(userId, request, principal.getUsername());
+    }
+
+    /** Sets the member's NICKNAME (the display name mentions resolve against). Someone else:
+     *  MANAGE_NICKNAMES + hierarchy; yourself: CHANGE_NICKNAME. 409 on a taken nickname. */
+    @PatchMapping("/{userId}/nickname")
+    public MemberResponse rename(@PathVariable Long userId,
+                                 @RequestBody @Valid RenameMemberRequest request,
+                                 @AuthenticationPrincipal UserDetails principal) {
+        return memberService.rename(userId, request, principal.getUsername());
+    }
+
+    /** Resets the nickname to the member's login handle. */
+    @DeleteMapping("/{userId}/nickname")
+    public MemberResponse resetNickname(@PathVariable Long userId,
+                                        @AuthenticationPrincipal UserDetails principal) {
+        return memberService.resetNickname(userId, principal.getUsername());
     }
 
     @PostMapping("/{userId}/kick")

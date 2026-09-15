@@ -32,6 +32,7 @@ public record DmChannelResponse(Long id, String type, String name, Long ownerId,
                 last == null ? null : last.getId(),
                 last == null ? null : last.getCreatedAt(),
                 last == null ? null : last.getContent(),
-                last == null ? null : (last.getAuthor() == null ? null : last.getAuthor().getUsername()));
+                // The rename model: a display name, never the login (the preview renders verbatim).
+                last == null ? null : (last.getAuthor() == null ? null : last.getAuthor().displayName()));
     }
 }
