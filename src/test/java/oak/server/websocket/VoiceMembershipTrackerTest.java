@@ -180,6 +180,25 @@ class VoiceMembershipTrackerTest {
     }
 
     @Test
+    void joinReseedsTheWholeChannelsMarksForTheJoiner() {
+        // Live report 2026-09-17: a muted member's badge vanished for the JOINING viewer —
+        // voice.state is push-only, so a joiner that never saw the original push had no source
+        // of current marks. Every enter now re-publishes EVERY marked member of the channel.
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setSelfMuted(CHANNEL_A, "alice", true); // alice sits muted
+        tracker.enter("s2", "bob", CHANNEL_B);
+        tracker.setMuted(CHANNEL_B, "bob", true);       // marked, but a DIFFERENT channel
+
+        tracker.enter("s3", "carol", CHANNEL_A);        // carol joins alice's room
+
+        List<VoiceControlState> states = captureStates(3); // alice self-mute, bob mod-mute, reseed
+        VoiceControlState reseed = states.get(2);
+        assertEquals("alice", reseed.username(), "the JOINER hears alice's current marks");
+        assertTrue(reseed.selfMuted());
+        assertEquals(CHANNEL_A, reseed.channelId());
+    }
+
+    @Test
     void selfUnmuteDoesNotLiftModeratorMute() {
         tracker.enter("s1", "alice", CHANNEL_A);
         tracker.setMuted(CHANNEL_A, "alice", true);    // moderator mute

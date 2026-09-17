@@ -1,6 +1,7 @@
 package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.AttachmentRef;
 import oak.server.dto.AttachmentResponse;
 import oak.server.dto.CreateMessageRequest;
@@ -42,6 +43,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class MessageService {
@@ -98,9 +100,23 @@ public class MessageService {
     private final ServerProfileRepository serverProfileRepository;
     private final NestedReplyCodec nestedReplyCodec;
     private final AttachmentListCodec attachmentListCodec;
+    private final MessageIdempotencyCache idempotencyCache;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
+        // Idempotent replay FIRST (network resilience): a retry whose original response was lost
+        // must get the ORIGINAL message back — no second row, no second broadcast. Checking before
+        // the gates is safe because an entry can only exist for a send that ALREADY passed them
+        // (entries are namespaced per author), and it keeps a replay immune to state that changed
+        // after the original (e.g. its reply target since deleted).
+        if (request.idempotencyKey() != null) {
+            MessageResponse replay = idempotencyCache.get(authorUsername, request.idempotencyKey());
+            if (replay != null) {
+                log.info("idempotent replay: message {} re-served to {} by key {}",
+                        replay.id(), authorUsername, request.idempotencyKey());
+                return replay;
+            }
+        }
         String content = request.content();
         List<AttachmentRef> attachments = sanitized(request.attachments());
         if (isBlank(content) && attachments.isEmpty()) {
@@ -138,6 +154,11 @@ public class MessageService {
         MessageResponse response = toResponse(message, List.of(), replyOriginalsFor(List.of(message)));
         // Variant A: written via REST, then broadcast to everyone subscribed to this channel.
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId, response);
+        if (request.idempotencyKey() != null) {
+            // After the broadcast, so a thrown store problem can never double-send: the entry is
+            // the very response that just went out.
+            idempotencyCache.put(authorUsername, request.idempotencyKey(), response);
+        }
         return response;
     }
 

@@ -76,7 +76,7 @@ public class VoiceMembershipTracker {
     /** Records that {@code sessionId} (authenticated as {@code username}) is now in {@code channelId}. */
     public void enter(String sessionId, String username, Long channelId) {
         List<VoiceMemberEvent> toPublish = new ArrayList<>();
-        boolean republishModeratorState = false;
+        List<String> membersWithState = new ArrayList<>();
         synchronized (lock) {
             Long current = sessionToChannel.get(sessionId);
             if (current != null && current.equals(channelId)) {
@@ -92,18 +92,22 @@ public class VoiceMembershipTracker {
                     .merge(username, 1, Integer::sum);
             if (openSessions == 1) {
                 toPublish.add(new VoiceMemberEvent(username, channelId, VoiceMemberStatus.JOINED));
-                // The moderator state SURVIVES a leave (a server-mute must outlive the target
-                // rejoining) — so a rejoin re-publishes it: everyone dropped the marks on the LEFT
-                // delta, and the rejoiner (fresh session, devices on) must comply again.
-                republishModeratorState = stateIn(modMutedByChannel, channelId, username)
-                        || stateIn(impliedModMutedByChannel, channelId, username)
-                        || stateIn(modDeafenedByChannel, channelId, username);
+            }
+            // RE-SEED THE WHOLE CHANNEL'S STATE on every join (live report 2026-09-17: a
+            // muted member's badge vanished for the JOINING viewer — voice.state is push-only,
+            // so a client that never saw the original push, or wiped its store, has no source
+            // of current marks). This subsumes the former entering-user moderator-state
+            // republish: every member of THIS channel carrying any mute/deafen flag (the
+            // entering user included — their surviving moderator state must re-comply) is
+            // published again, refreshing every viewer.
+            for (String member : channelUserCount.getOrDefault(channelId, Map.of()).keySet()) {
+                if (hasAnyState(channelId, member)) {
+                    membersWithState.add(member);
+                }
             }
         }
         toPublish.forEach(this::publish);
-        if (republishModeratorState) {
-            publishStateIfChanged(true, channelId, username);
-        }
+        membersWithState.forEach(member -> publishStateIfChanged(true, channelId, member));
     }
 
     /** Records that {@code sessionId} has left whatever room it was in (no-op if it was in none). */
@@ -195,6 +199,18 @@ public class VoiceMembershipTracker {
 
     private static boolean stateIn(Map<Long, Set<String>> byChannel, Long channelId, String username) {
         return byChannel.getOrDefault(channelId, Set.of()).contains(username);
+    }
+
+    /** Whether {@code username} carries ANY mute/deafen flag in {@code channelId} (the join-time
+     *  re-seed publishes only members that actually carry marks — an all-false state is the
+     *  default nobody needs to hear about). */
+    private boolean hasAnyState(Long channelId, String username) {
+        return stateIn(selfMutedByChannel, channelId, username)
+                || stateIn(modMutedByChannel, channelId, username)
+                || stateIn(selfDeafenedByChannel, channelId, username)
+                || stateIn(modDeafenedByChannel, channelId, username)
+                || stateIn(impliedSelfMutedByChannel, channelId, username)
+                || stateIn(impliedModMutedByChannel, channelId, username);
     }
 
     /** Must run under {@link #lock}: toggles a state set, returning whether it actually changed. */

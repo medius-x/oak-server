@@ -69,6 +69,8 @@ class MessageServiceTest {
     private ServerProfileRepository serverProfileRepository;
     @Mock
     private NestedReplyCodec nestedReplyCodec;
+    @Mock
+    private MessageIdempotencyCache idempotencyCache;
 
     /** A REAL codec, not a mock: every create/forward/toResponse call reads/writes the
      *  attachments JSON column, so a Mockito mock would force write/read stubs onto every test
@@ -110,6 +112,40 @@ class MessageServiceTest {
         ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
                 messageService.create(7L, new CreateMessageRequest("", null, null), "alice"));
         assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+    }
+
+    @Test
+    void createServesIdempotentReplayWithoutSecondRowOrBroadcast() {
+        // A retry whose first response was lost re-presents the same key: the ORIGINAL response
+        // comes back, with no save and no second /topic push.
+        MessageResponse original = new MessageResponse(55L, 7L, 5L, "alice", "hello", null,
+                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null);
+        when(idempotencyCache.get("alice", "key-1")).thenReturn(original);
+
+        MessageResponse response = messageService.create(7L, new CreateMessageRequest("hello", null, null, "key-1"), "alice");
+
+        assertEquals(55L, response.id());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+        verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    @Test
+    void createStoresTheResponseUnderTheKeyForFutureReplays() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        Message saved = new Message(channel, author, "hello");
+        saved.setId(100L);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
+        when(messageRepository.save(any(Message.class))).thenReturn(saved);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        messageService.create(channelId, new CreateMessageRequest("hello", null, null, "key-1"), "alice");
+
+        verify(idempotencyCache).put(eq("alice"), eq("key-1"), any(MessageResponse.class));
     }
 
     @Test
