@@ -55,6 +55,26 @@ public class ServerProfile {
     @Column(name = "connection_port")
     private Integer connectionPort;
 
+    // --- Storage-GC policy (the "Server" settings screen; nulls on rows predating the
+    //     columns resolve to the code defaults — see StorageGcService) ---
+
+    /** Start purging when the data filesystem is more than this percent full. */
+    @Column(name = "storage_high_watermark_percent", columnDefinition = "int default 85")
+    private Integer storageHighWatermarkPercent;
+
+    /** Purge until the filesystem is back at (or below) this percent full. */
+    @Column(name = "storage_low_watermark_percent", columnDefinition = "int default 50")
+    private Integer storageLowWatermarkPercent;
+
+    /** Local minute-of-day the nightly GC fires at (e.g. 210 = 03:30). */
+    @Column(name = "storage_gc_minute_of_day", columnDefinition = "int default 210")
+    private Integer storageGcMinuteOfDay;
+
+    /** False = the scheduled GC never fires (manual "run now" still works; the
+     *  event tier — deleting an object with its last reference — is unaffected too). */
+    @Column(name = "storage_gc_enabled", columnDefinition = "boolean default true")
+    private Boolean storageGcEnabled;
+
     public ServerProfile(String name) {
         this.name = name;
     }

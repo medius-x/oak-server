@@ -201,6 +201,55 @@ oak.server
   клиентская парная правка: `joinVoice` чистит только СВОИ метки. Тест
   `joinReseedsTheWholeChannelsMarksForTheJoiner` (+1, 264 зелёных).
 
+- **Storage GC: событийная очистка + ночной сборщик по водяным знакам + раздел Server (#479, 2026-09-17,
+  ДЕПЛОЙ ПАРНЫЙ со space-client).** Юзер-решения: чистка НЕ по возрасту, а «по нужде» (когда диск
+  заполняется); аттач умирает в момент смерти последней ссылки; VACUUM FULL по умолчанию ON; политики
+  редактируются с клиента. **Событийный ярус** (`MessageService.deleteUnreferencedObjects`): при
+  delete сообщения / edit-удалении аттачей каждый ключ (key + thumbnailKey) после flush'а проверяется
+  `attachmentExists` (форвард, ссылающийся на ключ, держит объект живым) → немедленное
+  `AttachmentObjectStore.delete`. **Ночной ярус** (`service/StorageGcService`, прецедент
+  RefreshTokenCleanup): замер ФС (`oak.storage.path`, дефолт cwd — диск данных) → sweep сирот
+  `attachments/` старше grace (`oak.storage.sweep-grace-days:7`, аплоады в полёте не трогаем; аватары
+  НЕ в листинге) → если занято > high (85%): батч-снос СТАРЕЙШИХ сообщений (по
+  `min(500, count − min-keep)`, реакции по FK вперёд, батч в TransactionTemplate) до low (50%);
+  стопы: low достигнут / пол `oak.storage.min-keep-messages:1000` / **детектор отсутствия прогресса**
+  (3 батча без сдвига % — сигнатура Postgres-блоута, DELETE не возвращает место ОС) → WARN про
+  VACUUM FULL руками. **VACUUM FULL messages** (`oak.storage.vacuum-full:true`) после чистки, только
+  если что-то удалено, только PostgreSQL (H2-скачок), прямым connection (автокоммит — VACUUM нельзя
+  в транзакции), с `SET lock_timeout TO '5s'` (занятая таблица → перенос на след. ночь, а не очередь
+  за ней; писатели стоят ≤ времени вакуума: на наших объёмах секунды, «минуты» от ~5 млн сообщений).
+  **Расписание**: тик `@Scheduled` каждые `oak.storage.gc-tick-interval:PT10M` сверяет minute-of-day
+  с настроенным (окно = один тик, «первый тик не раньше») — время правится с клиента без
+  пересобытирования. **Политики** — колонки `ServerProfile.storage_{high,low,gc_minute}` (int default;
+  null → кодовые дефолты 85/50/210). **REST** `/api/server/storage` (всё под НОВЫМ пермишшеном
+  `MANAGE_STORAGE` — В КОНЕЦ enum после VIEW_CHANNEL, бит-стабильность; OWNER держит через
+  ADMINISTRATOR): GET (policy + usage + running + lastRun), PUT (валидация high>low, 1..99/0..98,
+  minute 0..1439), POST /run → 202, фоновый daemon-поток, повторный → 409; отчёт `StorageGcReport`
+  latched in-memory. **ГРАБЛИ ПО ПУТИ**: native-LIKE `attachmentExists` НЕ авто-флашит persistence
+  context — перед проверкой явный `messageRepository.flush()` (иначе видит удалённую строку → объект-
+  сирота остаётся); SLF4J не умеет `{:.1}` — только `{}` с pre-formatted String.format; @PostMapping
+  с телом отвечает 200 — 202 ставится @ResponseStatus'ом; в гейт-тесте «первый зарегистрированный =
+  OWNER» — 403-кейсу нужен владелец + обычный участник. `AttachmentObjectStore` (листинг+delete)
+  реализуют MinIO (listObjects prefix attachments/) и noop (пустой листинг). Тесты:
+  StorageGcServiceTest (5 юнитов: below-high no-op, батчи до low + смерть сирот при живом форварде,
+  no-progress стоп, min-keep пол, sweep только старых-без-ссылок) через СЕЙМ `runOnce(trigger,
+  DoubleSupplier)` (диск-процент инжектится) + StorageIntegrationTest (3: гейт 403/round-trip/
+  ручной прогон с поллингом) + MessageServiceTest += objectStore-мок. 272 зелёных.
+  **Итерация 2 (юзер-решения):** тоггл `storage_gc_enabled` (boolean default true; false =
+  scheduledTick выходит ДОТ idle-проверки — автоматика не чистит ВООБЩЕ; ручной /run и событийный
+  ярус работают как работали), `StoragePolicy`/DTO/PUT += `gcEnabled` (клиентский тоггл гасит поле
+  времени); тик-тест verifyNoInteractions. 273 зелёных. **Итерация 3 (тестовое покрытие чистки,
+  юзер-вопрос):** событийный ярус закрыт юнитами MessageServiceTest (delete/edit удаляют ТОЛЬКО
+  осиротевшие ключи; ключ с живым форвардом живёт), НОВАЯ `StoragePurgeFlowTest` (@SpringBootTest
+  H2, `oak.storage.min-keep-messages=0`, диск-процент через package-private сейм) прогоняет ВЕСЬ
+  purge-флоу на реальном SQL: батч старейших → FK-чистка реакций → строки → post-batch
+  attachmentExists → отчёт «low watermark reached» при пург-каунте. **ГРАБЛЯ DERIVED-ИМЕНИ:**
+  `List<Long> findByOrderByIdAsc(Pageable)` спарсился криво (конвертировал сущности, не id —
+  runtime ConversionService-фейл, пойман именно H2-тестом) → явный JPQL
+  `@Query("select m.id from Message m order by m.id asc") findIdsOldestFirst`. 276 зелёных.
+  Полю остаётся: реальный листинг MinIO (listObjects/prefix/lastModified — noop в тестах), реальный
+  VACUUM FULL, реальный замер ФС.
+
 ## Конвенции разработки
 
 - **Java 17**, сборка Maven (`mvn clean package`, `mvn spring-boot:run`).

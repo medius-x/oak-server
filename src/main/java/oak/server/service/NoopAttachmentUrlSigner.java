@@ -12,7 +12,7 @@ import java.util.UUID;
  */
 @Service
 @ConditionalOnProperty(prefix = "oak.minio", name = "enabled", havingValue = "false", matchIfMissing = true)
-public class NoopAttachmentUrlSigner implements AttachmentUrlSigner {
+public class NoopAttachmentUrlSigner implements AttachmentUrlSigner, AttachmentObjectStore {
 
     @Override
     public String newKey(String fileName) {
@@ -52,5 +52,10 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner {
     @Override
     public void delete(String key) {
         // No-op: nothing is actually stored under the noop signer.
+    }
+
+    @Override
+    public java.util.List<StoredObject> listAttachmentObjects() {
+        return java.util.List.of(); // nothing is stored — the orphan sweep is a no-op
     }
 }

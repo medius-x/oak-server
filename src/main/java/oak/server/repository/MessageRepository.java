@@ -25,6 +25,11 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
      *  {@code /api/channels/{otherChannel}/messages/{id}} cannot reach it (no cross-channel leak). */
     Optional<Message> findByIdAndChannelId(Long id, Long channelId);
 
+    /** The OLDEST message ids (storage-GC purge batches walk the table from the start of time).
+     *  Explicit JPQL: the derived spelling parsed crooked and converted entities, not ids. */
+    @Query("select m.id from Message m order by m.id asc")
+    List<Long> findIdsOldestFirst(Pageable pageable);
+
     /** Unread count for a channel relative to a read floor (the user's {@code lastReadMessageId};
      *  pass 0 to count everything when nothing has been read yet). */
     long countByChannelIdAndIdGreaterThan(Long channelId, Long id);

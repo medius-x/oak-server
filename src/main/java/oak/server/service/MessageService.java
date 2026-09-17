@@ -101,6 +101,7 @@ public class MessageService {
     private final NestedReplyCodec nestedReplyCodec;
     private final AttachmentListCodec attachmentListCodec;
     private final MessageIdempotencyCache idempotencyCache;
+    private final AttachmentObjectStore objectStore;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
@@ -240,7 +241,14 @@ public class MessageService {
                     "Message must have content or an attachment");
         }
         message.setContent(request.content());
+        Set<String> removedKeys = Set.of();
         if (request.attachments() != null) {
+            Set<String> resultingKeys = resultingAttachments.stream()
+                    .map(AttachmentRef::key).filter(Objects::nonNull).collect(Collectors.toSet());
+            removedKeys = currentAttachments.stream()
+                    .map(AttachmentRef::key)
+                    .filter(key -> key != null && !resultingKeys.contains(key))
+                    .collect(Collectors.toSet());
             message.setAttachments(attachmentListCodec.write(resultingAttachments));
         }
         message.setEditedAt(Instant.now());
@@ -249,6 +257,8 @@ public class MessageService {
         // the reply quote when the edited message is itself a reply.
         MessageResponse response = toResponse(messageRepository.save(message),
                 reactionSummaries(message.getId()), replyOriginalsFor(List.of(message)));
+        messageRepository.flush(); // the orphan check below must not see the pre-edit JSON
+        deleteUnreferencedObjects(removedKeys);
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId + EDITED_TOPIC_SUFFIX, response);
         return response;
     }
@@ -263,10 +273,33 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
         User actor = auth.requireUser(actorUsername);
         requireCanModify(actor, channel, message);
+        // The attachments die with the message unless someone else still references them
+        // (a forward shares the key) — collected BEFORE the row is gone.
+        Set<String> attachmentKeys = attachmentListCodec.read(message.getAttachments()).stream()
+                .flatMap(reference -> java.util.stream.Stream.of(reference.key(), reference.thumbnailKey()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
         // No ON DELETE CASCADE under ddl-auto=update — reaction rows must go first.
         reactionRepository.deleteByMessageId(message.getId());
         messageRepository.delete(message);
+        messageRepository.flush(); // the orphan check below must not see the deleted row
+        deleteUnreferencedObjects(attachmentKeys);
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId + DELETED_TOPIC_SUFFIX, messageId);
+    }
+
+    /**
+     * The event tier of storage GC: keys whose LAST reference just died are deleted from the
+     * object store immediately. A key still referenced by any remaining message (typically a
+     * forward's copy) stays — that is the whole correctness of sharing keys across messages.
+     * Best-effort per key: an already-gone object logs and moves on.
+     */
+    private void deleteUnreferencedObjects(Set<String> keys) {
+        for (String key : keys) {
+            if (!attachmentExists(key)) {
+                objectStore.delete(key);
+                log.info("[storage-gc] object '{}' orphaned by its last reference — deleted", key);
+            }
+        }
     }
 
     /** Author-or-moderator gate shared by edit/delete. Own message: always allowed (the author

@@ -2,9 +2,12 @@ package oak.server.service;
 
 import io.minio.BucketExistsArgs;
 import io.minio.GetPresignedObjectUrlArgs;
+import io.minio.ListObjectsArgs;
 import io.minio.MakeBucketArgs;
 import io.minio.MinioClient;
 import io.minio.RemoveObjectArgs;
+import io.minio.Result;
+import io.minio.messages.Item;
 import io.minio.http.Method;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
@@ -15,6 +18,9 @@ import org.springframework.stereotype.Service;
 
 import java.nio.file.Paths;
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -26,7 +32,7 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 @ConditionalOnProperty(prefix = "oak.minio", name = "enabled", havingValue = "true")
-public class MinioAttachmentService implements AttachmentUrlSigner {
+public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentObjectStore {
 
     private static final Duration PUT_EXPIRY = Duration.ofMinutes(5);
     private static final Duration GET_EXPIRY = Duration.ofHours(1);
@@ -93,6 +99,28 @@ public class MinioAttachmentService implements AttachmentUrlSigner {
             // Best-effort: a leftover orphan object is harmless, but log it so it's visible.
             log.warn("[MinIO] Could not delete object '{}': {}", key, minioError.getMessage());
         }
+    }
+
+    @Override
+    public List<StoredObject> listAttachmentObjects() {
+        // The recursive listing under the attachments/ prefix only — avatars have their own
+        // lifecycle (replaced/removed with the profile) and are never swept.
+        List<StoredObject> objects = new ArrayList<>();
+        Iterable<Result<Item>> listing = minioClient.listObjects(ListObjectsArgs.builder()
+                .bucket(properties.bucket())
+                .prefix("attachments/")
+                .recursive(true)
+                .build());
+        for (Result<Item> entry : listing) {
+            try {
+                Item item = entry.get();
+                objects.add(new StoredObject(item.objectName(), item.size(),
+                        Instant.ofEpochMilli(item.lastModified().toInstant().toEpochMilli())));
+            } catch (Exception minioError) {
+                log.warn("[MinIO] Listing skipped one object: {}", minioError.getMessage());
+            }
+        }
+        return objects;
     }
 
     private String sign(Method method, String key, Duration expiry) {

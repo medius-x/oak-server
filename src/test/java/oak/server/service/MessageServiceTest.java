@@ -71,6 +71,8 @@ class MessageServiceTest {
     private NestedReplyCodec nestedReplyCodec;
     @Mock
     private MessageIdempotencyCache idempotencyCache;
+    @Mock
+    private AttachmentObjectStore objectStore;
 
     /** A REAL codec, not a mock: every create/forward/toResponse call reads/writes the
      *  attachments JSON column, so a Mockito mock would force write/read stubs onto every test
@@ -127,6 +129,66 @@ class MessageServiceTest {
         assertEquals(55L, response.id());
         verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
         verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    // -------------------------------------------------------------------------
+    // The event tier of storage GC: an object dies the moment its LAST reference
+    // dies — a key still referenced by any remaining message (a forward) stays.
+    // -------------------------------------------------------------------------
+
+    @Test
+    void deleteRemovesAttachmentObjectsNoLongerReferencedAnywhere() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        Message existing = new Message(channel, author, "pics");
+        existing.setId(100L);
+        existing.setAttachments(attachmentListCodec.write(java.util.List.of(
+                new AttachmentRef("att/orphan", "a.png", null, null),
+                new AttachmentRef("att/forwarded", "b.png", null, null))));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(author);
+        // "att/forwarded" still hangs on another message (a forward's copy) — it must survive.
+        when(messageRepository.countByAttachmentsTextLike("%att/orphan%")).thenReturn(0L);
+        when(messageRepository.countByAttachmentsTextLike("%att/forwarded%")).thenReturn(1L);
+
+        messageService.delete(channelId, 100L, "alice");
+
+        verify(objectStore).delete("att/orphan");
+        verify(objectStore, org.mockito.Mockito.never()).delete("att/forwarded");
+    }
+
+    @Test
+    void editDroppingAttachmentsDeletesOnlyTheRemovedOrphans() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        Message existing = new Message(channel, author, "pics");
+        existing.setId(messageId);
+        existing.setAttachments(attachmentListCodec.write(java.util.List.of(
+                new AttachmentRef("att/keep", "keep.png", null, null),
+                new AttachmentRef("att/drop", "drop.png", null, null))));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(author);
+        when(messageRepository.save(any(Message.class))).thenReturn(existing);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
+        when(messageRepository.countByAttachmentsTextLike("%att/drop%")).thenReturn(0L);
+
+        messageService.edit(channelId, messageId, new EditMessageRequest("pics",
+                java.util.List.of(new AttachmentRef("att/keep", "keep.png", null, null))), "alice");
+
+        verify(objectStore).delete("att/drop");
+        verify(objectStore, org.mockito.Mockito.never()).delete("att/keep");
     }
 
     @Test

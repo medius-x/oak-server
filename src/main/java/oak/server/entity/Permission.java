@@ -52,10 +52,14 @@ public enum Permission {
 
     // --- Channel access (labeled GENERAL for the catalog; bit position at the very END —
     // an in-group insert would remap every later group's persisted bits) ---
-    VIEW_CHANNEL(Group.GENERAL);           // see a channel at all: private channels deny it for
+    VIEW_CHANNEL(Group.GENERAL),           // see a channel at all: private channels deny it for
                                            // @everyone (hidden) or deny read/connect (locked, visible);
                                            // AuthorizationService treats it as the master gate for
                                            // every other channel permission
+
+    // --- Storage (appended at the very END — the bit-stability rule) ---
+    MANAGE_STORAGE(Group.GENERAL);         // edit the storage-GC policy and trigger cleanups
+                                           // (/api/server/storage — the "Server" settings screen)
 
     public enum Group { GENERAL, TEXT, VOICE }
 

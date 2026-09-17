@@ -28,4 +28,8 @@ public interface MessageReactionRepository extends JpaRepository<MessageReaction
     /** FK cleanup before a message delete (no ON DELETE CASCADE under ddl-auto=update). */
     @Transactional
     void deleteByMessageId(Long messageId);
+
+    /** FK cleanup before a storage-GC batch delete. */
+    @Transactional
+    void deleteByMessageIdIn(Collection<Long> messageIds);
 }
