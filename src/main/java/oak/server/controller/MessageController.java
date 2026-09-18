@@ -38,12 +38,19 @@ public class MessageController {
 
     private final MessageService messageService;
 
+    /** History page. Cursor flavours (at most one, 400 otherwise): none — the newest page;
+     *  {@code beforeId} — strictly older (back-fill); {@code aroundId} — a window centered on
+     *  the message (the search-result jump); {@code afterId} — strictly newer (pagination
+     *  away from an around window). All return OLDEST-FIRST pages. */
     @GetMapping
     public List<MessageResponse> list(@PathVariable Long channelId,
                                       @RequestParam(required = false) Integer limit,
                                       @RequestParam(required = false) Long beforeId,
+                                      @RequestParam(required = false) Long aroundId,
+                                      @RequestParam(required = false) Long afterId,
                                       @AuthenticationPrincipal UserDetails principal) {
-        return messageService.listByChannel(channelId, limit, beforeId, principal.getUsername());
+        return messageService.listByChannel(channelId, limit, beforeId, aroundId, afterId,
+                principal.getUsername());
     }
 
     @PostMapping

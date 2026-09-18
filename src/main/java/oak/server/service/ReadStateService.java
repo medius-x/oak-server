@@ -63,6 +63,13 @@ public class ReadStateService {
         }
         ChannelReadState state = readStateRepository.findByUserIdAndChannelId(user.getId(), channelId)
                 .orElseGet(() -> new ChannelReadState(user, channel, null));
+        // Monotonic pointer: never move the read mark BACKWARDS. An ack computed from a partial
+        // window (a client that jumped into the middle of history via search) must not rewind
+        // the pointer and resurrect unread counts. Same-value writes fall through harmlessly.
+        if (state.getLastReadMessageId() != null && lastReadMessageId != null
+                && lastReadMessageId < state.getLastReadMessageId()) {
+            return;
+        }
         state.setLastReadMessageId(lastReadMessageId);
         readStateRepository.save(state);
     }

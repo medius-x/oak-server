@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 
@@ -47,6 +48,39 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
      *  reject the channel DELETE. Runs in the caller's transaction. */
     @Transactional
     void deleteByChannelId(Long channelId);
+
+    /** The page of messages STRICTLY NEWER than {@code afterId}, oldest first — the client's
+     *  downward pagination away from an {@code aroundId} window (no service-side reverse
+     *  needed; {@code Pageable} carries the page size). */
+    List<Message> findByChannelIdAndIdGreaterThanOrderByIdAsc(Long channelId, Long afterId, Pageable pageable);
+
+    /** Search page: substring match on the content OR the attachments JSON (so a file name
+     *  matches), newest first, strictly older than the cursor. Native SQL because of ILIKE and
+     *  the IN-list. The non-null sentinels ({@code authorId = 0} = no filter,
+     *  {@code beforeId = Long.MAX_VALUE} = no cursor) keep ONE query shape for every
+     *  combination — NULL parameter typing in native queries is unreliable across PG/H2.
+     *  COALESCE wraps both text columns so attachment-only rows (content NULL) survive an
+     *  author-only search ({@code NULL ILIKE} is NULL = no match without it). */
+    @Query(value = "SELECT * FROM messages WHERE channel_id IN (:channelIds)"
+            + " AND (:authorId = 0 OR author_id = :authorId)"
+            + " AND (COALESCE(content, '') ILIKE :pattern OR COALESCE(attachments, '') ILIKE :pattern)"
+            + " AND id < :beforeId ORDER BY id DESC LIMIT :limit", nativeQuery = true)
+    List<Message> searchMessages(@Param("channelIds") Collection<Long> channelIds,
+                                 @Param("authorId") long authorId,
+                                 @Param("pattern") String pattern,
+                                 @Param("beforeId") long beforeId,
+                                 @Param("limit") int limit);
+
+    /** Total hit count for the same filter (WITHOUT the cursor — the page counter stays
+     *  constant while the client pages through results). Same sentinels as
+     *  {@link #searchMessages}. */
+    @Query(value = "SELECT COUNT(*) FROM messages WHERE channel_id IN (:channelIds)"
+            + " AND (:authorId = 0 OR author_id = :authorId)"
+            + " AND (COALESCE(content, '') ILIKE :pattern OR COALESCE(attachments, '') ILIKE :pattern)",
+            nativeQuery = true)
+    long countSearchMessages(@Param("channelIds") Collection<Long> channelIds,
+                             @Param("authorId") long authorId,
+                             @Param("pattern") String pattern);
 
     /** Messages whose attachment list (the JSON-text {@code attachments} column) contains the
      *  pattern. Native SQL because JPQL sees the converter type ({@code List<AttachmentRef>}),

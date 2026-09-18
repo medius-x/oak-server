@@ -13,6 +13,7 @@ import oak.server.dto.MentionResponse;
 import oak.server.dto.ReactionEvent;
 import oak.server.dto.ReactionSummary;
 import oak.server.dto.ReplyInfo;
+import oak.server.dto.SearchMessagesResponse;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
 import oak.server.entity.Message;
@@ -74,6 +75,10 @@ public class MessageService {
 
     private static final int DEFAULT_LIMIT = 50;
     private static final int MAX_LIMIT = 200;
+
+    /** Search page sizing (Discord's result-page shape — smaller than a history page). */
+    static final int SEARCH_DEFAULT_LIMIT = 25;
+    static final int SEARCH_MAX_LIMIT = 50;
 
     /** Cap of the one-line reply-quote preview (chars, "…" appended when trimmed). */
     private static final int REPLY_PREVIEW_MAX = 100;
@@ -175,15 +180,40 @@ public class MessageService {
     @Transactional(readOnly = true)
     public List<MessageResponse> listByChannel(Long channelId, Integer limit, Long beforeId,
                                                String viewerUsername) {
+        return listByChannel(channelId, limit, beforeId, null, null, viewerUsername);
+    }
+
+    /** Full cursor flavour: at most ONE of {@code beforeId}/{@code aroundId}/{@code afterId}
+     *  (400 otherwise — combining them is meaningless). {@code aroundId} centers a window on the
+     *  given message (the search-result jump: ~half the page older, the rest newer; short halves
+     *  at the ends of history are fine); {@code afterId} pages strictly NEWER than the cursor,
+     *  already in chronological order (no reverse). Same READ_MESSAGE_HISTORY gate. */
+    @Transactional(readOnly = true)
+    public List<MessageResponse> listByChannel(Long channelId, Integer limit, Long beforeId,
+                                               Long aroundId, Long afterId, String viewerUsername) {
+        int cursorCount = (beforeId == null ? 0 : 1) + (aroundId == null ? 0 : 1) + (afterId == null ? 0 : 1);
+        if (cursorCount > 1) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Only one of beforeId, aroundId, afterId may be given");
+        }
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
         auth.requireInChannel(auth.requireUser(viewerUsername), channel, Permission.READ_MESSAGE_HISTORY);
-        List<Message> messages = new ArrayList<>(beforeId == null
-                ? messageRepository.findByChannelIdOrderByIdDesc(channelId, PageRequest.of(0, clamp(limit)))
-                        .getContent()
-                : messageRepository.findByChannelIdAndIdLessThanOrderByIdDesc(
-                        channelId, beforeId, PageRequest.of(0, clamp(limit))).getContent());
-        Collections.reverse(messages);
+        List<Message> messages;
+        if (aroundId != null) {
+            messages = aroundWindow(channelId, aroundId, clamp(limit));
+        } else if (afterId != null) {
+            messages = new ArrayList<>(messageRepository.findByChannelIdAndIdGreaterThanOrderByIdAsc(
+                    channelId, afterId, PageRequest.of(0, clamp(limit))));
+        } else if (beforeId != null) {
+            messages = new ArrayList<>(messageRepository.findByChannelIdAndIdLessThanOrderByIdDesc(
+                    channelId, beforeId, PageRequest.of(0, clamp(limit))).getContent());
+            Collections.reverse(messages);
+        } else {
+            messages = new ArrayList<>(messageRepository.findByChannelIdOrderByIdDesc(
+                    channelId, PageRequest.of(0, clamp(limit))).getContent());
+            Collections.reverse(messages);
+        }
         // One batched reaction query for the whole page (toResponse never touches the repository
         // itself — otherwise a 50-message page would fire 50 extra selects). Same discipline for
         // reply quotes: one findAllById for the page's originals.
@@ -194,6 +224,84 @@ public class MessageService {
                 .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
                         replyOriginals))
                 .toList();
+    }
+
+    /** The {@code aroundId} window: {@code pageSize} messages centered on the target — the older
+     *  half via the DESC page (reversed), the target, then the newer half via the ASC page. A
+     *  message id from another channel 404s here ({@code findByIdAndChannelId} scoping — no
+     *  cross-channel leak). */
+    private List<Message> aroundWindow(Long channelId, Long aroundId, int pageSize) {
+        Message target = messageRepository.findByIdAndChannelId(aroundId, channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
+        int olderCount = (pageSize - 1) / 2;
+        int newerCount = (pageSize - 1) - olderCount;
+        List<Message> older = new ArrayList<>(olderCount == 0 ? List.<Message>of()
+                : messageRepository.findByChannelIdAndIdLessThanOrderByIdDesc(
+                        channelId, target.getId(), PageRequest.of(0, olderCount)).getContent());
+        Collections.reverse(older);
+        List<Message> newer = newerCount == 0 ? List.of()
+                : messageRepository.findByChannelIdAndIdGreaterThanOrderByIdAsc(
+                        channelId, target.getId(), PageRequest.of(0, newerCount));
+        List<Message> window = new ArrayList<>(older.size() + 1 + newer.size());
+        window.addAll(older);
+        window.add(target);
+        window.addAll(newer);
+        return window;
+    }
+
+    /** Message search (Discord-style): substring match on the content and the attachments JSON
+     *  (file names match), newest first, paged by {@code beforeId}. Scope: one channel
+     *  ({@code channelId} given — a DM works, the gate degenerates to the participant check) or
+     *  the whole server (every server TEXT channel the viewer can read; DM/group-DM channels are
+     *  excluded BY TYPE — a server-wide search must never return anyone's DMs). {@code q} and
+     *  {@code author} are both optional filters, at least one required; an unknown author yields
+     *  an empty result (total 0) rather than 404 — no oracle for probing logins. */
+    @Transactional(readOnly = true)
+    public SearchMessagesResponse searchMessages(String q, Long channelId, String author,
+                                                 Long beforeId, Integer limit, String viewerUsername) {
+        boolean hasQuery = !isBlank(q);
+        if (!hasQuery && isBlank(author)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provide a query or an author filter");
+        }
+        User viewer = auth.requireUser(viewerUsername);
+        List<Long> channelIds;
+        if (channelId != null) {
+            Channel channel = channelRepository.findById(channelId)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+            auth.requireInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY);
+            channelIds = List.of(channelId);
+        } else {
+            // The ReadStateService.snapshot pattern: walk the non-DM channels, keep the ones the
+            // viewer may read. hasInChannel's VIEW_CHANNEL master gate drops hidden channels.
+            channelIds = channelRepository
+                    .findByTypeNotInOrderByIdAsc(List.of(ChannelType.DM, ChannelType.GROUP_DM)).stream()
+                    .filter(channel -> channel.getType() == ChannelType.TEXT)
+                    .filter(channel -> auth.hasInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY))
+                    .map(Channel::getId)
+                    .toList();
+        }
+        long authorId = 0;
+        if (!isBlank(author)) {
+            authorId = userRepository.findByUsername(author).map(User::getId).orElse(0L);
+        }
+        if (channelIds.isEmpty() || (authorId == 0 && !isBlank(author))) {
+            // No readable channel or an unknown author: zero hits — the empty IN-list would also
+            // be invalid SQL, so this is a correctness guard, not an optimization.
+            return new SearchMessagesResponse(0, List.of());
+        }
+        String pattern = likePattern(hasQuery ? q : null);
+        long total = messageRepository.countSearchMessages(channelIds, authorId, pattern);
+        List<Message> page = total == 0 ? List.of()
+                : messageRepository.searchMessages(channelIds, authorId, pattern,
+                        beforeId == null ? Long.MAX_VALUE : beforeId, clampSearch(limit));
+        Map<Long, List<ReactionSummary>> reactionsByMessage = reactionSummariesByMessage(
+                page.stream().map(Message::getId).toList());
+        Map<Long, Message> replyOriginals = replyOriginalsFor(page);
+        List<MessageResponse> results = page.stream()
+                .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
+                        replyOriginals))
+                .toList();
+        return new SearchMessagesResponse(total, results);
     }
 
     /** Replaces a message's text and/or prunes its attachment list (remove-only, Discord-style:
@@ -731,10 +839,29 @@ public class MessageService {
         return value == null || value.isBlank();
     }
 
+    /** Wraps the search query into a LIKE pattern ({@code %…%}) with the LIKE metacharacters
+     *  escaped — the user's input is a literal substring (Discord-style), never a wildcard
+     *  expression. Backslash is the default LIKE escape character in both PostgreSQL and H2,
+     *  so no ESCAPE clause is needed. A blank query becomes match-all ({@code %%}) — the
+     *  author-only search. */
+    static String likePattern(String q) {
+        if (q == null || q.isBlank()) {
+            return "%%";
+        }
+        return "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%";
+    }
+
     private static int clamp(Integer limit) {
         if (limit == null || limit <= 0) {
             return DEFAULT_LIMIT;
         }
         return Math.min(limit, MAX_LIMIT);
+    }
+
+    private static int clampSearch(Integer limit) {
+        if (limit == null || limit <= 0) {
+            return SEARCH_DEFAULT_LIMIT;
+        }
+        return Math.min(limit, SEARCH_MAX_LIMIT);
     }
 }
