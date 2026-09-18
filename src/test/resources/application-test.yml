@@ -6,6 +6,12 @@ spring:
     username: sa
     password:
     driver-class-name: org.h2.Driver
+  # Flyway migrations are PostgreSQL-specific (the V1 baseline, pg_trgm) — H2
+  # cannot run them. The test schema keeps coming from Hibernate create-drop,
+  # which is exactly what the tests exercise. The migrations themselves are
+  # verified by the live dev start (baseline + V2+ and the Hibernate validate).
+  flyway:
+    enabled: false
   jpa:
     hibernate:
       ddl-auto: create-drop

@@ -21,10 +21,22 @@ spring:
     # fail fast. Dev-only — the test profile (H2) is unaffected.
     hikari:
       initialization-fail-timeout: 60000
+
+  # Flyway owns the schema. baseline-on-migrate: the pre-existing dev database
+  # (created by ddl-auto=update + the hand migrations) absorbs V1 WITHOUT executing
+  # it — only V2+ actually run; a fresh database executes V1 and gets the full schema.
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 1
+    locations: classpath:db/migration
+
   jpa:
-    # dev only — in prod use none + a migration tool (Flyway/Liquibase)
+    # Flyway migrations (db/migration/V*.sql) are the ONLY way the schema changes.
+    # Hibernate no longer updates it — validate just cross-checks the entity
+    # mapping against the migrated schema (the drift alarm).
     hibernate:
-      ddl-auto: update
+      ddl-auto: validate
     properties:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
