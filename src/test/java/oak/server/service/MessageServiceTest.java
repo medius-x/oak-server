@@ -31,6 +31,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Optional;
 
+import org.mockito.ArgumentCaptor;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -73,6 +75,11 @@ class MessageServiceTest {
     private MessageIdempotencyCache idempotencyCache;
     @Mock
     private AttachmentObjectStore objectStore;
+    /** Carries the "post landed in a discussion" hook to DiscussionService as an EVENT
+     *  (decoupled — DiscussionService depends on this service for the lazy-create flow).
+     *  Unused by every non-DISCUSSION test — legal under STRICT_STUBS. */
+    @Mock
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     /** A REAL codec, not a mock: every create/forward/toResponse call reads/writes the
      *  attachments JSON column, so a Mockito mock would force write/read stubs onto every test
@@ -117,11 +124,33 @@ class MessageServiceTest {
     }
 
     @Test
+    void createIntoADiscussionChannelFiresTheActivityHook() {
+        Long channelId = 7L;
+        Channel thread = new Channel("discussion-1", ChannelType.DISCUSSION);
+        thread.setId(channelId);
+        User author = new User("alice", "hash");
+        Message saved = new Message(thread, author, "thread reply");
+        saved.setId(101L);
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(thread));
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
+        when(messageRepository.save(any(Message.class))).thenReturn(saved);
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        messageService.create(channelId, new CreateMessageRequest("thread reply", null, null), "alice");
+
+        ArgumentCaptor<Object> eventCaptor = ArgumentCaptor.forClass(Object.class);
+        verify(eventPublisher).publishEvent(eventCaptor.capture());
+        MessagePostedInDiscussion event = (MessagePostedInDiscussion) eventCaptor.getValue();
+        assertEquals(thread, event.channel());
+        assertEquals(saved, event.message());
+    }
+
+    @Test
     void createServesIdempotentReplayWithoutSecondRowOrBroadcast() {
         // A retry whose first response was lost re-presents the same key: the ORIGINAL response
         // comes back, with no save and no second /topic push.
         MessageResponse original = new MessageResponse(55L, 7L, 5L, "alice", "hello", null,
-                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null);
+                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null, false, null, null);
         when(idempotencyCache.get("alice", "key-1")).thenReturn(original);
 
         MessageResponse response = messageService.create(7L, new CreateMessageRequest("hello", null, null, "key-1"), "alice");
@@ -129,6 +158,141 @@ class MessageServiceTest {
         assertEquals(55L, response.id());
         verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
         verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    // -------------------------------------------------------------------------
+    // Pins: field stamping, the .edited push, the cap, idempotency, the gate.
+    // -------------------------------------------------------------------------
+
+    /** A pin stub message whose save() echo returns the same row (the entity mutates in place). */
+    private Message pinStubMessage(Channel channel, User author) {
+        Message message = new Message(channel, author, "pin me");
+        message.setId(100L);
+        when(messageRepository.save(any(Message.class)))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+        return message;
+    }
+
+    @Test
+    void pinStampsFieldsPushesEditedTopicAndReturnsTheRow() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message message = pinStubMessage(channel, actor);
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(message));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(messageRepository.countByChannelIdAndPinnedTrue(channelId)).thenReturn(0L);
+        when(reactionRepository.findByMessageId(100L)).thenReturn(java.util.List.of());
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.pin(channelId, 100L, "alice");
+
+        assertTrue(response.pinned());
+        assertEquals("alice", response.pinnedBy());
+        assertNotNull(response.pinnedAt());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.EDITED_TOPIC_SUFFIX),
+                any(MessageResponse.class));
+    }
+
+    @Test
+    void pinRejectsThe51stDistinctPinWith400() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message message = new Message(channel, actor, "one too many");
+        message.setId(100L);
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(message));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(messageRepository.countByChannelIdAndPinnedTrue(channelId)).thenReturn(50L);
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class,
+                () -> messageService.pin(channelId, 100L, "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+    }
+
+    @Test
+    void rePinningKeepsTheOriginalPinnerAndMomentWithoutASave() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User bob = new User("bob", "hash");
+        bob.setId(5L);
+        User alice = new User("alice", "hash");
+        alice.setId(6L);
+        Message message = new Message(channel, bob, "already pinned");
+        message.setId(100L);
+        message.setPinned(true);
+        message.setPinnedBy(5L);
+        message.setPinnedByName("bob");
+        message.setPinnedAt(java.time.Instant.parse("2026-01-01T00:00:00Z"));
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(message));
+        when(auth.requireUser("alice")).thenReturn(alice);
+        when(reactionRepository.findByMessageId(100L)).thenReturn(java.util.List.of());
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.pin(channelId, 100L, "alice");
+
+        // attribution is NOT stolen by the re-pinner
+        assertEquals("bob", response.pinnedBy());
+        assertEquals(java.time.Instant.parse("2026-01-01T00:00:00Z"), response.pinnedAt());
+        verify(messageRepository, org.mockito.Mockito.never()).save(any(Message.class));
+    }
+
+    @Test
+    void unpinClearsAllFourFieldsTogetherAndPushes() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message message = pinStubMessage(channel, actor);
+        message.setPinned(true);
+        message.setPinnedBy(5L);
+        message.setPinnedByName("alice");
+        message.setPinnedAt(java.time.Instant.now());
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(message));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(reactionRepository.findByMessageId(100L)).thenReturn(java.util.List.of());
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.unpin(channelId, 100L, "alice");
+
+        assertFalse(response.pinned());
+        assertNull(response.pinnedBy());
+        assertNull(response.pinnedAt());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.EDITED_TOPIC_SUFFIX),
+                any(MessageResponse.class));
+    }
+
+    @Test
+    void pinGatesOnManageMessages() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("bob", "hash");
+        actor.setId(5L);
+        Message message = new Message(channel, actor, "locked");
+        message.setId(100L);
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(message));
+        when(auth.requireUser("bob")).thenReturn(actor);
+        org.mockito.Mockito.doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN, "no pins for you"))
+                .when(auth).requireInChannel(actor, channel, Permission.MANAGE_MESSAGES);
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class,
+                () -> messageService.pin(channelId, 100L, "bob"));
+        assertEquals(HttpStatus.FORBIDDEN, thrown.getStatusCode());
     }
 
     // -------------------------------------------------------------------------

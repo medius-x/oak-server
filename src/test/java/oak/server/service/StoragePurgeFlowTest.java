@@ -69,6 +69,31 @@ class StoragePurgeFlowTest {
         assertTrue(report.finalUsedPercent >= 0);
     }
 
+    @Test
+    void pinnedMessagesSurviveThePurge() throws Exception {
+        String ownerToken = registerAndLogin("owner");
+        Long channelId = createChannel(ownerToken, "general");
+        Long[] messageIds = new Long[4];
+        for (int index = 0; index < 4; index++) {
+            messageIds[index] = postMessageReturningId(ownerToken, channelId, "old " + index);
+        }
+        // Pin the OLDEST message — the purge's favorite victim. Its whole point: "important"
+        // must not silently vanish when the disk fills.
+        mockMvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                        .put("/api/channels/" + channelId + "/messages/" + messageIds[0] + "/pin")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk());
+
+        // The disk stays above the low watermark forever — the loop exhausts every unpinned
+        // row and then stops on the empty batch.
+        StorageGcService.StorageGcReport report = storageGcService.runOnce("test", () -> 99.0);
+
+        assertEquals(3, report.purgedMessages);
+        assertEquals(1, messageRepository.count());
+        assertTrue(messageRepository.findById(messageIds[0]).isPresent(),
+                "the pinned row must survive the purge");
+    }
+
     // ------------------------------------------------------------------
 
     private String registerAndLogin(String username) throws Exception {
@@ -103,5 +128,15 @@ class StoragePurgeFlowTest {
                         .contentType(JSON)
                         .content(body))
                 .andExpect(status().isCreated());
+    }
+
+    private Long postMessageReturningId(String token, Long channelId, String content) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content(String.format("{\"content\":\"%s\"}", content)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return ((Number) JsonPath.read(result.getResponse().getContentAsString(), "$.id")).longValue();
     }
 }

@@ -12,7 +12,9 @@ import oak.server.entity.RoleKind;
 import oak.server.entity.User;
 import oak.server.repository.ChannelParticipantRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
+import oak.server.repository.ChannelRepository;
 import oak.server.repository.ChannelUserOverrideRepository;
+import oak.server.repository.DiscussionRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import org.springframework.http.HttpStatus;
@@ -56,6 +58,9 @@ public class AuthorizationService {
     private final ChannelUserOverrideRepository userOverrideRepository;
     /** DM membership — the single authority for DM / group-DM access (the branch in {@link #hasInChannel}). */
     private final ChannelParticipantRepository participantRepository;
+    /** Discussion rows — the DISCUSSION branch of {@link #hasInChannel} resolves through the parent. */
+    private final DiscussionRepository discussionRepository;
+    private final ChannelRepository channelRepository;
 
     // --- lookups ---
 
@@ -128,6 +133,17 @@ public class AuthorizationService {
         if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
             return participantRepository.existsByChannelIdAndUserId(channel.getId(), user.getId());
         }
+        // A DISCUSSION channel owns no permission rows of its own: everything (VIEW master gate,
+        // overrides, READ/SEND/ATTACH — and MANAGE_MESSAGES for the close gate) resolves through
+        // its PARENT channel, exactly as it would be asked there. One hop — a parent is always
+        // TEXT (the creation gate), so this cannot recurse. An orphaned row (parent deleted
+        // mid-flight) denies everything.
+        if (channel.getType() == ChannelType.DISCUSSION) {
+            return discussionRepository.findByChannelId(channel.getId())
+                    .flatMap(discussion -> channelRepository.findById(discussion.getParentChannelId()))
+                    .map(parent -> hasInChannel(user, parent, permission))
+                    .orElse(false);
+        }
         long mask = resolveChannelMask(user, channel);
         boolean canView = Permissions.has(mask, Permission.VIEW_CHANNEL);
         return permission == Permission.VIEW_CHANNEL
@@ -151,6 +167,15 @@ public class AuthorizationService {
      * is membership (see {@link #hasInChannel}), not a bitmask.
      */
     public long resolveChannelMask(User user, Channel channel) {
+        // The mask path mirrors the hasInChannel delegation: a DISCUSSION channel's mask IS its
+        // parent's (defensive — the listing/rename paths never hand a discussion here, but any
+        // future caller must not silently resolve an override-less mask).
+        if (channel.getType() == ChannelType.DISCUSSION) {
+            return discussionRepository.findByChannelId(channel.getId())
+                    .flatMap(discussion -> channelRepository.findById(discussion.getParentChannelId()))
+                    .map(parent -> resolveChannelMask(user, parent))
+                    .orElse(Permissions.NONE);
+        }
         long mask = effectiveBase(user);
         if (Permissions.has(mask, Permission.ADMINISTRATOR)) {
             return Permissions.ALL;

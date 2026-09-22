@@ -114,6 +114,28 @@ public class Message {
     @Column(name = "forward_nested_reply", columnDefinition = "text")
     private String forwardNestedReply;
 
+    // ---- Pin state (Discord-style channel pins). A pinned message is exempt from the nightly
+    // storage-GC purge (StorageGcService batches filter `pinned = false` — the cap of 50 per
+    // channel is the budget of that immortality). pinned_by_name is DENORMALIZED (the
+    // forwardAuthorName idiom) so MessageService.toResponse keeps its "never touches a
+    // repository" invariant; the id column stays for audit. All four fields are written
+    // together in MessageService.pin and cleared together in unpin.
+
+    @Column(name = "pinned", nullable = false)
+    private boolean pinned;
+
+    /** Who pinned the message (actor id), null = not pinned. */
+    @Column(name = "pinned_by")
+    private Long pinnedBy;
+
+    /** The pinner's username at pin time (denormalized for the wire — see class comment). */
+    @Column(name = "pinned_by_name", length = 50)
+    private String pinnedByName;
+
+    /** When the message was pinned, null = not pinned. Clients order the pin list by this. */
+    @Column(name = "pinned_at")
+    private Instant pinnedAt;
+
     public Message(Channel channel, User author, String content) {
         this.channel = channel;
         this.author = author;

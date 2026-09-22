@@ -51,10 +51,12 @@ public class ChannelService {
     private final ChannelUserOverrideRepository channelUserOverrideRepository;
     private final ChannelParticipantRepository channelParticipantRepository;
     private final ChannelReadStateRepository channelReadStateRepository;
+    private final oak.server.repository.MessageReactionRepository reactionRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
     private final VoiceAccessEnforcer voiceEnforcer;
     private final JanusVoiceAccessService voiceAccess;
+    private final DiscussionService discussionService;
 
     /**
      * The channel list AS SEEN BY ONE VIEWER: channels the member cannot VIEW (hidden) are omitted
@@ -66,8 +68,10 @@ public class ChannelService {
     @Transactional(readOnly = true)
     public List<ChannelResponse> list(String viewerUsername) {
         User viewer = auth.requireUser(viewerUsername);
+        // DISCUSSION channels never appear in the sidebar's channel list — they surface through
+        // the discussion endpoints (a tile under the origin message / the tracked list).
         List<Channel> channels = channelRepository.findByTypeNotInOrderByIdAsc(
-                List.of(ChannelType.DM, ChannelType.GROUP_DM));
+                List.of(ChannelType.DM, ChannelType.GROUP_DM, ChannelType.DISCUSSION));
         List<ChannelResponse> visible = new ArrayList<>(channels.size());
         for (Channel channel : channels) {
             // One mask per channel covers both the visibility filter and the locked flag (the
@@ -103,6 +107,11 @@ public class ChannelService {
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
         if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a server channel");
+        }
+        if (channel.getType() == ChannelType.DISCUSSION) {
+            // A discussion has no name of its own (the origin snapshot IS its display), and the
+            // mask resolution below would mis-resolve an override-less discussion channel.
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a server channel");
         }
         channel.setName(name.trim());
@@ -161,13 +170,19 @@ public class ChannelService {
         // The FKs messages.channel_id, channel_role_overrides.channel_id, channel_participants.channel_id,
         // and channel_read_states.channel_id have no ON DELETE CASCADE (ddl-auto=update never adds
         // cascade), so the children must go first or the channel DELETE fails with a FK violation.
-        // participants / read-states are only present on DM channels, but cleaning them unconditionally
-        // is a cheap no-op for public channels and keeps the admin DELETE path safe on a DM channel.
+        // Reactions go FIRST of all (message_reactions.message_id, same no-cascade story). The
+        // channel's discussions (their channels/messages/participants/read-states/discussion rows)
+        // are torn down through the shared DiscussionService helper — a discussion never outlives
+        // its parent. participants / read-states are only present on DM channels, but cleaning them
+        // unconditionally is a cheap no-op for public channels and keeps the admin DELETE path safe
+        // on a DM channel.
+        reactionRepository.deleteByChannelId(channelId);
         messageRepository.deleteByChannelId(channelId);
         channelRoleOverrideRepository.deleteByChannelId(channelId);
         channelUserOverrideRepository.deleteByChannelId(channelId);
         channelParticipantRepository.deleteByChannelId(channelId);
         channelReadStateRepository.deleteByChannelId(channelId);
+        discussionService.deleteDiscussionsOf(channelId);
         channelRepository.delete(channel);
         messagingTemplate.convertAndSend(CHANNELS_DELETED_TOPIC, channelId);
     }

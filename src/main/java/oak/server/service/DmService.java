@@ -69,6 +69,7 @@ public class DmService {
     private final ChannelReadStateRepository channelReadStateRepository;
     private final ChannelRoleOverrideRepository channelRoleOverrideRepository;
     private final MessageRepository messageRepository;
+    private final oak.server.repository.MessageReactionRepository reactionRepository;
     private final UserRepository userRepository;
     private final RelationshipRepository relationshipRepository;
     private final AuthorizationService auth;
@@ -280,6 +281,9 @@ public class DmService {
 
     /** Deletes a DM channel and everything tied to it — the FKs have no ON DELETE CASCADE under ddl-auto. */
     private void deleteChannelCompletely(Channel channel) {
+        // Reactions FIRST: message_reactions.message_id has no ON DELETE CASCADE, so a bulk
+        // message delete on a channel holding any reacted message would fail with a FK violation.
+        reactionRepository.deleteByChannelId(channel.getId());
         messageRepository.deleteByChannelId(channel.getId());
         channelRoleOverrideRepository.deleteByChannelId(channel.getId());
         participantRepository.deleteByChannelId(channel.getId());

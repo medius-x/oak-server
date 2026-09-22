@@ -48,16 +48,20 @@ import java.util.regex.Pattern;
  * Hibernate session — {@link AuthorizationService#findUser} eager-fetches roles for exactly that.
  *
  * <p>The pattern covers the channel's whole topic family — the base message topic plus the
- * {@code .edited}, {@code .deleted} and {@code .reactions} variants pushed by
- * {@code MessageService}. A new per-channel topic MUST be added here as well, or it is
- * world-readable by id enumeration (the simple broker does not authorize SUBSCRIBE frames).
+ * {@code .edited}, {@code .deleted}, {@code .reactions} and {@code .discussions} variants
+ * pushed by {@code MessageService} / {@code DiscussionService}. A DISCUSSION channel id in the
+ * base family resolves through the PARENT channel (the delegation branch in
+ * {@code AuthorizationService.hasInChannel}); the {@code .discussions} suffix lives on the
+ * PARENT's id and is gated by the same READ check. A new per-channel topic MUST be added here
+ * as well, or it is world-readable by id enumeration (the simple broker does not authorize
+ * SUBSCRIBE frames).
  */
 @Component
 @RequiredArgsConstructor
 public class ChannelSubscriptionInterceptor implements ChannelInterceptor {
 
     private static final Pattern CHANNEL_TOPIC =
-            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted|\\.reactions)?$");
+            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted|\\.reactions|\\.discussions)?$");
 
     private final ChannelRepository channelRepository;
     private final ChannelParticipantRepository participantRepository;

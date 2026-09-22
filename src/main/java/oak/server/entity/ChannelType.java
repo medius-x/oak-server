@@ -13,5 +13,12 @@ public enum ChannelType {
     /** A 1:1 direct message — exactly two participants, deduped by {@link Channel#getDmKey()}. */
     DM,
     /** A group direct message — 3+ participants with an owner; no {@code dmKey}. */
-    GROUP_DM
+    GROUP_DM,
+    /** A discussion (thread) attached to one message of a TEXT channel. Owns its own messages
+     *  (they never appear in the parent channel's history), and carries a {@code Discussion}
+     *  row freezing the origin-message snapshot (the ForwardInfo discipline — the tile
+     *  survives the origin's deletion). Every permission resolves through the PARENT channel
+     *  (the delegation branch in {@code AuthorizationService.hasInChannel}); tracking who
+     *  follows a discussion = {@code ChannelParticipant} rows on it (posting auto-joins). */
+    DISCUSSION
 }

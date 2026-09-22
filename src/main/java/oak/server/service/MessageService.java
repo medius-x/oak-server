@@ -94,6 +94,11 @@ public class MessageService {
      *  it because writes only go through {@link #create}/{@link #forward}. */
     public static final int MAX_ATTACHMENTS = 10;
 
+    /** Hard cap of pinned messages per channel (the Discord limit). The 51st pin is a 400, not
+     *  a silent eviction — "important" must never fall off quietly. This cap is also the budget
+     *  of a pin's storage-GC immortality (pinned rows are exempt from the nightly purge). */
+    public static final int MAX_PINS_PER_CHANNEL = 50;
+
     private final MessageRepository messageRepository;
     private final ChannelRepository channelRepository;
     private final UserRepository userRepository;
@@ -107,6 +112,10 @@ public class MessageService {
     private final AttachmentListCodec attachmentListCodec;
     private final MessageIdempotencyCache idempotencyCache;
     private final AttachmentObjectStore objectStore;
+    /** Publishes {@link MessagePostedInDiscussion} instead of calling DiscussionService
+     *  directly — DiscussionService depends on THIS service for the lazy-create flow, and a
+     *  back-call would close a bean cycle. */
+    private final org.springframework.context.ApplicationEventPublisher eventPublisher;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
@@ -160,6 +169,12 @@ public class MessageService {
         MessageResponse response = toResponse(message, List.of(), replyOriginalsFor(List.of(message)));
         // Variant A: written via REST, then broadcast to everyone subscribed to this channel.
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId, response);
+        // A post into a DISCUSSION channel auto-joins the author ("wrote once → follows") and
+        // pushes ACTIVITY on the PARENT's .discussions topic (tiles/counts/order refresh).
+        // Replays returned earlier — the original send already published its activity.
+        if (channel.getType() == ChannelType.DISCUSSION) {
+            eventPublisher.publishEvent(new MessagePostedInDiscussion(channel, message));
+        }
         if (request.idempotencyKey() != null) {
             // After the broadcast, so a thrown store problem can never double-send: the entry is
             // the very response that just went out.
@@ -268,6 +283,12 @@ public class MessageService {
         if (channelId != null) {
             Channel channel = channelRepository.findById(channelId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+            // A discussion thread is not searchable: its hits would carry no channel context in
+            // the client's list (discussions are absent from the channel list), and the
+            // server-wide flavour below already walks TEXT channels only.
+            if (channel.getType() == ChannelType.DISCUSSION) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Discussions are not searchable");
+            }
             auth.requireInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY);
             channelIds = List.of(channelId);
         } else {
@@ -562,6 +583,83 @@ public class MessageService {
     private record ResolvedReactionTarget(Channel channel, Message message, User actor) {
     }
 
+    /** Pins a message in its channel (Discord-style). Gate: MANAGE_MESSAGES (channel-scoped,
+     *  override-aware; in a DM/group-DM the {@code hasInChannel} branch makes this the pure
+     *  participant check — ANY participant may pin, exactly like Discord). Idempotent: pinning
+     *  an already-pinned message keeps the ORIGINAL pinner/moment (a re-pin must not steal
+     *  attribution) and still broadcasts, so every client converges. The 51st distinct pin is a
+     *  400 ("pin limit reached") — never a silent eviction. The push rides the existing
+     *  {@code .edited} topic with the full row: no new topic suffix, no interceptor change. */
+    @Transactional
+    public MessageResponse pin(Long channelId, Long messageId, String actorUsername) {
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        Message message = messageRepository.findByIdAndChannelId(messageId, channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
+        User actor = auth.requireUser(actorUsername);
+        auth.requireInChannel(actor, channel, Permission.MANAGE_MESSAGES);
+        if (!message.isPinned()) {
+            if (messageRepository.countByChannelIdAndPinnedTrue(channelId) >= MAX_PINS_PER_CHANNEL) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Pin limit reached (" + MAX_PINS_PER_CHANNEL + ")");
+            }
+            message.setPinned(true);
+            message.setPinnedBy(actor.getId());
+            message.setPinnedByName(actor.getUsername());
+            message.setPinnedAt(Instant.now());
+            message = messageRepository.save(message);
+        }
+        return broadcastEdited(channelId, message);
+    }
+
+    /** Unpins (idempotent — unpinning an unpinned message broadcasts the unchanged row). Same
+     *  gate as {@link #pin}; clears all four pin fields together. */
+    @Transactional
+    public MessageResponse unpin(Long channelId, Long messageId, String actorUsername) {
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        Message message = messageRepository.findByIdAndChannelId(messageId, channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
+        User actor = auth.requireUser(actorUsername);
+        auth.requireInChannel(actor, channel, Permission.MANAGE_MESSAGES);
+        if (message.isPinned()) {
+            message.setPinned(false);
+            message.setPinnedBy(null);
+            message.setPinnedByName(null);
+            message.setPinnedAt(null);
+            message = messageRepository.save(message);
+        }
+        return broadcastEdited(channelId, message);
+    }
+
+    /** The channel's pinned messages, oldest pin first (the card renders the LAST element =
+     *  the latest pin). Gate: READ_MESSAGE_HISTORY — anyone who can read the channel can view
+     *  the pins; only pinning needs MANAGE_MESSAGES. */
+    @Transactional(readOnly = true)
+    public List<MessageResponse> listPinned(Long channelId, String viewerUsername) {
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        auth.requireInChannel(auth.requireUser(viewerUsername), channel, Permission.READ_MESSAGE_HISTORY);
+        List<Message> messages = messageRepository.findByChannelIdAndPinnedTrueOrderByPinnedAtAsc(channelId);
+        Map<Long, List<ReactionSummary>> reactionsByMessage = reactionSummariesByMessage(
+                messages.stream().map(Message::getId).toList());
+        Map<Long, Message> replyOriginals = replyOriginalsFor(messages);
+        return messages.stream()
+                .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
+                        replyOriginals))
+                .toList();
+    }
+
+    /** Builds the full row view and pushes it on the channel's {@code .edited} topic — the
+     *  shared tail of pin/unpin (the same contract as {@link #edit}: a full-row replacement
+     *  every client can apply blindly). */
+    private MessageResponse broadcastEdited(Long channelId, Message message) {
+        MessageResponse response = toResponse(message, reactionSummaries(message.getId()),
+                replyOriginalsFor(List.of(message)));
+        messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId + EDITED_TOPIC_SUFFIX, response);
+        return response;
+    }
+
     /** Shared resolution + gate for add/remove: channel → message (cross-channel safe) → actor →
      *  ADD_REACTIONS (DM participant check in disguise) → slug whitelist. */
     private ResolvedReactionTarget resolveReactionTarget(Long channelId, Long messageId, String slug,
@@ -623,6 +721,13 @@ public class MessageService {
                 LinkedHashMap::new));
     }
 
+    /** The full wire row of ONE message (reactions + reply quote batched inside) — the
+     *  package-private seam DiscussionService's ACTIVITY event uses to carry the posted
+     *  message to clients that never subscribed to the thread's own topic. */
+    MessageResponse responseOf(Message message) {
+        return toResponse(message, reactionSummaries(message.getId()), replyOriginalsFor(List.of(message)));
+    }
+
     /** Builds the response view, signing a fresh GET URL per attachment and parsing
      *  {@code @}-mentions from the content (single chokepoint: covers both the create broadcast
      *  and history fetch). Reactions and reply originals are passed IN by the caller — this
@@ -656,7 +761,10 @@ public class MessageService {
                 message.getEditedAt(),
                 reactions,
                 reply,
-                forwardInfo(message));
+                forwardInfo(message),
+                message.isPinned(),
+                message.getPinnedByName(),
+                message.getPinnedAt());
     }
 
     /** The forward's origin card, or null when the message is not a forward. Any single origin

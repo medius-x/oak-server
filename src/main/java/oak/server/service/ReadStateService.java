@@ -56,6 +56,11 @@ public class ReadStateService {
         User user = auth.requireUser(username);
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        if (channel.getType() == ChannelType.DISCUSSION) {
+            // An honest 400 beats a silently polluted read-state row (discussions are
+            // read-state-silent by design — see the snapshot skip).
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Discussions are not read-state tracked");
+        }
         auth.requireInChannel(user, channel, Permission.READ_MESSAGE_HISTORY);
         if (lastReadMessageId == null) {
             lastReadMessageId = messageRepository.findTopByChannelIdOrderByIdDesc(channelId)
@@ -81,6 +86,12 @@ public class ReadStateService {
         User user = auth.requireUser(username);
         List<ChannelReadStateResponse> out = new ArrayList<>();
         for (Channel channel : channelRepository.findAllByOrderByIdAsc()) {
+            // DISCUSSION channels are read-state-silent: their unread must never leak into the
+            // parent channel's counters (or the server-wide badge sums clients compute over
+            // this snapshot) — the delegation branch would otherwise happily include them.
+            if (channel.getType() == ChannelType.DISCUSSION) {
+                continue;
+            }
             if (!auth.hasInChannel(user, channel, Permission.READ_MESSAGE_HISTORY)) {
                 continue;
             }
@@ -106,7 +117,9 @@ public class ReadStateService {
         for (Channel channel : channelRepository.findAllByOrderByIdAsc()) {
             // A fresh member has no DM channels, but skip them defensively — DM read-state is created on
             // demand (the participant accrues unread from their first message), never seeded here.
-            if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM) {
+            // DISCUSSION channels are read-state-silent (see snapshot).
+            if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM
+                    || channel.getType() == ChannelType.DISCUSSION) {
                 continue;
             }
             Long lastMessageId = messageRepository.findTopByChannelIdOrderByIdDesc(channel.getId())

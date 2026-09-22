@@ -16,7 +16,10 @@ import java.util.List;
  * (null = not a reply) — see {@link ReplyInfo}; a reply's author-mention is synthesized into
  * {@code mentions} (offsets -1). {@code forward} is the origin card when this message is a
  * forward (null = not a forward) — see {@link ForwardInfo}; the message's own author is the
- * forwarder.
+ * forwarder. {@code pinned} is the channel-pin flag (Discord-style); {@code pinnedBy} is the
+ * PINNER's username (denormalized at pin time — not the message author) and {@code pinnedAt}
+ * the pin moment — both null while unpinned. Pin/unpin pushes ride the existing {@code .edited}
+ * topic with the full row.
  * Field order is wire-stable — new fields append at the end only, paired with the client
  * mirror. (The former scalar {@code attachmentFileName}/{@code attachmentUrl} pair was REPLACED
  * by {@code attachments} in a paired client+server pass — dev deploys are always paired.)
@@ -33,6 +36,9 @@ public record MessageResponse(
         Instant editedAt,
         List<ReactionSummary> reactions,
         ReplyInfo reply,
-        ForwardInfo forward
+        ForwardInfo forward,
+        boolean pinned,
+        String pinnedBy,
+        Instant pinnedAt
 ) {
 }

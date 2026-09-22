@@ -26,14 +26,31 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
      *  {@code /api/channels/{otherChannel}/messages/{id}} cannot reach it (no cross-channel leak). */
     Optional<Message> findByIdAndChannelId(Long id, Long channelId);
 
-    /** The OLDEST message ids (storage-GC purge batches walk the table from the start of time).
-     *  Explicit JPQL: the derived spelling parsed crooked and converted entities, not ids. */
-    @Query("select m.id from Message m order by m.id asc")
+    /** The OLDEST message ids (storage-GC purge batches walk the table from the start of time),
+     *  EXCLUDING pinned rows — a pin is exempt from the nightly purge (the whole point of
+     *  pinning: "important" must not silently vanish when the disk fills). Explicit JPQL: the
+     *  derived spelling parsed crooked and converted entities, not ids. */
+    @Query("select m.id from Message m where m.pinned = false order by m.id asc")
     List<Long> findIdsOldestFirst(Pageable pageable);
+
+    /** A channel's pinned messages, oldest pin first — the wire list clients render newest-last
+     *  (the pin card shows the LAST element = the latest pin). */
+    List<Message> findByChannelIdAndPinnedTrueOrderByPinnedAtAsc(Long channelId);
+
+    /** Pin count for the per-channel cap (MessageService.MAX_PINS_PER_CHANNEL). */
+    long countByChannelIdAndPinnedTrue(Long channelId);
 
     /** Unread count for a channel relative to a read floor (the user's {@code lastReadMessageId};
      *  pass 0 to count everything when nothing has been read yet). */
     long countByChannelIdAndIdGreaterThan(Long channelId, Long id);
+
+    /** Total message count of a channel — the discussion reply count. */
+    long countByChannelId(Long channelId);
+
+    /** Every message row of a channel (id-ascending) — the discussion teardown collects the
+     *  attachment keys before the bulk delete. Deliberately unpaged: a thread's messages are
+     *  bounded in practice, and the callers need them all. */
+    List<Message> findByChannelId(Long channelId);
 
     /** The newest message id in a channel (the ack fallback when the client omits the id, and the
      *  {@code lastMessageId} reported in a read-state snapshot). */

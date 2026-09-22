@@ -58,6 +58,10 @@ class ChannelServiceTest {
     @Mock
     private ChannelReadStateRepository channelReadStateRepository;
     @Mock
+    private oak.server.repository.MessageReactionRepository reactionRepository;
+    @Mock
+    private DiscussionService discussionService;
+    @Mock
     private SimpMessagingTemplate messagingTemplate;
     @Mock
     private AuthorizationService auth;

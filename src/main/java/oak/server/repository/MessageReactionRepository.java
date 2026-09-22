@@ -32,4 +32,14 @@ public interface MessageReactionRepository extends JpaRepository<MessageReaction
     /** FK cleanup before a storage-GC batch delete. */
     @Transactional
     void deleteByMessageIdIn(Collection<Long> messageIds);
+
+    /** FK cleanup before a whole CHANNEL's messages are bulk-deleted (channel deletion, DM close,
+     *  discussion close) — the message_id FK has no ON DELETE CASCADE, so reactions must go first.
+     *  JPQL bulk delete (not derived): the filter runs through the reaction's message association;
+     *  {@code @Modifying} is what makes it execute as an update (a bare @Query delete runs as a
+     *  select and blows up at runtime). */
+    @org.springframework.data.jpa.repository.Query("delete from MessageReaction r where r.message.channel.id = :channelId")
+    @org.springframework.data.jpa.repository.Modifying
+    @Transactional
+    void deleteByChannelId(@org.springframework.data.repository.query.Param("channelId") Long channelId);
 }

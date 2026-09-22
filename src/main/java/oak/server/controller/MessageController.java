@@ -107,4 +107,30 @@ public class MessageController {
                                                 @AuthenticationPrincipal UserDetails principal) {
         return messageService.removeReaction(channelId, messageId, slug, principal.getUsername());
     }
+
+    /** Pins a message (MANAGE_MESSAGES; in a DM any participant). 200 with the updated row —
+     *  the acting client applies it directly, the WS echo lands idempotently on top. */
+    @PutMapping("/{messageId}/pin")
+    public MessageResponse pin(@PathVariable Long channelId,
+                               @PathVariable Long messageId,
+                               @AuthenticationPrincipal UserDetails principal) {
+        return messageService.pin(channelId, messageId, principal.getUsername());
+    }
+
+    /** Unpins (same gate, idempotent). 200 with the updated row. */
+    @DeleteMapping("/{messageId}/pin")
+    public MessageResponse unpin(@PathVariable Long channelId,
+                                 @PathVariable Long messageId,
+                                 @AuthenticationPrincipal UserDetails principal) {
+        return messageService.unpin(channelId, messageId, principal.getUsername());
+    }
+
+    /** The channel's pinned messages, oldest pin first (cap {@code MAX_PINS_PER_CHANNEL}).
+     *  Gate: READ_MESSAGE_HISTORY. The literal {@code pinned} segment cannot collide with the
+     *  {@code /{messageId}}-shaped routes — Spring prefers the literal path. */
+    @GetMapping("/pinned")
+    public List<MessageResponse> pinned(@PathVariable Long channelId,
+                                        @AuthenticationPrincipal UserDetails principal) {
+        return messageService.listPinned(channelId, principal.getUsername());
+    }
 }
