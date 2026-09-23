@@ -86,6 +86,13 @@ public class DmService {
         }
         List<DmChannelResponse> out = new ArrayList<>();
         for (Channel channel : channelRepository.findAllById(channelIds)) {
+            // Discussions track membership through the SAME channel_participants
+            // rows — without the type gate every tracked thread leaked into the
+            // DM list, and the client rendered it as a DM with ITSELF (the only
+            // participant row is the tracker; live report 2026-09-24).
+            if (channel.getType() != ChannelType.DM && channel.getType() != ChannelType.GROUP_DM) {
+                continue;
+            }
             out.add(toResponse(channel));
         }
         // Newest activity first; channels with no messages sink to the bottom (stable by id).

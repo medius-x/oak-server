@@ -85,6 +85,28 @@ class DiscussionIntegrationTest {
     }
 
     @Test
+    void aTrackedDiscussionDoesNotLeakIntoTheDmList() throws Exception {
+        // Live report 2026-09-24: a tracked discussion rode /api/channels/dm as a
+        // phantom "DM with yourself" (its only channel_participants row is the
+        // tracker's own, so the client fell back to rendering the SELF). The DM
+        // list must carry DM/GROUP_DM channels only.
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        Long bobId = userRepository.findByUsername("bob").orElseThrow().getId();
+        Long dmId = createDm(ownerToken, bobId);
+
+        Long channelId = createChannel(ownerToken, "general", "TEXT");
+        Long messageId = postMessage(ownerToken, channelId, "the origin message");
+        startDiscussion(ownerToken, channelId, messageId); // auto-tracks the creator
+
+        mockMvc.perform(get("/api/channels/dm").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].id").value(dmId))
+                .andExpect(jsonPath("$[0].type").value("DM"));
+    }
+
+    @Test
     void createLookupAndTypeGuards() throws Exception {
         String ownerToken = registerAndLogin("alice", "supersecret");
         Long channelId = createChannel(ownerToken, "general", "TEXT");
