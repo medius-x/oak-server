@@ -67,6 +67,33 @@ class AttachmentIntegrationTest {
                 .andExpect(status().isBadRequest());
     }
 
+    /** The intrinsic-dimension passthrough (2026-09-25): the client measures
+     *  width/height at upload; the server stores and echoes them verbatim so
+     *  the client can reserve the exact layout box before the bytes arrive.
+     *  Absent fields stay null (pre-dimension rows). */
+    @Test
+    void attachmentDimensionsRoundTripAndAbsentStaysNull() throws Exception {
+        String token = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(token, "general", "TEXT");
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":null,\"attachments\":["
+                                + "{\"key\":\"vid-key\",\"fileName\":\"clip.mp4\",\"width\":1920,\"height\":1080},"
+                                + "{\"key\":\"pic-key\",\"fileName\":\"shot.png\"}]}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.attachments[0].width").value(1920))
+                .andExpect(jsonPath("$.attachments[0].height").value(1080))
+                .andExpect(jsonPath("$.attachments[1].width").doesNotExist())
+                .andExpect(jsonPath("$.attachments[1].height").doesNotExist());
+        // the persisted JSON column carries them too (history path)
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].attachments[0].width").value(1920))
+                .andExpect(jsonPath("$[0].attachments[1].width").doesNotExist());
+    }
+
     /** The fresh-link re-mint (a streamed playback that outlived its hour-old presigned URL):
      *  auth-gated, 404 on an unknown key, and for a key a message actually references it
      *  returns the re-signed URL field (null under the noop signer — structurally present). */

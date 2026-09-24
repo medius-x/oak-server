@@ -18,16 +18,30 @@ import jakarta.validation.constraints.Size;
  * the video. Both are nullable and optional forever — a video without a preview (old rows,
  * HEVC files the client cannot decode, a failed grab) simply renders as the plain card, and
  * {@code AttachmentListCodec}'s lenient reader keeps pre-preview rows readable.
+ *
+ * <p>{@code width}/{@code height} are the media's INTRINSIC pixel dimensions, also measured
+ * by the client at upload (the same decode that grabs the video preview; an image bitmap
+ * decode for images). The server only stores and echoes them: the client reserves the exact
+ * layout box via {@code aspect-ratio} BEFORE the bytes load, so attachment-heavy channels
+ * never reflow under the viewport. Nullable forever — rows sent before this field keep the
+ * estimating layout, and the codec's lenient reader maps absent fields to null.
  */
 public record AttachmentRef(
         @Size(max = 512) String key,
         @Size(max = 255) String fileName,
         @Size(max = 512) String thumbnailKey,
-        @PositiveOrZero Long durationMillis
+        @PositiveOrZero Long durationMillis,
+        @PositiveOrZero Integer width,
+        @PositiveOrZero Integer height
 ) {
 
     /** The pre-preview shape — kept for tests and for call sites that have no video metadata. */
     public AttachmentRef(String key, String fileName) {
-        this(key, fileName, null, null);
+        this(key, fileName, null, null, null, null);
+    }
+
+    /** The pre-dimension video-preview shape (no measured width/height yet). */
+    public AttachmentRef(String key, String fileName, String thumbnailKey, Long durationMillis) {
+        this(key, fileName, thumbnailKey, durationMillis, null, null);
     }
 }

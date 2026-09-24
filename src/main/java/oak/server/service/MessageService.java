@@ -744,7 +744,9 @@ public class MessageService {
                         // mentioned in the JSON column resolves through the same capability model.
                         ref.thumbnailKey() == null ? null
                                 : attachmentUrlSigner.presignedGetUrl(ref.thumbnailKey()),
-                        ref.durationMillis()))
+                        ref.durationMillis(),
+                        ref.width(),
+                        ref.height()))
                 .toList();
         ReplyInfo reply = replyInfo(message, replyOriginals, MAX_QUOTE_DEPTH);
         List<MentionResponse> mentions = withReplyMention(message, mentionParser.parse(

@@ -12,6 +12,10 @@ package oak.server.dto;
  * {@code thumbnailUrl} (its own presigned GET, re-signed per fetch like the main URL; null when
  * the video has no preview), plus {@code durationMillis} for the card's duration badge. All
  * three are null for non-video attachments and for videos sent before the preview feature.
+ *
+ * <p>{@code width}/{@code height} mirror {@link AttachmentRef} out: the media's intrinsic
+ * pixel dimensions, so the client reserves the exact layout box before the bytes arrive.
+ * Null for rows sent before the field existed.
  */
 public record AttachmentResponse(
         String fileName,
@@ -19,6 +23,8 @@ public record AttachmentResponse(
         String key,
         String thumbnailKey,
         String thumbnailUrl,
-        Long durationMillis
+        Long durationMillis,
+        Integer width,
+        Integer height
 ) {
 }
