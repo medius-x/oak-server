@@ -4,6 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.AttachmentRef;
 import oak.server.entity.Message;
 import oak.server.entity.ServerProfile;
+import oak.server.repository.EmojiRepository;
 import oak.server.repository.MessageReactionRepository;
 import oak.server.repository.MessageRepository;
 import oak.server.repository.ServerProfileRepository;
@@ -62,6 +63,7 @@ public class StorageGcService {
     private final MessageReactionRepository reactionRepository;
     private final MessageService messageService;
     private final AttachmentObjectStore objectStore;
+    private final EmojiRepository emojiRepository;
     private final AttachmentListCodec attachmentListCodec;
     private final TransactionTemplate transactionTemplate;
     private final DataSource dataSource;
@@ -80,6 +82,7 @@ public class StorageGcService {
                             MessageReactionRepository reactionRepository,
                             MessageService messageService,
                             AttachmentObjectStore objectStore,
+                            EmojiRepository emojiRepository,
                             AttachmentListCodec attachmentListCodec,
                             TransactionTemplate transactionTemplate,
                             DataSource dataSource,
@@ -93,6 +96,7 @@ public class StorageGcService {
         this.reactionRepository = reactionRepository;
         this.messageService = messageService;
         this.objectStore = objectStore;
+        this.emojiRepository = emojiRepository;
         this.attachmentListCodec = attachmentListCodec;
         this.transactionTemplate = transactionTemplate;
         this.dataSource = dataSource;
@@ -205,6 +209,20 @@ public class StorageGcService {
                 continue;
             }
             if (!messageService.attachmentExists(object.key())) {
+                objectStore.delete(object.key());
+                report.sweptOrphanObjects += 1;
+                report.sweptBytes += object.sizeBytes();
+            }
+        }
+        // The emoji catalog's own pass: the prefix is invisible to the listing above, and the
+        // only leak is an ABANDONED UPLOAD SLOT (key minted by /api/emojis/slot, row never
+        // created) — the grace covers the slot→PUT→create flight the same way it covers an
+        // upload in flight to its message. Same counters; no report-shape change.
+        for (AttachmentObjectStore.StoredObject object : objectStore.listCustomEmojiObjects()) {
+            if (object.lastModified().isAfter(cutoff)) {
+                continue;
+            }
+            if (!emojiRepository.existsByFileKey(object.key())) {
                 objectStore.delete(object.key());
                 report.sweptOrphanObjects += 1;
                 report.sweptBytes += object.sizeBytes();

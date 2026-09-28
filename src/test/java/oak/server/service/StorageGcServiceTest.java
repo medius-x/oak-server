@@ -2,6 +2,7 @@ package oak.server.service;
 
 import oak.server.entity.Message;
 import oak.server.entity.ServerProfile;
+import oak.server.repository.EmojiRepository;
 import oak.server.repository.MessageReactionRepository;
 import oak.server.repository.MessageRepository;
 import oak.server.repository.ServerProfileRepository;
@@ -52,6 +53,8 @@ class StorageGcServiceTest {
     private MessageService messageService;
     @Mock
     private AttachmentObjectStore objectStore;
+    @Mock
+    private EmojiRepository emojiRepository;
 
     private ServerProfile profile;
     private StorageGcService service;
@@ -62,6 +65,8 @@ class StorageGcServiceTest {
         profile.setStorageHighWatermarkPercent(HIGH);
         profile.setStorageLowWatermarkPercent(LOW);
         lenient().when(profileRepository.singleton()).thenReturn(profile);
+        // The emoji pass of the orphan sweep (lenient: not every test reaches it).
+        lenient().when(objectStore.listCustomEmojiObjects()).thenReturn(List.of());
         // The batch purge runs inside a TransactionTemplate — in unit tests the callback just runs.
         TransactionTemplate template = new TransactionTemplate() {
             @Override
@@ -70,7 +75,7 @@ class StorageGcServiceTest {
             }
         };
         service = new StorageGcService(profileRepository, messageRepository, reactionRepository,
-                messageService, objectStore, realCodec(), template,
+                messageService, objectStore, emojiRepository, realCodec(), template,
                 null /* DataSource unused: vacuum is skipped — H2/not reached in unit tests */,
                 ".", true, 1000, 7, Duration.ofMinutes(10));
     }
@@ -174,6 +179,28 @@ class StorageGcServiceTest {
         assertEquals(30, report.sweptBytes);
         verify(objectStore).delete("att/orphan");
         verify(objectStore, never()).delete("att/young");
+    }
+
+    @Test
+    void emojiSweepReclaimsAbandonedSlotsAndKeepsCatalogedOnes() {
+        Instant now = Instant.now();
+        when(objectStore.listAttachmentObjects()).thenReturn(List.of());
+        when(objectStore.listCustomEmojiObjects()).thenReturn(List.of(
+                // In grace — an upload still in its slot→PUT→create flight.
+                new AttachmentObjectStore.StoredObject("custom-emojis/u1/fresh.png", 10, now),
+                // Cataloged — a live emoji row holds the key.
+                new AttachmentObjectStore.StoredObject("custom-emojis/u1/live.png", 20, now.minus(Duration.ofDays(30))),
+                // Abandoned — slot minted, row never created, grace long over.
+                new AttachmentObjectStore.StoredObject("custom-emojis/u1/abandoned.png", 40, now.minus(Duration.ofDays(30)))));
+        when(emojiRepository.existsByFileKey("custom-emojis/u1/live.png")).thenReturn(true);
+        when(emojiRepository.existsByFileKey("custom-emojis/u1/abandoned.png")).thenReturn(false);
+        StorageGcService.StorageGcReport report = service.runOnce("test", () -> 40.0);
+
+        assertEquals(1, report.sweptOrphanObjects);
+        assertEquals(40, report.sweptBytes);
+        verify(objectStore).delete("custom-emojis/u1/abandoned.png");
+        verify(objectStore, never()).delete("custom-emojis/u1/live.png");
+        verify(objectStore, never()).delete("custom-emojis/u1/fresh.png");
     }
 
     private static List<Long> ids(int batchNumber) {

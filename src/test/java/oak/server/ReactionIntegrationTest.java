@@ -47,6 +47,9 @@ class ReactionIntegrationTest {
     @Autowired
     private oak.server.repository.MessageReactionRepository reactionRepository;
 
+    @Autowired
+    private oak.server.service.RoleSeeder roleSeeder;
+
     @Test
     void addReaction_returnsSnapshotAndPersistsInHistory() throws Exception {
         String aliceToken = registerAndLogin("alice", "supersecret");
@@ -256,6 +259,33 @@ class ReactionIntegrationTest {
                         .header("Authorization", "Bearer " + aliceToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].reactions.length()").value(0));
+    }
+
+    @Test
+    void everyoneAddReactionsSelfRepairsForDatabasesSeededBeforeTheBit() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret"); // the plebeian the gate is about
+        String bobToken = login("bob", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "hello world");
+
+        // Simulate the live failure (2026-09-29): a database seeded BEFORE
+        // ADD_REACTIONS joined EVERYONE_DEFAULTS — the idempotent seeder never
+        // touches an existing @everyone row, so ordinary members lost reactions
+        // entirely (the owner bypasses via ADMINISTRATOR, which hid it from smoke).
+        oak.server.entity.Role everyone = roleRepository.findByKind(oak.server.entity.RoleKind.EVERYONE).orElseThrow();
+        everyone.setPermissions(everyone.getPermissions() & ~oak.server.entity.Permission.ADD_REACTIONS.bit);
+        roleRepository.save(everyone);
+
+        mockMvc.perform(put(reactionUrl(channelId, messageId, "thumbsup"))
+                        .header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isForbidden());
+
+        // the boot-time repair restores the feature without manual SQL
+        roleSeeder.ensureEveryoneAddReactions();
+        mockMvc.perform(put(reactionUrl(channelId, messageId, "thumbsup"))
+                        .header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk());
     }
 
     // --- helpers (mirror MessageEditDeleteIntegrationTest) ---

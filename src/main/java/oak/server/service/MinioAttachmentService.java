@@ -74,6 +74,11 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
         return key("server-avatars", fileName);
     }
 
+    @Override
+    public String newEmojiKey(String fileName) {
+        return key("custom-emojis", fileName);
+    }
+
     private static String key(String prefix, String fileName) {
         return prefix + "/" + UUID.randomUUID() + "/" + safeName(fileName);
     }
@@ -105,10 +110,21 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
     public List<StoredObject> listAttachmentObjects() {
         // The recursive listing under the attachments/ prefix only — avatars have their own
         // lifecycle (replaced/removed with the profile) and are never swept.
+        return listByPrefix("attachments/");
+    }
+
+    @Override
+    public List<StoredObject> listCustomEmojiObjects() {
+        // The emoji catalog's own listing: reclaimed rows are deleted by EmojiController, the
+        // only orphan here is an abandoned upload slot (night sweep checks the emoji table).
+        return listByPrefix("custom-emojis/");
+    }
+
+    private List<StoredObject> listByPrefix(String prefix) {
         List<StoredObject> objects = new ArrayList<>();
         Iterable<Result<Item>> listing = minioClient.listObjects(ListObjectsArgs.builder()
                 .bucket(properties.bucket())
-                .prefix("attachments/")
+                .prefix(prefix)
                 .recursive(true)
                 .build());
         for (Result<Item> entry : listing) {

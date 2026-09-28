@@ -19,6 +19,9 @@ public interface AttachmentUrlSigner {
     /** A fresh object key for the instance (server) icon upload (e.g. {@code server-avatars/<uuid>/<name>}). */
     String newServerAvatarKey(String fileName);
 
+    /** A fresh object key for a custom emoji upload (e.g. {@code custom-emojis/<uuid>/<name>}). */
+    String newEmojiKey(String fileName);
+
     /** Short-lived presigned PUT URL authorizing an upload of exactly {@code key}. */
     String presignedPutUrl(String key);
 

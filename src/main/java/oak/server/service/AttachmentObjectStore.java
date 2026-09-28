@@ -18,6 +18,12 @@ public interface AttachmentObjectStore {
      *  swept). Empty when the object store is disabled. */
     List<StoredObject> listAttachmentObjects();
 
+    /** Every object under {@code custom-emojis/} — the emoji catalog's own listing: these keys
+     *  are invisible to {@link #listAttachmentObjects()}, and the ONLY leak path is an abandoned
+     *  upload slot (key minted, row never created), which the night sweep reclaims by checking
+     *  the emoji table. Empty when the object store is disabled. */
+    List<StoredObject> listCustomEmojiObjects();
+
     /** Removes one object; failures are the implementor's to log (a dead object is not fatal). */
     void delete(String key);
 }

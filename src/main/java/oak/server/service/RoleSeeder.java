@@ -63,6 +63,7 @@ public class RoleSeeder implements ApplicationRunner {
         seedEveryone();
         ensureEveryoneViewChannel();
         ensureEveryoneChangeNickname();
+        ensureEveryoneAddReactions();
         seedOwner();
         ensureOwnerAssigned();
     }
@@ -80,9 +81,9 @@ public class RoleSeeder implements ApplicationRunner {
      *  boot. VIEW is treated as <i>infrastructure</i>: @everyone must hold it server-wide (private
      *  channels deny it per-channel / per-role, never on the base row), so a database seeded before
      *  the bit existed — or one where the bit was flipped off by hand — would otherwise turn EVERY
-     *  channel invisible for every non-owner the moment the master gate ships. Unlike the
-     *  ADD_REACTIONS manual-migration precedent, this failure mode is instance-wide darkness, hence
-     *  the automatic repair. Public for a direct integration test. */
+     *  channel invisible for every non-owner the moment the master gate ships. This failure mode
+     *  is instance-wide darkness, hence the automatic repair (CHANGE_NICKNAME and ADD_REACTIONS
+     *  self-repair the same way below). Public for a direct integration test. */
     public void ensureEveryoneViewChannel() {
         roleRepository.findByKind(RoleKind.EVERYONE).ifPresent(everyone -> {
             if ((everyone.getPermissions() & Permission.VIEW_CHANNEL.bit) != 0) {
@@ -109,6 +110,24 @@ public class RoleSeeder implements ApplicationRunner {
             everyone.setPermissions(everyone.getPermissions() | Permission.CHANGE_NICKNAME.bit);
             roleRepository.save(everyone);
             log.warn("[RBAC] @everyone was missing CHANGE_NICKNAME — re-granted (self-rename stays "
+                    + "available to ordinary members)");
+        });
+    }
+
+    /** Unconditionally re-grants {@link Permission#ADD_REACTIONS} to the stored @everyone row on
+     *  every boot, mirroring {@link #ensureEveryoneChangeNickname()}. ADD_REACTIONS joined {@link
+     *  #EVERYONE_DEFAULTS} after live databases had already been seeded, and the idempotent seeder
+     *  never touches an existing row — so ordinary members (the owner bypasses via
+     *  ADMINISTRATOR, which is why the smoke missed it) silently lost the whole reactions
+     *  feature. Replaces the old manual-migration note ("UPDATE roles ... | 262144"). */
+    public void ensureEveryoneAddReactions() {
+        roleRepository.findByKind(RoleKind.EVERYONE).ifPresent(everyone -> {
+            if ((everyone.getPermissions() & Permission.ADD_REACTIONS.bit) != 0) {
+                return;
+            }
+            everyone.setPermissions(everyone.getPermissions() | Permission.ADD_REACTIONS.bit);
+            roleRepository.save(everyone);
+            log.warn("[RBAC] @everyone was missing ADD_REACTIONS — re-granted (reactions stay "
                     + "available to ordinary members)");
         });
     }
