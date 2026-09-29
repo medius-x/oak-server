@@ -3,6 +3,8 @@ package oak.server.repository;
 import oak.server.entity.MessageReaction;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
@@ -21,6 +23,12 @@ public interface MessageReactionRepository extends JpaRepository<MessageReaction
     List<MessageReaction> findByMessageIdIn(Collection<Long> messageIds);
 
     boolean existsByMessageIdAndUserIdAndReaction(Long messageId, Long userId, String reaction);
+
+    /** Count of DISTINCT reaction values on a message (the add-cap check). Explicit JPQL, not a
+     *  derived name: {@code countDistinctByMessageId} would count distinct ENTITIES (== row
+     *  count), not distinct reaction strings. */
+    @Query("select count(distinct r.reaction) from MessageReaction r where r.message.id = :messageId")
+    long countDistinctReactionByMessageId(@Param("messageId") Long messageId);
 
     /** Idempotent remove: deletes 0 or 1 row (unique message+user+reaction). */
     long deleteByMessageIdAndUserIdAndReaction(Long messageId, Long userId, String reaction);

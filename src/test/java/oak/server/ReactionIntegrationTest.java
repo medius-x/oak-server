@@ -26,6 +26,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * message ids, the ADD_REACTIONS gate (channel-override deny → 403, OWNER bypass → 200; in a
  * DM the same gate degenerates to the participant check — a third user gets 403), the FK cleanup
  * on message delete, and the wire contract that an edit push still carries the reaction snapshot.
+ *
+ * <p>Phase 3: a custom-emoji reaction rides as a colon-wrapped {@code :name:} token in the same
+ * slug field — catalog existence is add-only (a dangling row stays removable after the emoji is
+ * deleted), built-in and custom with the same name never collide, and the Discord cap of 20
+ * DISTINCT reactions per message rejects the 21st.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -46,6 +51,9 @@ class ReactionIntegrationTest {
 
     @Autowired
     private oak.server.repository.MessageReactionRepository reactionRepository;
+
+    @Autowired
+    private oak.server.repository.EmojiRepository emojiRepository;
 
     @Autowired
     private oak.server.service.RoleSeeder roleSeeder;
@@ -288,6 +296,136 @@ class ReactionIntegrationTest {
                 .andExpect(status().isOk());
     }
 
+    @Test
+    void customEmojiReaction_roundTripsThroughSnapshotAndHistory() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "react with a custom one");
+        seedEmoji("cat");
+
+        // A colon is a legal path character, so MockMvc can carry the token raw. (The client
+        // sends encodeURIComponent("%3Acat%3A"); decoding that back is CONTAINER behavior —
+        // MockMvc has no container, and the encoded form stays raw there — so the wire claim
+        // lives in the client's rest test instead.)
+        mockMvc.perform(put(reactionUrl(channelId, messageId, ":cat:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].reaction").value(":cat:"))
+                .andExpect(jsonPath("$[0].count").value(1));
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].reactions[0].reaction").value(":cat:"));
+
+        mockMvc.perform(delete(reactionUrl(channelId, messageId, ":cat:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    void unknownCustomSlug_rejectedWith400() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "hello");
+
+        // well-formed :name: token, but no such emoji in the catalog
+        mockMvc.perform(put(reactionUrl(channelId, messageId, ":ghost:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isBadRequest());
+        assertTrue(reactionRepository.findByMessageId(messageId).isEmpty());
+    }
+
+    @Test
+    void customAndBuiltinWithTheSameName_stayDistinct() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "two hearts");
+        seedEmoji("heart");
+
+        mockMvc.perform(put(reactionUrl(channelId, messageId, "heart"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk());
+        mockMvc.perform(put(reactionUrl(channelId, messageId, ":heart:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].count").value(1))
+                .andExpect(jsonPath("$[1].count").value(1));
+    }
+
+    @Test
+    void twentyFirstDistinctReactionRejected_toggleExistingStillOk() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "fill the chip row");
+        for (int index = 0; index < 11; index++) {
+            seedEmoji("cap" + index);
+        }
+        String[] builtIns = {"hundred", "thumbsup", "thumbsdown", "heart", "eyes", "cry",
+                "smile", "facepalm", "check", "cross"};
+
+        for (String slug : builtIns) {
+            mockMvc.perform(put(reactionUrl(channelId, messageId, slug))
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isOk());
+        }
+        for (int index = 0; index < 10; index++) {
+            mockMvc.perform(put(reactionUrl(channelId, messageId, ":cap" + index + ":"))
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isOk());
+        }
+
+        // the 21st DISTINCT reaction hits the Discord cap…
+        mockMvc.perform(put(reactionUrl(channelId, messageId, ":cap10:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isBadRequest());
+        // …while toggling one already on the message is never limited (idempotent re-PUT)
+        mockMvc.perform(put(reactionUrl(channelId, messageId, "smile"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(20));
+    }
+
+    @Test
+    void removeAfterCatalogDelete_stillSucceeds() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "dangling ahead");
+        seedEmoji("cat");
+        mockMvc.perform(put(reactionUrl(channelId, messageId, ":cat:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk());
+
+        // the emoji leaves the catalog — the row now dangles, and removing it MUST stay open
+        emojiRepository.delete(emojiRepository.findAllByOrderByNameAsc().stream()
+                .filter(emoji -> emoji.getName().equals("cat")).findFirst().orElseThrow());
+
+        mockMvc.perform(delete(reactionUrl(channelId, messageId, ":cat:"))
+                        .header("Authorization", "Bearer " + aliceToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    @Test
+    void malformedCustomSyntax_rejectedWith400() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(aliceToken, "general", "TEXT");
+        Long messageId = postMessage(aliceToken, channelId, "hello");
+
+        // "::" (empty name), ":UPPER:" (case) and a 33-char name — all outside the
+        // [a-z0-9_-]{1,32} grammar. (A space cannot ride a MockMvc path either way.)
+        String tooLong = ":" + "x".repeat(33) + ":";
+        for (String slug : new String[]{"::", ":UPPER:", tooLong}) {
+            mockMvc.perform(put(reactionUrl(channelId, messageId, slug))
+                            .header("Authorization", "Bearer " + aliceToken))
+                    .andExpect(status().isBadRequest());
+        }
+        assertTrue(reactionRepository.findByMessageId(messageId).isEmpty());
+    }
+
     // --- helpers (mirror MessageEditDeleteIntegrationTest) ---
 
     private String registerAndLogin(String username, String password) throws Exception {
@@ -344,5 +482,13 @@ class ReactionIntegrationTest {
 
     private static String reactionUrl(Long channelId, Long messageId, String slug) {
         return "/api/channels/" + channelId + "/messages/" + messageId + "/reactions/" + slug;
+    }
+
+    /** Seeds a catalog emoji row directly (the EmojiIntegrationTest cap-seeding pattern) — the
+     *  object bytes never exist under the noop signer, only the row matters to the reaction gate. */
+    private void seedEmoji(String name) {
+        oak.server.entity.User uploader = userRepository.findByUsername("alice").orElseThrow();
+        emojiRepository.save(new oak.server.entity.CustomEmoji(
+                name, "custom-emojis/reaction-" + name + "/e.png", uploader));
     }
 }

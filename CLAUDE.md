@@ -293,6 +293,37 @@ oak.server
   stickerId денормализовано в ответе/истории/forward, unknown→404, edit пустым контентом
   200, reply-preview, author-only search, линк-OR) + MessageServiceTest += юнит стикер-гейта
   + StorageGcServiceTest.stickerSweep... — **355 тестов** (было 333).
+- [x] **Кастомные эмодзи в реакциях — фаза 3 из 3 (2026-09-30, код готов, смоук pending;
+  ДЕПЛОЙ: сервер первым — V8 + аддитивная валидация, DTO/топики/интерсептор НЕ тронуты;
+  клиентская половина — space-client/CLAUDE.md).** Юзер-решения: кап 20 РАЗНЫХ реакций
+  на сообщение (Discord-парити) — 400 на 21-ю различную, toggle стоящих не ограничен.
+  **Wire-формат: кастомная реакция едет как `:name:` (в двоеточиях) в ТОМ ЖЕ строковом
+  поле `reaction`/`ReactionSummary.reaction`** — дискриминатор структурный (встроенные
+  слаги двоеточий не содержат), `heart` и `:heart:` — РАЗНЫЕ реакции; резолвит клиент по
+  живому каталогу (модель фазы 1 — удаление эмодзи деградирует чип в текст БЕЗ пушей).
+  **Gate-split (load-bearing):** СИНТАКСИС (whitelist ИЛИ `^:[a-z0-9_-]{1,32}:$`) — в
+  `resolveReactionTarget` (порядок гейтов сохранён: 403 раньше 400); СУЩЕСТВОВАНИЕ
+  (`emojiRepository.existsByName` → 400 "Unknown reaction") — ТОЛЬКО в `addReaction`:
+  remove обязан снимать dangling-строку после удаления эмодзи из каталога, иначе чип
+  зависал бы навсегда. MessageService += `CUSTOM_REACTION_SLUG`/`customEmojiNameOf` +
+  `MAX_DISTINCT_REACTIONS=20` (зеркало идиомы MAX_PINS_PER_CHANNEL) + ctor-dep
+  EmojiRepository; кап проверяется внутри ветки `!exists` (идемпотентный повтор
+  стоящей реакции short-circuit'ит ДО счётчика) через НОВЫЙ
+  `MessageReactionRepository.countDistinctReactionByMessageId` — ЯВНЫЙ JPQL
+  `count(distinct r.reaction)`: derived `countDistinct…` считает сущности (= строки);
+  TOCTOU двух конкурентных 21-х принят (дешёвого DB-констрейнта «≤N различных» нет).
+  **V8__widen_reaction_slug.sql**: `message_reactions.reaction varchar(32)→(64)` (имя
+  ≤32 + 2 двоеточия = 34; typmod-widen в PG метадатный — unique-индекс не трогает;
+  H2-тесты схему регенерят из entity, entity `@Column(length=64)` + javadoc про оба
+  формата). Тесты: ReactionIntegrationTest += 6 (round-trip `:cat:` в
+  снапшоте/истории/DELETE — MockMvc НЕ декодирует %3A в path-variable (нет контейнера),
+  потому токен в тесте СЫРОЙ, wire-кодирование закреплено клиентским rest-тестом;
+  unknown `:ghost:` → 400; `heart`+`:heart:` независимы; кап: 10 встроенных + 10
+  кастомных стоят → 21-я различная 400, повтор стоящей 200; remove ПОСЛЕ удаления
+  эмодзи из каталога → 200; `::`/`:UPPER:`/33-симв → 400) + MessageServiceTest += 4
+  юнита (+`@Mock EmojiRepository`, unused-mock легален под STRICT_STUBS — существующие
+  built-in-юниты не тронуты: countDistinct на моке дефолтит в 0) — **365 тестов (было
+  355)**.
 - [x] **СМОК-ФИКС: DISCUSSION-каналы утекали в DM-список (2026-09-24, юзер-репорт «фантомные
   DM с самим собой»; клиентская половина саги — space-client/CLAUDE.md).** `DmService.listMine`
   брал ВСЕ каналы участника (`findChannelIdsByUserId`) без фильтра типа — а трекинг обсуждений

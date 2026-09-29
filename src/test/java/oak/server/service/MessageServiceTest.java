@@ -79,6 +79,10 @@ class MessageServiceTest {
     private AttachmentObjectStore objectStore;
     @Mock
     private oak.server.repository.StickerRepository stickerRepository;
+    /** Existence gate for :name: custom-emoji reactions — unused by every built-in-slug
+     *  test, legal under STRICT_STUBS. */
+    @Mock
+    private oak.server.repository.EmojiRepository emojiRepository;
     /** Carries the "post landed in a discussion" hook to DiscussionService as an EVENT
      *  (decoupled — DiscussionService depends on this service for the lazy-create flow).
      *  Unused by every non-DISCUSSION test — legal under STRICT_STUBS. */
@@ -936,6 +940,122 @@ class MessageServiceTest {
         verify(messagingTemplate).convertAndSend(
                 eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.REACTIONS_TOPIC_SUFFIX),
                 any(oak.server.dto.ReactionEvent.class));
+    }
+
+    @Test
+    void addReactionCustomSlugWithoutACatalogRowRejectedBeforeAnyWrite() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(reactionRepository.existsByMessageIdAndUserIdAndReaction(messageId, 5L, ":cat:"))
+                .thenReturn(false);
+        when(emojiRepository.existsByName("cat")).thenReturn(false);
+
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.addReaction(channelId, messageId, ":cat:", "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(reactionRepository, org.mockito.Mockito.never())
+                .save(any(oak.server.entity.MessageReaction.class));
+        verify(messagingTemplate, org.mockito.Mockito.never()).convertAndSend(any(String.class), any(Object.class));
+    }
+
+    @Test
+    void addReactionCustomSlugSavesAndPushesTheSnapshot() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+        MessageReaction row = new MessageReaction(existing, actor, ":cat:");
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(reactionRepository.existsByMessageIdAndUserIdAndReaction(messageId, 5L, ":cat:"))
+                .thenReturn(false);
+        when(emojiRepository.existsByName("cat")).thenReturn(true);
+        when(reactionRepository.countDistinctReactionByMessageId(messageId)).thenReturn(3L);
+        when(reactionRepository.save(any(MessageReaction.class))).thenReturn(row);
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of(row));
+
+        java.util.List<oak.server.dto.ReactionSummary> snapshot =
+                messageService.addReaction(channelId, messageId, ":cat:", "alice");
+
+        assertEquals(":cat:", snapshot.get(0).reaction());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId + MessageService.REACTIONS_TOPIC_SUFFIX),
+                any(oak.server.dto.ReactionEvent.class));
+    }
+
+    @Test
+    void addReactionEnforcesTheDistinctCap_onlyWhenARowWouldBeNew() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+
+        // a NEW distinct row at the cap → 400, no write
+        when(reactionRepository.existsByMessageIdAndUserIdAndReaction(messageId, 5L, "smile"))
+                .thenReturn(false);
+        when(reactionRepository.countDistinctReactionByMessageId(messageId))
+                .thenReturn((long) MessageService.MAX_DISTINCT_REACTIONS);
+        ResponseStatusException thrown = assertThrows(ResponseStatusException.class, () ->
+                messageService.addReaction(channelId, messageId, "smile", "alice"));
+        assertEquals(HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+        verify(reactionRepository, org.mockito.Mockito.never())
+                .save(any(oak.server.entity.MessageReaction.class));
+
+        // a reaction the user ALREADY has short-circuits before the count — never limited
+        when(reactionRepository.existsByMessageIdAndUserIdAndReaction(messageId, 5L, "smile"))
+                .thenReturn(true);
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
+        assertEquals(java.util.List.of(), messageService.addReaction(channelId, messageId, "smile", "alice"));
+        // the cap count ran exactly once — the idempotent re-PUT never asked for it
+        verify(reactionRepository, org.mockito.Mockito.times(1)).countDistinctReactionByMessageId(messageId);
+    }
+
+    @Test
+    void removeReactionAcceptsADanglingCustomSlug() {
+        Long channelId = 7L;
+        Long messageId = 100L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User actor = new User("alice", "hash");
+        actor.setId(5L);
+        Message existing = new Message(channel, actor, "hello");
+        existing.setId(messageId);
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
+        when(auth.requireUser("alice")).thenReturn(actor);
+        when(reactionRepository.deleteByMessageIdAndUserIdAndReaction(messageId, 5L, ":cat:")).thenReturn(1L);
+        when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
+
+        // the emoji row is GONE from the catalog — remove must not consult it (a stuck chip
+        // could never be lifted off)
+        assertEquals(java.util.List.of(),
+                messageService.removeReaction(channelId, messageId, ":cat:", "alice"));
+        org.mockito.Mockito.verifyNoInteractions(emojiRepository);
     }
 
     /** The shared fixture of the intra-instance forward tests: a TWO-attachment source message

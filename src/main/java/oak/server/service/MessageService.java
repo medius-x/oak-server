@@ -23,6 +23,7 @@ import oak.server.entity.Permission;
 import oak.server.entity.Sticker;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
+import oak.server.repository.EmojiRepository;
 import oak.server.repository.MessageReactionRepository;
 import oak.server.repository.MessageRepository;
 import oak.server.repository.ServerProfileRepository;
@@ -45,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -68,13 +70,20 @@ public class MessageService {
      *  {@link ReactionEvent} carrying the message's full reaction snapshot). */
     public static final String REACTIONS_TOPIC_SUFFIX = ".reactions";
 
-    /** The full emoji catalog clients may react with, as URL/database-safe slugs (never glyphs).
-     *  Any other slug is rejected with 400; the client mirrors this list with slug→glyph
-     *  mapping for rendering. The set mirrors the user's reference picker: 💯 👍 👎 ❤ 👀 😢
-     *  😄 🤦 ✅ ❌ (facepalm right before the check; the pointing finger left the set). */
+    /** The BUILT-IN emoji catalog clients may react with, as URL/database-safe slugs (never
+     *  glyphs). The client mirrors this list with slug→glyph mapping for rendering. The set
+     *  mirrors the user's reference picker: 💯 👍 👎 ❤ 👀 😢 😄 🤦 ✅ ❌ (facepalm right before
+     *  the check; the pointing finger left the set). A custom-emoji reaction from the server's
+     *  catalog also passes the gate — see {@link #CUSTOM_REACTION_SLUG}. */
     static final Set<String> REACTION_SLUGS = Set.of(
             "hundred", "thumbsup", "thumbsdown", "heart", "eyes", "cry", "smile",
             "facepalm", "check", "cross");
+
+    /** A custom-emoji reaction rides as a colon-wrapped {@code :name:} token in the same string
+     *  field — bare built-in slugs never contain colons, so the two namespaces cannot collide
+     *  (a custom emoji literally named {@code heart} is a distinct reaction from the built-in
+     *  {@code heart}). The inner name grammar mirrors {@code CustomEmoji}. */
+    static final Pattern CUSTOM_REACTION_SLUG = Pattern.compile("^:[a-z0-9_-]{1,32}:$");
 
     private static final int DEFAULT_LIMIT = 50;
     private static final int MAX_LIMIT = 200;
@@ -102,6 +111,11 @@ public class MessageService {
      *  of a pin's storage-GC immortality (pinned rows are exempt from the nightly purge). */
     public static final int MAX_PINS_PER_CHANNEL = 50;
 
+    /** Hard cap of DISTINCT reactions per message (the Discord limit) — the chip row stays
+     *  bounded now that the whole custom-emoji catalog is reactable. Adding the 21st distinct
+     *  reaction is a 400; toggling reactions already on the message is never limited. */
+    public static final int MAX_DISTINCT_REACTIONS = 20;
+
     private final MessageRepository messageRepository;
     private final ChannelRepository channelRepository;
     private final UserRepository userRepository;
@@ -114,6 +128,9 @@ public class MessageService {
     /** Resolves {@code stickerId} at send time — the message then carries the denormalized
      *  name+key copy and never looks at the catalog again. */
     private final StickerRepository stickerRepository;
+    /** Existence gate for custom-emoji reactions ({@code :name:}) — checked at ADD time only,
+     *  so removing a dangling reaction after a catalog delete stays possible. */
+    private final EmojiRepository emojiRepository;
     private final NestedReplyCodec nestedReplyCodec;
     private final AttachmentListCodec attachmentListCodec;
     private final MessageIdempotencyCache idempotencyCache;
@@ -589,14 +606,33 @@ public class MessageService {
     /** Adds the actor's reaction (idempotent — a repeated PUT is a no-op, the unique
      *  message+user+reaction constraint keeps one row). Gated by ADD_REACTIONS
      *  (channel-scoped, override-aware; in a DM/group-DM that check degenerates to the
-     *  participant check — see {@code AuthorizationService.hasInChannel}). Returns and
-     *  broadcasts the full deterministic snapshot so clients render exactly one truth whether
-     *  they apply the REST response or the WS echo (or both). */
+     *  participant check — see {@code AuthorizationService.hasInChannel}). A
+     *  {@code :name:} custom-emoji slug must name a live catalog row at add time; the 21st
+     *  DISTINCT reaction on a message is a 400 (Discord's cap) — toggling an existing one is
+     *  never limited. Returns and broadcasts the full deterministic snapshot so clients render
+     *  exactly one truth whether they apply the REST response or the WS echo (or both). */
     @Transactional
     public List<ReactionSummary> addReaction(Long channelId, Long messageId, String slug, String actorUsername) {
         ResolvedReactionTarget target = resolveReactionTarget(channelId, messageId, slug, actorUsername);
         if (!reactionRepository.existsByMessageIdAndUserIdAndReaction(
                 target.message().getId(), target.actor().getId(), slug)) {
+            // A custom-emoji reaction must name a live catalog row at ADD time (built-ins are
+            // self-valid). REMOVE deliberately skips this check: after the emoji is deleted
+            // from the catalog the chip degrades to ":name:" text client-side and must stay
+            // removable, or the row would be stuck forever.
+            String emojiName = customEmojiNameOf(slug);
+            if (emojiName != null && !emojiRepository.existsByName(emojiName)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown reaction: " + slug);
+            }
+            // Checked only when a NEW distinct row would appear (a re-PUT of an existing
+            // reaction short-circuits above and is never limited). Two concurrent 21st-distinct
+            // adds can both pass the count — accepted overshoot; no cheap DB constraint
+            // expresses "≤ N distinct values".
+            if (reactionRepository.countDistinctReactionByMessageId(target.message().getId())
+                    >= MAX_DISTINCT_REACTIONS) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Reaction limit reached (" + MAX_DISTINCT_REACTIONS + ")");
+            }
             reactionRepository.save(new MessageReaction(target.message(), target.actor(), slug));
         }
         return pushReactionSnapshot(target.channel(), target.message());
@@ -693,7 +729,10 @@ public class MessageService {
     }
 
     /** Shared resolution + gate for add/remove: channel → message (cross-channel safe) → actor →
-     *  ADD_REACTIONS (DM participant check in disguise) → slug whitelist. */
+     *  ADD_REACTIONS (DM participant check in disguise) → reaction slug SYNTAX (a built-in
+     *  whitelist slug or a well-formed {@code :name:} token). Catalog EXISTENCE for custom
+     *  tokens is deliberately NOT checked here — only {@link #addReaction} does, so a dangling
+     *  reaction stays removable after the emoji leaves the catalog. */
     private ResolvedReactionTarget resolveReactionTarget(Long channelId, Long messageId, String slug,
                                                          String actorUsername) {
         Channel channel = channelRepository.findById(channelId)
@@ -702,10 +741,18 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
         User actor = auth.requireUser(actorUsername);
         auth.requireInChannel(actor, channel, Permission.ADD_REACTIONS);
-        if (!REACTION_SLUGS.contains(slug)) {
+        if (!REACTION_SLUGS.contains(slug) && customEmojiNameOf(slug) == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Unknown reaction: " + slug);
         }
         return new ResolvedReactionTarget(channel, message, actor);
+    }
+
+    /** Unwraps a {@code :name:} custom-emoji reaction slug to the catalog name; null for a
+     *  built-in slug or anything malformed. Package-private for tests. */
+    static String customEmojiNameOf(String slug) {
+        return CUSTOM_REACTION_SLUG.matcher(slug).matches()
+                ? slug.substring(1, slug.length() - 1)
+                : null;
     }
 
     private List<ReactionSummary> pushReactionSnapshot(Channel channel, Message message) {

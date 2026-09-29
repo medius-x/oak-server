@@ -20,9 +20,12 @@ import java.time.Instant;
 
 /**
  * One user's one reaction on one message — a Discord-style emoji row. The {@code reaction} column
- * stores a whitelisted slug (e.g. {@code thumbsup}), never the emoji glyph itself: slugs stay
- * ASCII-safe on the wire (URL paths) and in the database, and the catalog of valid values is
- * enforced by {@code MessageService} ({@code REACTION_SLUGS}).
+ * stores either a built-in whitelisted slug (e.g. {@code thumbsup}) or a colon-wrapped
+ * custom-emoji token (e.g. {@code :cat:}), never the emoji glyph itself: both stay ASCII-safe on
+ * the wire (URL paths) and in the database. The value grammar is enforced by {@code MessageService}
+ * ({@code REACTION_SLUGS} + the {@code :name:} pattern); catalog EXISTENCE for custom tokens is
+ * validated at add time only, so a row may dangle after the emoji is deleted from the catalog
+ * (the client degrades the chip to text and the remove path stays open).
  *
  * <p>{@code (message_id, user_id, reaction)} is unique: a user reacts with a given emoji at most
  * once per message (the PUT add is idempotent via this constraint). Cascade is absent — rows are
@@ -49,8 +52,9 @@ public class MessageReaction {
     @JoinColumn(name = "user_id", nullable = false)
     private User user;
 
-    /** Whitelisted emoji slug ({@code MessageService.REACTION_SLUGS}), not the glyph. */
-    @Column(length = 32, nullable = false)
+    /** Built-in emoji slug ({@code MessageService.REACTION_SLUGS}) or a colon-wrapped
+     *  custom-emoji token ({@code :name:}, name ≤ 32 — hence the 64-char column). Never the glyph. */
+    @Column(length = 64, nullable = false)
     private String reaction;
 
     @CreationTimestamp
