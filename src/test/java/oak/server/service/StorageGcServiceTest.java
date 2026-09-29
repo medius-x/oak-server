@@ -6,6 +6,7 @@ import oak.server.repository.EmojiRepository;
 import oak.server.repository.MessageReactionRepository;
 import oak.server.repository.MessageRepository;
 import oak.server.repository.ServerProfileRepository;
+import oak.server.repository.StickerRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -55,6 +56,8 @@ class StorageGcServiceTest {
     private AttachmentObjectStore objectStore;
     @Mock
     private EmojiRepository emojiRepository;
+    @Mock
+    private StickerRepository stickerRepository;
 
     private ServerProfile profile;
     private StorageGcService service;
@@ -65,8 +68,9 @@ class StorageGcServiceTest {
         profile.setStorageHighWatermarkPercent(HIGH);
         profile.setStorageLowWatermarkPercent(LOW);
         lenient().when(profileRepository.singleton()).thenReturn(profile);
-        // The emoji pass of the orphan sweep (lenient: not every test reaches it).
+        // The emoji/sticker passes of the orphan sweep (lenient: not every test reaches them).
         lenient().when(objectStore.listCustomEmojiObjects()).thenReturn(List.of());
+        lenient().when(objectStore.listStickerObjects()).thenReturn(List.of());
         // The batch purge runs inside a TransactionTemplate — in unit tests the callback just runs.
         TransactionTemplate template = new TransactionTemplate() {
             @Override
@@ -75,7 +79,7 @@ class StorageGcServiceTest {
             }
         };
         service = new StorageGcService(profileRepository, messageRepository, reactionRepository,
-                messageService, objectStore, emojiRepository, realCodec(), template,
+                messageService, objectStore, emojiRepository, stickerRepository, realCodec(), template,
                 null /* DataSource unused: vacuum is skipped — H2/not reached in unit tests */,
                 ".", true, 1000, 7, Duration.ofMinutes(10));
     }
@@ -201,6 +205,25 @@ class StorageGcServiceTest {
         verify(objectStore).delete("custom-emojis/u1/abandoned.png");
         verify(objectStore, never()).delete("custom-emojis/u1/live.png");
         verify(objectStore, never()).delete("custom-emojis/u1/fresh.png");
+    }
+
+    @Test
+    void stickerSweepReclaimsAbandonedSlotsAndKeepsCatalogedOnes() {
+        Instant now = Instant.now();
+        when(objectStore.listAttachmentObjects()).thenReturn(List.of());
+        when(objectStore.listStickerObjects()).thenReturn(List.of(
+                new AttachmentObjectStore.StoredObject("stickers/u1/fresh.png", 10, now),
+                new AttachmentObjectStore.StoredObject("stickers/u1/live.png", 20, now.minus(Duration.ofDays(30))),
+                new AttachmentObjectStore.StoredObject("stickers/u1/abandoned.png", 40, now.minus(Duration.ofDays(30)))));
+        when(stickerRepository.existsByFileKey("stickers/u1/live.png")).thenReturn(true);
+        when(stickerRepository.existsByFileKey("stickers/u1/abandoned.png")).thenReturn(false);
+        StorageGcService.StorageGcReport report = service.runOnce("test", () -> 40.0);
+
+        assertEquals(1, report.sweptOrphanObjects);
+        assertEquals(40, report.sweptBytes);
+        verify(objectStore).delete("stickers/u1/abandoned.png");
+        verify(objectStore, never()).delete("stickers/u1/live.png");
+        verify(objectStore, never()).delete("stickers/u1/fresh.png");
     }
 
     private static List<Long> ids(int batchNumber) {

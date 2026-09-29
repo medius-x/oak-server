@@ -39,6 +39,11 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner, AttachmentO
         return key("custom-emojis/noop", fileName);
     }
 
+    @Override
+    public String newStickerKey(String fileName) {
+        return key("stickers/noop", fileName);
+    }
+
     private static String key(String prefix, String fileName) {
         String safe = (fileName == null || fileName.isBlank()) ? "file" : fileName;
         return prefix + "/" + UUID.randomUUID() + "/" + safe;
@@ -66,6 +71,11 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner, AttachmentO
 
     @Override
     public java.util.List<StoredObject> listCustomEmojiObjects() {
+        return java.util.List.of();
+    }
+
+    @Override
+    public java.util.List<StoredObject> listStickerObjects() {
         return java.util.List.of();
     }
 }

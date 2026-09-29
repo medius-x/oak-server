@@ -14,15 +14,26 @@ import java.util.List;
  * {@code idempotencyKey} (4th, appended — wire append-only) lets a client whose response was
  * lost to a network blip safely retry the SAME logical send: the server returns the original
  * message instead of creating a duplicate row. Null (legacy clients) = no dedup.
+ * {@code stickerId} (5th, appended) references the sticker catalog row to carry; the message
+ * stores a denormalized name+key copy, and a sticker satisfies the content-or-attachment
+ * rule on its own (sticker-only sends have {@code content: null}). No ATTACH_FILES is
+ * required — a sticker is not a file attachment.
  */
 public record CreateMessageRequest(
         @Size(max = 4000) String content,
         @Size(max = 10) List<AttachmentRef> attachments,
         Long replyToId,
-        @Size(max = 64) String idempotencyKey
+        @Size(max = 64) String idempotencyKey,
+        Long stickerId
 ) {
 
-    /** Legacy 3-field shape (no idempotency key) — old callers and tests. */
+    /** Legacy 4-field shape (no sticker) — callers and tests predating stickers. */
+    public CreateMessageRequest(String content, List<AttachmentRef> attachments, Long replyToId,
+                                String idempotencyKey) {
+        this(content, attachments, replyToId, idempotencyKey, null);
+    }
+
+    /** Legacy 3-field shape (no idempotency key, no sticker) — old callers and tests. */
     public CreateMessageRequest(String content, List<AttachmentRef> attachments, Long replyToId) {
         this(content, attachments, replyToId, null);
     }

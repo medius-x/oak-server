@@ -6,6 +6,7 @@ import oak.server.dto.AttachmentLinkResponse;
 import oak.server.dto.AttachmentUploadRequest;
 import oak.server.dto.AttachmentUploadResponse;
 import oak.server.repository.EmojiRepository;
+import oak.server.repository.StickerRepository;
 import oak.server.service.AttachmentUrlSigner;
 import oak.server.service.MessageService;
 import org.springframework.http.HttpStatus;
@@ -37,6 +38,7 @@ public class AttachmentController {
     private final AttachmentUrlSigner attachmentUrlSigner;
     private final MessageService messageService;
     private final EmojiRepository emojiRepository;
+    private final StickerRepository stickerRepository;
 
     @PostMapping
     public AttachmentUploadResponse requestUpload(@RequestBody @Valid AttachmentUploadRequest request) {
@@ -49,11 +51,12 @@ public class AttachmentController {
      *  path handling treats kindly. */
     @GetMapping("/link")
     public AttachmentLinkResponse freshLink(String key) {
-        // The emoji OR lives HERE, not in MessageService.attachmentExists: the GC tiers call
-        // that method with their own semantics (message-referenced objects), and widening it
-        // would silently broaden them; only this endpoint needs the union.
+        // The emoji/sticker OR lives HERE, not in MessageService.attachmentExists: the GC tiers
+        // call that method with their own semantics (message-referenced objects), and widening
+        // it would silently broaden them; only this endpoint needs the union.
         if (key == null || key.isBlank()
-                || (!messageService.attachmentExists(key) && !emojiRepository.existsByFileKey(key))) {
+                || (!messageService.attachmentExists(key) && !emojiRepository.existsByFileKey(key)
+                        && !stickerRepository.existsByFileKey(key))) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown attachment");
         }
         return new AttachmentLinkResponse(attachmentUrlSigner.presignedGetUrl(key));

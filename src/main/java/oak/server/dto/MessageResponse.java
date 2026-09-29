@@ -19,7 +19,8 @@ import java.util.List;
  * forwarder. {@code pinned} is the channel-pin flag (Discord-style); {@code pinnedBy} is the
  * PINNER's username (denormalized at pin time — not the message author) and {@code pinnedAt}
  * the pin moment — both null while unpinned. Pin/unpin pushes ride the existing {@code .edited}
- * topic with the full row.
+ * topic with the full row. {@code sticker} (16th, appended) is the sticker this message carries
+ * — a DENORMALIZED copy stamped at send time; null = no sticker (see {@link StickerRef}).
  * Field order is wire-stable — new fields append at the end only, paired with the client
  * mirror. (The former scalar {@code attachmentFileName}/{@code attachmentUrl} pair was REPLACED
  * by {@code attachments} in a paired client+server pass — dev deploys are always paired.)
@@ -39,6 +40,7 @@ public record MessageResponse(
         ForwardInfo forward,
         boolean pinned,
         String pinnedBy,
-        Instant pinnedAt
+        Instant pinnedAt,
+        StickerRef sticker
 ) {
 }

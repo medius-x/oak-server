@@ -14,16 +14,19 @@ import oak.server.dto.ReactionEvent;
 import oak.server.dto.ReactionSummary;
 import oak.server.dto.ReplyInfo;
 import oak.server.dto.SearchMessagesResponse;
+import oak.server.dto.StickerRef;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
 import oak.server.entity.Message;
 import oak.server.entity.MessageReaction;
 import oak.server.entity.Permission;
+import oak.server.entity.Sticker;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.MessageReactionRepository;
 import oak.server.repository.MessageRepository;
 import oak.server.repository.ServerProfileRepository;
+import oak.server.repository.StickerRepository;
 import oak.server.repository.UserRepository;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
@@ -108,6 +111,9 @@ public class MessageService {
     private final MentionParser mentionParser;
     private final MessageReactionRepository reactionRepository;
     private final ServerProfileRepository serverProfileRepository;
+    /** Resolves {@code stickerId} at send time — the message then carries the denormalized
+     *  name+key copy and never looks at the catalog again. */
+    private final StickerRepository stickerRepository;
     private final NestedReplyCodec nestedReplyCodec;
     private final AttachmentListCodec attachmentListCodec;
     private final MessageIdempotencyCache idempotencyCache;
@@ -134,8 +140,17 @@ public class MessageService {
         }
         String content = request.content();
         List<AttachmentRef> attachments = sanitized(request.attachments());
-        if (isBlank(content) && attachments.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Message must have content or an attachment");
+        // A sticker satisfies the content-or-attachment rule on its own (sticker-only sends
+        // have null content) and rides NO extra permission — it is not a file attachment,
+        // exactly like a ":name:" emoji token in text.
+        Sticker sticker = null;
+        if (request.stickerId() != null) {
+            sticker = stickerRepository.findById(request.stickerId())
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown sticker"));
+        }
+        if (isBlank(content) && attachments.isEmpty() && sticker == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Message must have content, an attachment or a sticker");
         }
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
@@ -159,6 +174,10 @@ public class MessageService {
         // Set BEFORE save: toResponse below reads the JSON column off the in-memory entity, so
         // the create broadcast equals a later history fetch (the forwardNestedReply discipline).
         message.setAttachments(attachmentListCodec.write(attachments));
+        if (sticker != null) {
+            message.setStickerName(sticker.getName());
+            message.setStickerFileKey(sticker.getFileKey());
+        }
         if (replyTarget != null) {
             message.setRepliedToId(replyTarget.getId());
         }
@@ -365,9 +384,10 @@ public class MessageService {
             }
             resultingAttachments = List.copyOf(request.attachments());
         }
-        if (isBlank(request.content()) && resultingAttachments.isEmpty()) {
+        if (isBlank(request.content()) && resultingAttachments.isEmpty()
+                && message.getStickerName() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Message must have content or an attachment");
+                    "Message must have content, an attachment or a sticker");
         }
         message.setContent(request.content());
         Set<String> removedKeys = Set.of();
@@ -484,6 +504,12 @@ public class MessageService {
         Instant originCreatedAt;
         boolean trusted;
         ReplyInfo originReply;
+        // The sticker copy: carried by a full intra-instance forward, dropped by the subset
+        // mode ("forward the image" — the client picked PART of the source's attachments) and
+        // by cross-instance snapshots (the target server cannot serve the origin's object
+        // keys — the client re-uploads the bytes as a regular attachment instead).
+        String stickerName = null;
+        String stickerFileKey = null;
         if (request.sourceMessageId() != null) {
             Message source = messageRepository.findById(request.sourceMessageId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source message not found"));
@@ -501,6 +527,8 @@ public class MessageService {
             } else {
                 attachments = sourceAttachments;
                 content = source.getContent();
+                stickerName = source.getStickerName();
+                stickerFileKey = source.getStickerFileKey();
             }
             originServer = serverProfileRepository.singleton().getName();
             originChannel = source.getChannel().getName();
@@ -527,9 +555,9 @@ public class MessageService {
             // depth cap runs BEFORE persisting so a hostile payload cannot bloat the column.
             originReply = nestedReplyCodec.capDepth(request.originReply(), MAX_QUOTE_DEPTH);
         }
-        if (isBlank(content) && attachments.isEmpty()) {
+        if (isBlank(content) && attachments.isEmpty() && stickerName == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "Forward must have content or an attachment");
+                    "Forward must have content, an attachment or a sticker");
         }
         if (!attachments.isEmpty()) {
             auth.requireInChannel(actor, targetChannel, Permission.ATTACH_FILES);
@@ -543,6 +571,10 @@ public class MessageService {
         forward.setForwardAuthorName(originAuthorName);
         forward.setForwardCreatedAt(originCreatedAt);
         forward.setForwardTrusted(trusted);
+        if (stickerName != null) {
+            forward.setStickerName(stickerName);
+            forward.setStickerFileKey(stickerFileKey);
+        }
         // Set BEFORE save: toResponse below reads the field off the in-memory entity, so the
         // create broadcast equals a later history fetch byte for byte (the reactions' determinism
         // discipline). A write failure degrades to null — the forward must not fail over the
@@ -766,7 +798,13 @@ public class MessageService {
                 forwardInfo(message),
                 message.isPinned(),
                 message.getPinnedByName(),
-                message.getPinnedAt());
+                message.getPinnedAt(),
+                // The denormalized sticker copy — presign is CPU-only, so the
+                // no-repository invariant holds (the attachments idiom).
+                message.getStickerName() == null ? null : new StickerRef(
+                        message.getStickerName(),
+                        message.getStickerFileKey(),
+                        attachmentUrlSigner.presignedGetUrl(message.getStickerFileKey())));
     }
 
     /** The forward's origin card, or null when the message is not a forward. Any single origin
@@ -852,13 +890,19 @@ public class MessageService {
 
     /** One-line quote preview of the original: newlines flatten to spaces, capped at
      *  {@link #REPLY_PREVIEW_MAX} chars ("…" appended when trimmed); an attachment-only original
-     *  falls back to its FIRST file name. Instance method — reading the attachments JSON column
-     *  needs the codec. */
+     *  falls back to its FIRST file name, a sticker-only one to its sticker label. Instance
+     *  method — reading the attachments JSON column needs the codec. */
     private String previewOf(Message original) {
         String body = original.getContent();
         if (body == null || body.isBlank()) {
             List<AttachmentRef> refs = attachmentListCodec.read(original.getAttachments());
-            body = refs.isEmpty() ? "" : String.valueOf(refs.get(0).fileName());
+            if (!refs.isEmpty()) {
+                body = String.valueOf(refs.get(0).fileName());
+            } else if (original.getStickerName() != null) {
+                body = "[Sticker] " + original.getStickerName();
+            } else {
+                body = "";
+            }
         }
         String flat = body.replace('\n', ' ');
         return flat.length() <= REPLY_PREVIEW_MAX ? flat : flat.substring(0, REPLY_PREVIEW_MAX) + "…";

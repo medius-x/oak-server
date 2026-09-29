@@ -14,6 +14,8 @@ import oak.server.entity.Message;
 import oak.server.entity.MessageReaction;
 import oak.server.entity.Permission;
 import oak.server.entity.ServerProfile;
+import oak.server.entity.Sticker;
+import oak.server.entity.StickerPack;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.repository.MessageRepository;
@@ -75,6 +77,8 @@ class MessageServiceTest {
     private MessageIdempotencyCache idempotencyCache;
     @Mock
     private AttachmentObjectStore objectStore;
+    @Mock
+    private oak.server.repository.StickerRepository stickerRepository;
     /** Carries the "post landed in a discussion" hook to DiscussionService as an EVENT
      *  (decoupled — DiscussionService depends on this service for the lazy-create flow).
      *  Unused by every non-DISCUSSION test — legal under STRICT_STUBS. */
@@ -124,6 +128,32 @@ class MessageServiceTest {
     }
 
     @Test
+    void createStampsTheDenormalizedStickerAndPassesTheGateOnItsOwn() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        Sticker sticker = new Sticker("cat", "stickers/u1/cat.png", new StickerPack("Cats"), author);
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
+        when(stickerRepository.findById(9L)).thenReturn(Optional.of(sticker));
+        // The saved entity IS the in-memory one the service stamped — mirror the real
+        // save() semantics so the sticker columns survive into toResponse.
+        when(messageRepository.save(any(Message.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        // Null content + no attachments + a sticker: the content-or-attachment gate passes.
+        MessageResponse response = messageService.create(channelId,
+                new CreateMessageRequest(null, null, null, null, 9L), "alice");
+
+        assertEquals(null, response.content());
+        assertEquals("cat", response.sticker().name());
+        assertEquals("stickers/u1/cat.png", response.sticker().key());
+        verify(messagingTemplate).convertAndSend(
+                eq(MessageService.CHANNEL_TOPIC_PREFIX + channelId), any(MessageResponse.class));
+    }
+
+    @Test
     void createIntoADiscussionChannelFiresTheActivityHook() {
         Long channelId = 7L;
         Channel thread = new Channel("discussion-1", ChannelType.DISCUSSION);
@@ -150,7 +180,7 @@ class MessageServiceTest {
         // A retry whose first response was lost re-presents the same key: the ORIGINAL response
         // comes back, with no save and no second /topic push.
         MessageResponse original = new MessageResponse(55L, 7L, 5L, "alice", "hello", null,
-                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null, false, null, null);
+                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null, false, null, null, null);
         when(idempotencyCache.get("alice", "key-1")).thenReturn(original);
 
         MessageResponse response = messageService.create(7L, new CreateMessageRequest("hello", null, null, "key-1"), "alice");

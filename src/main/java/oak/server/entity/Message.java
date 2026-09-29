@@ -136,6 +136,22 @@ public class Message {
     @Column(name = "pinned_at")
     private Instant pinnedAt;
 
+    // ---- Sticker (phase 2 of custom expressions). The sticker this message carries,
+    // DENORMALIZED at send time from the catalog row: name + MinIO key copied together
+    // (never one without the other). No FK to the sticker table — deleting the catalog row
+    // leaves these dangling BY DESIGN (the repliedToId discipline) and old messages degrade
+    // to a client-side tombstone once the swept object's URL dies. Immutable after create;
+    // copied verbatim by an intra-instance forward. Denormalized so toResponse keeps its
+    // "never touches a repository" invariant (the pinnedByName idiom).
+
+    /** The sticker's name at send time. */
+    @Column(name = "sticker_name", length = 32)
+    private String stickerName;
+
+    /** The sticker's MinIO object key — the client renders through its attachment cache. */
+    @Column(name = "sticker_file_key", length = 512)
+    private String stickerFileKey;
+
     public Message(Channel channel, User author, String content) {
         this.channel = channel;
         this.author = author;

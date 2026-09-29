@@ -79,6 +79,11 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
         return key("custom-emojis", fileName);
     }
 
+    @Override
+    public String newStickerKey(String fileName) {
+        return key("stickers", fileName);
+    }
+
     private static String key(String prefix, String fileName) {
         return prefix + "/" + UUID.randomUUID() + "/" + safeName(fileName);
     }
@@ -118,6 +123,12 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
         // The emoji catalog's own listing: reclaimed rows are deleted by EmojiController, the
         // only orphan here is an abandoned upload slot (night sweep checks the emoji table).
         return listByPrefix("custom-emojis/");
+    }
+
+    @Override
+    public List<StoredObject> listStickerObjects() {
+        // The sticker catalog's listing — the same abandoned-slot reclaim story as emojis.
+        return listByPrefix("stickers/");
     }
 
     private List<StoredObject> listByPrefix(String prefix) {

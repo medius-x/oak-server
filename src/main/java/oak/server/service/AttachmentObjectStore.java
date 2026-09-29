@@ -24,6 +24,11 @@ public interface AttachmentObjectStore {
      *  the emoji table. Empty when the object store is disabled. */
     List<StoredObject> listCustomEmojiObjects();
 
+    /** Every object under {@code stickers/} — the sticker catalog's listing, the same abandoned
+     *  -slot reclaim story as {@link #listCustomEmojiObjects()} against the sticker table.
+     *  Empty when the object store is disabled. */
+    List<StoredObject> listStickerObjects();
+
     /** Removes one object; failures are the implementor's to log (a dead object is not fatal). */
     void delete(String key);
 }

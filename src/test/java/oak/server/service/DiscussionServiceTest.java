@@ -237,7 +237,7 @@ class DiscussionServiceTest {
         when(messageRepository.countByChannelId(77L)).thenReturn(4L);
         MessageResponse wireMessage = new MessageResponse(200L, 77L, 6L, "bob", "hey @carol look",
                 Instant.parse("2026-09-22T02:00:00Z"), List.of(), List.of(), null, List.of(),
-                null, null, false, null, null);
+                null, null, false, null, null, null);
         when(messageService.responseOf(posted)).thenReturn(wireMessage);
 
         discussionService.onMessagePostedInDiscussion(new MessagePostedInDiscussion(thread, posted));

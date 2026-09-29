@@ -253,6 +253,46 @@ oak.server
   расширение-400/round-trip+сорт+uploadedBy/лестница-имени/дубль-409/чужой-префикс-400/
   кап-200/д delete-204→404/линк-OR) + StorageGcServiceTest.emojiSweepReclaimsAbandonedSlots...
   332 теста. Клиентская половина — space-client/CLAUDE.md.
+- [x] **Кастомные стикеры с паками, фаза 2 из 3 (2026-09-29, код готов, смоук pending;
+  ДЕПЛОЙ: сервер первым — V7 + аддитивные эндпоинты + append-only поле MessageResponse;
+  старый клиент рендерит стикер-only строку пустой (переходно, как attachment-only до
+  фазы 1); клиентская половина — space-client/CLAUDE.md).** Юзер-решения: гейт управления —
+  СУЩЕСТВУЮЩИЙ `MANAGE_EMOJIS` (один гейт на весь «каталог выражений», Discord
+  MANAGE_EXPRESSIONS-коллапс без нового бита); отправка стикера — только SEND_MESSAGES
+  (НЕ ATTACH_FILES — стикер не файловый аттач, как `:name:`-токен). **Ключевой дизайн:
+  стикер в сообщении ДЕНОРМАЛИЗОВАН** — `messages` += `sticker_name` (32) +
+  `sticker_file_key` (512), обе nullable, БЕЗ FK (dangling by design как replied_to_id):
+  toResponse остаётся «никогда не трогает репозитории» (пресайн = CPU, pinnedByName-идиома),
+  intra-instance forward копирует verbatim бесплатно, удаление стикера из каталога
+  деградирует старые строки в клиентский tombstone (тот же принятый трейдофф, что у эмодзи).
+  Wire (append-only): `CreateMessageRequest` += 5-е поле `Long stickerId`;
+  `MessageResponse` += 16-е поле `StickerRef{name,key,url}` (прямые конструкции в
+  DiscussionServiceTest/MessageServiceTest дописаны null-аргументом). **Три
+  content-or-X-гейта расширены** (create/edit/forward — «content, an attachment or a
+  sticker»; edit гейтит по `message.getStickerName()==null`, стикер неизменяем; forward:
+  полный копи несёт стикер, subset-ветка («forward the image») и кросс-инстанс — дропают,
+  клиент компенсирует ре-аплоадом картинки). `previewOf` (reply-цитаты): blank → аттач-name
+  → `[Sticker] name`. Search НЕ тронут (COALESCE-запрос: author-only паттерн '%%' матчит
+  пустой контент — стикер-only строки выживают, как attachment-only). **Сервер:**
+  `V7__stickers.sql` (sticker_packs + stickers c identity-блоками КАЖДАЯ; UNIQUE(name)
+  пака + UNIQUE(pack_id,name) стикера (имя уникально В ПАКЕ, не глобально) +
+  UNIQUE(file_key); FK pack без cascade — пак-удаление сносит строки явно, объекты
+  best-effort ПОСЛЕ; ALTER messages ×2). Сущности StickerPack/Sticker (кальки CustomEmoji),
+  репозитории (existsByFileKey/existsByPackIdAndName/findByPackId/findAllByOrderByNameAsc).
+  `StickerPackController` (/api/sticker-packs): GET — весь каталог паками с ВЛОЖЕННЫМИ
+  стикерами (2 запроса + in-memory group-by, без N+1), любой авторизованный; POST — гейт,
+  trim, existsByName→409, кап 20→400; DELETE /{id} — гейт, 404, стикеры → пак → объекты.
+  `StickerController` (/api/stickers): POST /slot (гейт + png/gif/webp → newStickerKey);
+  POST (пак 404, дубль-в-паке 409, кап 200→400, префикс stickers/→400, DIV→409);
+  DELETE /{id}. Пинги — bare-Long на `/topic/stickers` (интерсептор не трогаем — regex не
+  матчит). Сигнер ×3 += `newStickerKey`; `AttachmentObjectStore` += `listStickerObjects()`;
+  StorageGcService += ТРЕТИЙ sweep-цикл (та же grace/счётчики, existsByFileKey; конструктор
+  += StickerRepository); `/link`-OR += стикер-ключи (в контроллере). Стикер-ключи НЕ в
+  attachments-JSON → delete/deleteUnreferencedObjects не трогаем (жизненный цикл объекта
+  принадлежит каталогу). Тесты: StickerIntegrationTest (20 — полная лестница + сообщение со
+  stickerId денормализовано в ответе/истории/forward, unknown→404, edit пустым контентом
+  200, reply-preview, author-only search, линк-OR) + MessageServiceTest += юнит стикер-гейта
+  + StorageGcServiceTest.stickerSweep... — **355 тестов** (было 333).
 - [x] **СМОК-ФИКС: DISCUSSION-каналы утекали в DM-список (2026-09-24, юзер-репорт «фантомные
   DM с самим собой»; клиентская половина саги — space-client/CLAUDE.md).** `DmService.listMine`
   брал ВСЕ каналы участника (`findChannelIdsByUserId`) без фильтра типа — а трекинг обсуждений
