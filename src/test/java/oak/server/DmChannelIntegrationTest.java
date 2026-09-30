@@ -37,6 +37,9 @@ class DmChannelIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private TestInvites testInvites;
+
     @Test
     void openingDmReturnsChannelWithBothParticipants() throws Exception {
         String alice = register("alice");
@@ -124,7 +127,7 @@ class DmChannelIntegrationTest {
 
     private String register(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret\"}", username)))
+                        .content(testInvites.registrationBody(username, "supersecret")))
                 .andExpect(status().isCreated());
         return login(username);
     }

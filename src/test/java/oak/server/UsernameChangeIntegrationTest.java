@@ -46,6 +46,9 @@ class UsernameChangeIntegrationTest {
     private MockMvc mockMvc;
 
     @Autowired
+    private TestInvites testInvites;
+
+    @Autowired
     private RoleRepository roleRepository;
 
     @Autowired
@@ -163,7 +166,7 @@ class UsernameChangeIntegrationTest {
 
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
         return JsonPath.read(login(username, password).getResponse().getContentAsString(), "$.token");
     }

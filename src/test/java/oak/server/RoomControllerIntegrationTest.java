@@ -31,6 +31,9 @@ class RoomControllerIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private TestInvites testInvites;
+
     @Test
     void roomRequiresAuth() throws Exception {
         mockMvc.perform(get("/api/channels/1/room")).andExpect(status().isUnauthorized());
@@ -60,7 +63,7 @@ class RoomControllerIntegrationTest {
 
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))

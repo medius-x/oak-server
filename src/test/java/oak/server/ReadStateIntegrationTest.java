@@ -39,6 +39,9 @@ class ReadStateIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private TestInvites testInvites;
+
     @Test
     void snapshotCountsUnreadAndAckResetsIt() throws Exception {
         String alice = register("alice");              // OWNER
@@ -140,7 +143,7 @@ class ReadStateIntegrationTest {
 
     private String register(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret\"}", username)))
+                        .content(testInvites.registrationBody(username, "supersecret")))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret\"}", username)))

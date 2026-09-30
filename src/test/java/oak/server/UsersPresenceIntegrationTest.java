@@ -36,6 +36,9 @@ class UsersPresenceIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private TestInvites testInvites;
+
     @Test
     void listUsersReturnsRoster() throws Exception {
         registerAndLogin("alice", "supersecret");
@@ -62,7 +65,7 @@ class UsersPresenceIntegrationTest {
 
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))

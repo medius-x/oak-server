@@ -61,6 +61,8 @@ class PrivateChannelIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
     @Autowired
+    private TestInvites testInvites;
+    @Autowired
     private UserRepository userRepository;
     @Autowired
     private RoleRepository roleRepository;
@@ -440,7 +442,7 @@ class PrivateChannelIntegrationTest {
 
     private void register(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
     }
 

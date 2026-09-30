@@ -39,6 +39,9 @@ class UserAvatarIntegrationTest {
     private MockMvc mockMvc;
 
     @Autowired
+    private TestInvites testInvites;
+
+    @Autowired
     private UserRepository userRepository;
 
     @Test
@@ -100,7 +103,7 @@ class UserAvatarIntegrationTest {
 
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
         MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))

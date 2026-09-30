@@ -2,10 +2,12 @@ package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import oak.server.controller.InviteController;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.LoginRequest;
 import oak.server.dto.RegisterRequest;
 import oak.server.dto.UserResponse;
+import oak.server.entity.Invite;
 import oak.server.entity.RefreshToken;
 import oak.server.entity.Role;
 import oak.server.entity.RoleKind;
@@ -13,10 +15,12 @@ import oak.server.entity.User;
 import oak.server.repository.RefreshTokenRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
+import oak.server.repository.InviteRepository;
 import oak.server.security.JwtProperties;
 import oak.server.security.JwtTokenProvider;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
@@ -56,29 +60,73 @@ public class AuthService {
     private final JwtProperties jwtProperties;
     private final RoleRepository roleRepository;
     private final ReadStateService readStateService;
+    private final InviteRepository inviteRepository;
+    private final SimpMessagingTemplate messagingTemplate;
 
+    /**
+     * Registration. A FRESH instance (no users yet) bootstraps its OWNER with no secret —
+     * the pre-provisioning path; every later registration on a non-empty instance REQUIRES
+     * a valid unexpired invite secret. The single-use claim is an atomic guarded DELETE
+     * run AFTER the user INSERT: a lost race throws the 403 that rolls the whole tx back,
+     * so the just-inserted user goes away and the link is not spent by a failure (and the
+     * INSERT's own DIVE races die before the claim, never spending it). A spent link stops
+     * existing — repeating it reads as an unknown secret.
+     *
+     * <p>The nickname pre-check is unconditional even in the nickname-equals-login case: a
+     * login colliding with someone's NICKNAME would otherwise die on UNIQUE(nickname) with
+     * a misleading "Username already exists" (the users.email lesson, in message form).
+     */
     @Transactional
     public UserResponse register(RegisterRequest request) {
         if (userRepository.existsByUsername(request.username())) {
             throw conflict("Username already taken: " + request.username());
         }
+        String nickname = request.nickname() == null || request.nickname().isBlank()
+                ? request.username()
+                : request.nickname().trim();
+        if (userRepository.existsByNickname(nickname)) {
+            throw conflict("Nickname is already taken");
+        }
         // The first member of a fresh instance becomes the OWNER (the superuser); later members get
         // only @everyone by default. (RoleSeeder ensures the OWNER role already exists at startup.)
         boolean firstUser = userRepository.count() == 0;
+        String inviteSecret = request.inviteSecret() == null ? null : request.inviteSecret().trim();
+        boolean hasInviteSecret = inviteSecret != null && !inviteSecret.isEmpty();
+        if (!firstUser && !hasInviteSecret) {
+            throw forbidden("An invite link is required to register on this server");
+        }
+        if (!firstUser) {
+            // Human-readable pre-check; the authority against the registration race is the claim.
+            Invite invite = inviteRepository.findBySecret(inviteSecret)
+                    .orElseThrow(() -> forbidden("This invite link is not valid"));
+            if (!invite.isActive(Instant.now())) {
+                throw forbidden("This invite link has expired or was revoked");
+            }
+        }
         User user = new User(
                 request.username(),
                 passwordEncoder.encode(request.password()));
+        user.setNickname(nickname);
         User saved;
         try {
             saved = userRepository.save(user);
         } catch (DataIntegrityViolationException e) {
-            // Guards against the rare race between the exists-check and the INSERT
-            // (the unique constraint is the real authority).
+            // Guards against the rare race between the exists-checks and the INSERT
+            // (the unique constraints are the real authority).
             throw conflict("Username already exists");
         }
         if (firstUser) {
             // saved is effectively final here, so the lambda can capture it.
             roleRepository.findByKind(RoleKind.OWNER).ifPresent(ownerRole -> grantOwner(saved, ownerRole));
+        } else if (inviteRepository.claim(inviteSecret, Instant.now()) == 0) {
+            // Lost the single-use race (spent/revoked/expired between the pre-check and here).
+            // The 403 rolls the tx back — the user INSERT and the claim go away together.
+            throw forbidden("This invite link is not valid");
+        } else {
+            // A registration consumed a link: the admins' Invites list drops it live.
+            // AFTER COMMIT — an in-tx ping lets subscribers refetch before the claim
+            // is visible and the spent link would linger until the next refetch.
+            InviteController.publishPingAfterCommit(messagingTemplate);
         }
         // Seed read-state so the pre-existing archive is not "unread" on day one (Discord-faithful):
         // every existing channel's pointer starts at its current latest message.

@@ -75,6 +75,12 @@ public class ServerProfile {
     @Column(name = "storage_gc_enabled", columnDefinition = "boolean default true")
     private Boolean storageGcEnabled;
 
+    /** How long a freshly minted invite link accepts registrations (minutes). Retroactive
+     *  by user decision: changing it reschedules every ACTIVE invite to {@code createdAt + ttl}.
+     *  Null on rows predating the column resolves to the code default (1440 = one day). */
+    @Column(name = "invite_ttl_minutes", columnDefinition = "int default 1440")
+    private Integer inviteTtlMinutes;
+
     public ServerProfile(String name) {
         this.name = name;
     }

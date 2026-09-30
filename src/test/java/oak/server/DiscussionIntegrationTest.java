@@ -39,6 +39,8 @@ class DiscussionIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
     @Autowired
+    private TestInvites testInvites;
+    @Autowired
     private oak.server.repository.DiscussionRepository discussionRepository;
     @Autowired
     private oak.server.repository.ChannelRepository channelRepository;
@@ -421,7 +423,7 @@ class DiscussionIntegrationTest {
 
     private void register(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
     }
 

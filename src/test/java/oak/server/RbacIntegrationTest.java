@@ -48,6 +48,8 @@ class RbacIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
     @Autowired
+    private TestInvites testInvites;
+    @Autowired
     private UserRepository userRepository;
     @Autowired
     private RoleRepository roleRepository;
@@ -459,7 +461,7 @@ class RbacIntegrationTest {
 
     private void register(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(regBody(username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
     }
 
@@ -491,10 +493,6 @@ class RbacIntegrationTest {
         mockMvc.perform(put("/api/members/" + userId + "/roles").header("Authorization", "Bearer " + token)
                         .contentType(JSON).content("{\"roleIds\":[" + roleId + "]}"))
                 .andExpect(status().isOk());
-    }
-
-    private static String regBody(String username, String password) {
-        return String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password);
     }
 
     private static String loginBody(String username, String password) {

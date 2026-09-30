@@ -35,6 +35,9 @@ class StorageIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private TestInvites testInvites;
+
     @Test
     void endpointsAreGatedByManageStorage() throws Exception {
         registerAndLogin("the-owner"); // first account = OWNER — holds MANAGE_STORAGE implicitly
@@ -117,7 +120,7 @@ class StorageIntegrationTest {
 
     private String registerAndLogin(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret123\"}", username)))
+                        .content(testInvites.registrationBody(username, "supersecret123")))
                 .andExpect(status().isCreated());
         MvcResult result = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret123\"}", username)))

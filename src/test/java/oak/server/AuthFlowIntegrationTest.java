@@ -58,6 +58,9 @@ class AuthFlowIntegrationTest {
     @Autowired
     private RefreshTokenCleanup refreshTokenCleanup;
 
+    @Autowired
+    private TestInvites testInvites;
+
     @Test
     void register_returnsCreatedUserWithoutPasswordHash() throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
@@ -72,8 +75,13 @@ class AuthFlowIntegrationTest {
     void register_duplicateUsername_returns409() throws Exception {
         register("alice", "supersecret");
 
+        // A non-empty instance requires a secret; with a VALID one the duplicate login
+        // still reaches the username check (the invite stays unspent — the 409 precedes the claim).
+        String secret = testInvites.mint();
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(regBody("alice", "supersecret")))
+                        .content(String.format(
+                                "{\"username\":\"alice\",\"password\":\"supersecret\",\"inviteSecret\":\"%s\"}",
+                                secret)))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.status").value(409));
     }

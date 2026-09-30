@@ -324,6 +324,87 @@ oak.server
   юнита (+`@Mock EmojiRepository`, unused-mock легален под STRICT_STUBS — существующие
   built-in-юниты не тронуты: countDistinct на моке дефолтит в 0) — **365 тестов (было
   355)**.
+- [x] **Инвайт-регистрация: регистрация на непустом инстансе ТОЛЬКО по одноразовым
+  пригласительным ссылкам + секция Invites (2026-09-30, ДЕПЛОЙ ПАРНЫЙ со space-client;
+  смоук pending).** Юзер-решения: открытая регистрация ЗАКРЫВАЕТСЯ — непустой инстанс
+  требует валидный секрет, пустой по-прежнему регистрирует ПЕРВОГО юзера (OWNER) без
+  секрета (bootstrap-путь живёт до client provisioning — backlog); TTL РЕТРОАКТИВЕН
+  (смена пересчитывает `expires_at = created_at + TTL` всех активных; при создании
+  `expires_at = created_at + TTL`); список — ТОЛЬКО активные (used/expired/revoked
+  строки остаются в таблице как аудит одноразовых секретов, чистка не нужна — одна
+  строка на регистрацию). **Миграция `V9__invites.sql`** (таблица invites с
+  ОБЯЗАТЕЛЬНЫМ identity-блоком + `server_profile.invite_ttl_hours int default 24`).
+  **Сервер:** `Invite` entity (secret plaintext — Copy в UI должен пересобирать ссылку,
+  в отличие от хешируемых refresh; `isActive(now)`), `InviteRepository` (`findActive`
+  join fetch createdBy; **`claim` — атомарный одноразовый захват**: `@Modifying
+  UPDATE ... WHERE secret=? AND revoked=false AND used=false AND expiresAt>now`,
+  clearAutomatically/flushAutomatically — грабля stale persistence context; 0 строк =
+  проигрыш гонки), `InviteController` (DiscussionController-идиома: НЕТ классового
+  @RequestMapping, полные пути на методах — 5 эндпоинтов: GET/POST `/api/invites`,
+  DELETE `/api/invites/{id}` (404 только для несуществующего id; существующей
+  неактивной — идемпотентный 204), POST `/api/invites/expire-all`, **PUT
+  `/api/server/invite-settings`** — живёт ЗДЕСЬ, не в ServerProfileController: TTL —
+  домен Invites с гейтом MANAGE_MEMBERS, а не MANAGE_SERVER; `ServerProfileResponse`
+  не тронут вовсе). Гейт всех мутаций+чтения — `requireServer(MANAGE_MEMBERS)` (юзер-
+  решение «кто может добавлять членов — тот раздаёт ссылки»). Секрет: 24 байта
+  SecureRandom → base64url 32 символа (newRawToken-идиома), DIVE-реген ×1. **Link
+  собирает сервер**: `http://<host>:<port>/#invite=<secret>`; host/port из advertised
+  `ServerProfile.connectionHost/Port`, при незаданных — Host-заголовок запроса (за
+  reverse-proxy даст прокси-имя — правильный фикс заполнить advertised через PATCH
+  /api/server/connection); схема ВСЕГДА http (профиля схемы нет — TLS = будущий
+  provisioning). `InviteResponse` несёт secretPreview (8 симв + «…», полный секрет на
+  провод НЕ отдаём — Copy копирует link; все поля non-null, грабля jsonPath-null) +
+  `InvitesStatusResponse{ttlHours, invites}` одним GET. Ретро-TTL — load+loop
+  (`expiresAt = createdAt.plus(ttl)`, НЕ JPQL Duration-арифметика — диалект-риск на
+  H2). WS-пинг bare-Long на `/topic/invites` после каждой мутации (клиент в v1 не
+  подписан — задел; топик вне regex ChannelSubscriptionInterceptor). **Register
+  (`AuthService.register`, порядок операций = сердце атомарности):** предчек username
+  409 → nickname (blank→username; безусловный предчек `existsByNickname` 409
+  «Nickname is already taken» — чинит латентную граблю: username, совпавший с ЧУЖИМ
+  ником, умирал на UNIQUE(nickname) DIVE с ложным «Username already exists») →
+  firstUser=count==0 → `!firstUser && секрета нет` → 403 → findBySecret-предчек
+  (человекочитаемая причина) → save юзера (DIVE→409, секрет ещё не расходован) →
+  firstUser ? grantOwner (секрет игнорируется) : `claim(...)==0` → 403, ResponseStatus-
+  Exception откатывает tx ВМЕСТЕ с INSERT юзера (claim ПОСЛЕ save — нужен id для
+  used_by; DIVE-гонки умирают до claim). `RegisterRequest` += 3-м/4-м полями (wire
+  append-only): `nickname` (`[\p{L}\p{N}_-]*` — грамматика RenameMemberRequest),
+  `inviteSecret`. **Тесты:** НОВЫЙ `InviteIntegrationTest` (16: bootstrap-201; 403 без
+  секрета; happy-ник; одноразовость; expired/revoked/unknown 403; плебей 5×403; формат
+  link (сидер даёт advertised localhost:8080 — link предсказуем); Host-fallback;
+  только активные; expire-all; TTL штамп+ретро; 0/721/null 400; ник-конфликт 409;
+  username==чужой-ник → честный 409) + `TestInvites` (тестовый @Component в
+  oak.server-пакете test-дерева — поднимается во ВСЕХ @SpringBootTest; mint инвайта
+  репозиторием + `registrationBody(username,password)`: пустой сервер → 2-поле тело
+  (OWNER-bootstrap, семантика «первый юзер теста = OWNER» сохранена для 403-кейсов),
+  непустой → +inviteSecret) — правка хелпера `registerAndLogin` в 22 тестовых файлах
+  (30 замен) + `AuthFlowIntegrationTest.register_duplicateUsername` (дубль теперь
+  обязан нести валидный секрет — иначе 403 раньше 409). **Живой старт: V9 применена,
+  validate чист** (миграция исполняется до web-старта; фоновый прогон упал только на
+  «Port 8080 already in use» — на порту живёт старый билд, для смоука обязателен
+  рестарт). — **381 тестов (было 365)**. Клиентская половина — space-client/CLAUDE.md.
+  **Раунд 2 (тот же день, смоук-репорты юзера; ДЕПЛОЙ ПАРНЫЙ):** (1) **TTL в МИНУТАХ**
+  (`V10__invite_ttl_minutes.sql`: `UPDATE … * 60` ДО rename — строки сохраняют спан;
+  `invite_ttl_minutes int default 1440`; wire `ttlMinutes` везде, `@Min(1)@Max(525600)`
+  = год; юзер-решение: поле задаётся в минутах, клиент рендерит живой перевод словами).
+  (2) **Пинги только AFTER COMMIT** (`publishPingAfterCommit`, public static — зовётся и
+  из `AuthService`): пинг внутри tx позволял подписчикам рефетчнуть ДО видимости мутации
+  (снапшот читал старое состояние — расход ссылки «не исчезал до перезахода», юзер-репорт);
+  `AuthService.register` после успешного claim пингует `/topic/invites` — списки админов
+  теряют потраченную ссылку live. Тесты: InviteIntegrationTest переведён на ttlMinutes
+  (плебей-PUT обязан нести ВАЛИДНОЕ тело — @Valid-400 срабатывает РАНЬШЕ гейта 403).
+  **Раунд 3 (юзер-решения, 2026-10-01):** (а) **использованные инвайты удаляются
+  НЕМЕДЛИТЕННО** — claim стал атомарным guarded **DELETE** (`InviteRepository.claim`
+  возвращает число удалённых строк; 0 = гонка проиграна → 403, rollback откатывает
+  INSERT юзера); повтор потраченной ссылки читается как «not valid». Колонки
+  used/used_by/used_at стали не нужны — `V11__drop_invite_used.sql` дропает их,
+  сущность/запросы упрощены (`isActive = !revoked && expiresAt>now`; findActive/
+  revokeAllActive без used-условий; revokeAllActive получил now-параметр).
+  (б) **`InvitesCleanup`** (`@Scheduled fixedDelayString oak.invites.cleanup-interval:PT6H`,
+  калька RefreshTokenCleanup вкл. @Transactional-на-scheduled-методе — self-invocation-
+  правило): сносит revoked/expired-строки (`deleteInactive` — никогда не станут
+  активными); потраченных к моменту чистки уже не существует. Тест:
+  InvitesCleanupTest (scheduled-вход без @Transactional; revoked+expired+active →
+  выживают только активные). — **382 тестов**.
 - [x] **СМОК-ФИКС: DISCUSSION-каналы утекали в DM-список (2026-09-24, юзер-репорт «фантомные
   DM с самим собой»; клиентская половина саги — space-client/CLAUDE.md).** `DmService.listMine`
   брал ВСЕ каналы участника (`findChannelIdsByUserId`) без фильтра типа — а трекинг обсуждений

@@ -1,6 +1,7 @@
 package oak.server.service;
 
 import com.jayway.jsonpath.JsonPath;
+import oak.server.TestInvites;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -34,6 +35,8 @@ class StoragePurgeFlowTest {
 
     @Autowired
     private MockMvc mockMvc;
+    @Autowired
+    private TestInvites testInvites;
     @Autowired
     private StorageGcService storageGcService;
     @Autowired
@@ -98,7 +101,7 @@ class StoragePurgeFlowTest {
 
     private String registerAndLogin(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret123\"}", username)))
+                        .content(testInvites.registrationBody(username, "supersecret123")))
                 .andExpect(status().isCreated());
         MvcResult result = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret123\"}", username)))

@@ -47,6 +47,8 @@ class DmPlumbingIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
     @Autowired
+    private TestInvites testInvites;
+    @Autowired
     private ChannelRepository channelRepository;
     @Autowired
     private ChannelParticipantRepository participantRepository;
@@ -171,7 +173,7 @@ class DmPlumbingIntegrationTest {
 
     private String register(String username) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret\"}", username)))
+                        .content(testInvites.registrationBody(username, "supersecret")))
                 .andExpect(status().isCreated());
         return login(username);
     }

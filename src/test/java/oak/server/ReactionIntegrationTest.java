@@ -44,6 +44,9 @@ class ReactionIntegrationTest {
     private MockMvc mockMvc;
 
     @Autowired
+    private TestInvites testInvites;
+
+    @Autowired
     private oak.server.repository.UserRepository userRepository;
 
     @Autowired
@@ -430,14 +433,14 @@ class ReactionIntegrationTest {
 
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
         return login(username, password);
     }
 
     private void register(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
     }
 

@@ -34,6 +34,9 @@ class MessageIdempotencyIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
 
+    @Autowired
+    private TestInvites testInvites;
+
     /** The DB rolls back between tests, but this in-memory map does NOT — clear it or the next
      *  test's "fresh" key replays a message whose row is already gone. */
     @Autowired
@@ -106,7 +109,7 @@ class MessageIdempotencyIntegrationTest {
 
     private String registerAndLogin(String username, String password) throws Exception {
         mockMvc.perform(post("/api/auth/register").contentType(JSON)
-                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
+                        .content(testInvites.registrationBody(username, password)))
                 .andExpect(status().isCreated());
         MvcResult result = mockMvc.perform(post("/api/auth/login").contentType(JSON)
                         .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}", username, password)))
