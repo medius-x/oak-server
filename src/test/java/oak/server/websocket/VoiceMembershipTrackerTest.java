@@ -84,6 +84,73 @@ class VoiceMembershipTrackerTest {
     }
 
     @Test
+    void moveRePointsEverySessionLeftOldJoinedNew() {
+        tracker.enter("s1", "alice", CHANNEL_A); // JOINED A
+        tracker.enter("s2", "alice", CHANNEL_A); // second session, no event
+        tracker.enter("s3", "bob", CHANNEL_A);   // JOINED A (a bystander stays put)
+
+        tracker.move(CHANNEL_A, CHANNEL_B, "alice"); // the AFK sweep
+
+        // Both of alice's sessions re-pointed: bob keeps room A alone, alice lives in B.
+        // Event order follows the refcounts: the FIRST re-point opens B (0→1 → JOINED B),
+        // the SECOND closes A (1→0 → LEFT A) — one LEFT and one JOINED in total.
+        List<VoiceMemberEvent> events = captureEvents(4);
+        assertEquals(VoiceMemberStatus.JOINED, events.get(2).status());
+        assertEquals(CHANNEL_B, events.get(2).channelId());
+        assertEquals("alice", events.get(2).username());
+        assertEquals(VoiceMemberStatus.LEFT, events.get(3).status());
+        assertEquals(CHANNEL_A, events.get(3).channelId());
+        assertEquals("alice", events.get(3).username());
+        assertEquals(List.of("bob"), usernamesIn(CHANNEL_A));
+        assertEquals(List.of("alice"), usernamesIn(CHANNEL_B));
+    }
+
+    @Test
+    void moveOfAMemberInNoRoomIsANoOp() {
+        tracker.enter("s1", "bob", CHANNEL_A);
+
+        tracker.move(CHANNEL_A, CHANNEL_B, "carol");
+
+        verify(messagingTemplate, times(1)).convertAndSend(eq(VOICE_TOPIC), any(VoiceMemberEvent.class));
+        assertEquals(List.of("bob"), usernamesIn(CHANNEL_A));
+    }
+
+    @Test
+    void clearModeratorMutesLiftsEveryModMuteInTheChannelIncludingAbsentMembers() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setSelfMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "alice", true);
+        // bob LEFT the channel long ago — his surviving mark must still be lifted, or the
+        // join-time re-seed would resurrect his mute forever (the AFK designation leaving).
+        tracker.enter("s2", "bob", CHANNEL_A);
+        tracker.setMuted(CHANNEL_A, "bob", true);
+        tracker.exit("s2");
+
+        tracker.clearModeratorMutes(CHANNEL_A);
+
+        // alice's own self-mute SURVIVES (only the moderator layer is the AFK policy's),
+        // so her union stays muted — the published state tells the two layers apart;
+        // bob's lift publishes a fully open mouth. Re-seeds add their own pushes, so
+        // assert on each member's LAST published state.
+        ArgumentCaptor<VoiceControlState> states = ArgumentCaptor.forClass(VoiceControlState.class);
+        verify(messagingTemplate, org.mockito.Mockito.atLeast(5)).convertAndSend(eq(VOICE_STATE_TOPIC), states.capture());
+        VoiceControlState aliceLift = lastStateFor(states.getAllValues(), "alice");
+        VoiceControlState bobLift = lastStateFor(states.getAllValues(), "bob");
+        assertTrue(aliceLift.selfMuted());
+        assertFalse(aliceLift.modMuted());
+        assertTrue(aliceLift.muted()); // the union keeps her own self-mute
+        assertFalse(bobLift.muted());
+    }
+
+    /** The member's last published voice state — what a client would be left holding. */
+    private static VoiceControlState lastStateFor(java.util.List<VoiceControlState> states, String username) {
+        return states.stream()
+                .filter(state -> state.username().equals(username))
+                .reduce((first, second) -> second)
+                .orElseThrow();
+    }
+
+    @Test
     void switchingChannelsPublishesLeftThenJoined() {
         tracker.enter("s1", "alice", CHANNEL_A); // JOINED A
         tracker.enter("s1", "alice", CHANNEL_B); // LEFT A + JOINED B

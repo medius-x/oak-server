@@ -66,6 +66,18 @@ class AuthChannelInterceptorTest {
     }
 
     @Test
+    void connectWithRemovedAccountIsRejected() {
+        // A removed member's still-valid access JWT must not open a real-time channel either.
+        User removed = new User("alice", "hash");
+        removed.setRemoved(true);
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(removed));
+        String token = tokenProvider.generateToken("alice");
+        assertThrows(MessageDeliveryException.class,
+                () -> interceptor.preSend(stompMessage(StompCommand.CONNECT,
+                        Map.of(HttpHeaders.AUTHORIZATION, "Bearer " + token)), null));
+    }
+
+    @Test
     void nonConnectFramesPassThroughUnchanged() {
         Message<?> subscribe = stompMessage(StompCommand.SUBSCRIBE, Map.of());
         assertDoesNotThrow(() -> interceptor.preSend(subscribe, null));

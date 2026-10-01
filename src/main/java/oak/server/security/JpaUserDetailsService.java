@@ -26,6 +26,6 @@ public class JpaUserDetailsService implements UserDetailsService {
     }
 
     private UserDetails toUserDetails(User user) {
-        return new PrincipalUser(user.getUsername(), user.getPasswordHash(), user.isBanned());
+        return new PrincipalUser(user.getUsername(), user.getPasswordHash(), user.isBanned(), user.isRemoved());
     }
 }

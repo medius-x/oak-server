@@ -165,6 +165,27 @@ public class VoiceMembershipTracker {
     /** Force-removes every session of {@code username} from {@code channelId} (a kick): each is exited,
      *  which publishes a {@code LEFT} on the 1&rarr;0 transition exactly like a voluntary leave. */
     public void kick(Long channelId, String username) {
+        for (String sessionId : sessionsOf(channelId, username)) {
+            exit(sessionId); // exit re-acquires the lock + publishes LEFT outside it
+        }
+    }
+
+    /**
+     * Moves every session of {@code username} from one channel to another (the AFK sweep):
+     * each session is re-entered into the target, which publishes {@code LEFT} for the old
+     * room and {@code JOINED} for the new one on their 0&harr;1 boundaries and re-seeds the
+     * new room's mute/deafen marks (moderator marks survive by design; the self marks died
+     * with the leave). A repeat move to the same pair is a no-op ({@code enter}'s duplicate
+     * join guard).
+     */
+    public void move(Long fromChannelId, Long toChannelId, String username) {
+        for (String sessionId : sessionsOf(fromChannelId, username)) {
+            enter(sessionId, username, toChannelId);
+        }
+    }
+
+    /** The member's live sessions in a channel — collected under the lock (kick()'s scan). */
+    private List<String> sessionsOf(Long channelId, String username) {
         List<String> sessions = new ArrayList<>();
         synchronized (lock) {
             for (Map.Entry<String, String> entry : sessionToUsername.entrySet()) {
@@ -173,7 +194,22 @@ public class VoiceMembershipTracker {
                 }
             }
         }
-        sessions.forEach(this::exit); // exit re-acquires the lock + publishes LEFT outside it
+        return sessions;
+    }
+
+    /**
+     * Lifts EVERY moderator mute in a channel, publishing each lift (the AFK designation
+     * leaving the channel — the channel-wide suppression dies with it, including for
+     * members NOT currently sitting there, whose surviving mark the join-time re-seed
+     * would otherwise resurrect forever). Only the plain mod-mute is touched: implied
+     * marks belong to moderator deafens, which this knows nothing about.
+     */
+    public void clearModeratorMutes(Long channelId) {
+        Set<String> muted;
+        synchronized (lock) {
+            muted = new java.util.HashSet<>(modMutedByChannel.getOrDefault(channelId, Set.of()));
+        }
+        muted.forEach(username -> setMuted(channelId, username, false));
     }
 
     private void publishStateIfChanged(boolean changed, Long channelId, String username) {

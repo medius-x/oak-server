@@ -21,7 +21,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * Member management — the management roster (members + roles), role assignment, kick, ban / unban.
+ * Member management — the management roster (members + roles), role assignment, remove, ban / unban.
  * List is open; mutations require the matching permission (+ hierarchy), enforced in
  * {@link MemberService}. Distinct from the presence roster ({@code GET /api/users}).
  */
@@ -65,10 +65,12 @@ public class MemberController {
         return memberService.resetNickname(userId, principal.getUsername());
     }
 
-    @PostMapping("/{userId}/kick")
-    public void kick(@PathVariable Long userId,
-                     @AuthenticationPrincipal UserDetails principal) {
-        memberService.kick(userId, principal.getUsername());
+    /** "Remove from server" — permanent (the reworked kick): the account is anonymized and can never
+     *  rejoin. KICK_MEMBERS + hierarchy, enforced in {@link MemberService}. */
+    @PostMapping("/{userId}/remove")
+    public void remove(@PathVariable Long userId,
+                       @AuthenticationPrincipal UserDetails principal) {
+        memberService.remove(userId, principal.getUsername());
     }
 
     @PostMapping("/{userId}/ban")

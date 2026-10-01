@@ -31,6 +31,8 @@ public class VoiceMembershipHandler {
     private final VoiceMembershipTracker tracker;
     private final AuthorizationService auth;
     private final ChannelRepository channelRepository;
+    private final VoiceActivityRegistry activityRegistry;
+    private final AfkVoicePolicy afkVoicePolicy;
 
     @MessageMapping("/voice.join")
     public void join(VoiceCommand command, Principal sender, @Header("simpSessionId") String sessionId) {
@@ -49,6 +51,10 @@ public class VoiceMembershipHandler {
             return;
         }
         tracker.enter(sessionId, sender.getName(), command.channelId());
+        // Joining is itself activity — the AFK clock starts NOW, not at the last heartbeat.
+        activityRegistry.touch(sender.getName());
+        // The AFK room suppresses everyone in it (swept or joined by hand) — Discord semantics.
+        afkVoicePolicy.applyOnEnter(sender.getName(), command.channelId());
     }
 
     @MessageMapping("/voice.leave")

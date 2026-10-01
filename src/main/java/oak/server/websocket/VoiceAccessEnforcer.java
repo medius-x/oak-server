@@ -89,18 +89,7 @@ public class VoiceAccessEnforcer {
      * only their rooms are worth a database look.
      */
     public void enforceConnectForUser(String username, String actorUsername) {
-        Set<Long> channelIds = new TreeSet<>();
-        for (VoiceChannelMembersDto room : tracker.snapshot()) {
-            if (room.usernames().contains(username)) {
-                channelIds.add(room.channelId());
-            }
-        }
-        for (Map.Entry<Long, List<String>> room : voiceAccess.tokenHoldersByChannel().entrySet()) {
-            if (room.getValue().contains(username)) {
-                channelIds.add(room.getKey());
-            }
-        }
-        for (Long channelId : channelIds) {
+        for (Long channelId : occupiedChannels(username)) {
             channelRepository.findById(channelId).ifPresent(channel ->
                     evictIfLostConnect(channel, username, actorUsername));
         }
@@ -137,6 +126,18 @@ public class VoiceAccessEnforcer {
     }
 
     /**
+     * Force-removes {@code username} from EVERY room they occupy (union of the STOMP registry and the
+     * Janus token registry) — the member-removal hook. No permission recheck and no database access:
+     * a removed account's CONNECT resolution is moot ({@link #kickAll}'s stance). The victim receives
+     * both the KICKED voice-control push and the member.kick push — both tear down, harmlessly.
+     */
+    public void evictEverywhere(String username, String actorUsername) {
+        for (Long channelId : occupiedChannels(username)) {
+            forceLeave(channelId, username, actorUsername);
+        }
+    }
+
+    /**
      * The shared forced-exit recipe (registry truth first, then the forced layers, then the
      * cooperative push so an honest client tears down gracefully): exits every STOMP session of the
      * user in the channel (&rarr; {@code LEFT} on {@code /topic/voice} on the 1&rarr;0 boundary),
@@ -168,6 +169,22 @@ public class VoiceAccessEnforcer {
     /** Usernames still holding a live gateway token for the channel — the non-STOMP half of the sweep. */
     private List<String> liveTokenHolders(Long channelId) {
         return voiceAccess.tokenHoldersByChannel().getOrDefault(channelId, List.of());
+    }
+
+    /** Every channel the member occupies in EITHER registry — the shared scope of the per-member sweeps. */
+    private Set<Long> occupiedChannels(String username) {
+        Set<Long> channelIds = new TreeSet<>();
+        for (VoiceChannelMembersDto room : tracker.snapshot()) {
+            if (room.usernames().contains(username)) {
+                channelIds.add(room.channelId());
+            }
+        }
+        for (Map.Entry<Long, List<String>> room : voiceAccess.tokenHoldersByChannel().entrySet()) {
+            if (room.getValue().contains(username)) {
+                channelIds.add(room.getKey());
+            }
+        }
+        return channelIds;
     }
 
     /** Stays if the member still resolves and holds CONNECT (the VIEW master gate included). */

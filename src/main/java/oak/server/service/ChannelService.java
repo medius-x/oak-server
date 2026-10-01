@@ -17,6 +17,8 @@ import oak.server.repository.ChannelRepository;
 import oak.server.repository.ChannelRoleOverrideRepository;
 import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.MessageRepository;
+import oak.server.repository.ServerProfileRepository;
+import oak.server.entity.ServerProfile;
 import oak.server.websocket.VoiceAccessEnforcer;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -63,6 +65,7 @@ public class ChannelService {
     private final VoiceAccessEnforcer voiceEnforcer;
     private final JanusVoiceAccessService voiceAccess;
     private final DiscussionService discussionService;
+    private final ServerProfileRepository profileRepository;
 
     /**
      * The channel list AS SEEN BY ONE VIEWER: channels the member cannot VIEW (hidden) are omitted
@@ -79,13 +82,14 @@ public class ChannelService {
         // the discussion endpoints (a tile under the origin message / the tracked list).
         List<Channel> channels = channelRepository.findByTypeNotInOrderByPositionAscIdAsc(
                 List.of(ChannelType.DM, ChannelType.GROUP_DM, ChannelType.DISCUSSION));
+        Long afkChannelId = profileRepository.singleton().getAfkChannelId();
         List<ChannelResponse> visible = new ArrayList<>(channels.size());
         for (Channel channel : channels) {
             // A CATEGORY is a pure container — it is always visible (the mask machinery has
             // nothing to resolve on it) and never locked; the client hides a category whose
             // children are all filtered out for this viewer.
             if (channel.getType() == ChannelType.CATEGORY) {
-                visible.add(ChannelResponse.from(channel, false));
+                visible.add(ChannelResponse.from(channel, false, false));
                 continue;
             }
             // One mask per channel covers both the visibility filter and the locked flag (the
@@ -94,7 +98,8 @@ public class ChannelService {
             if (!Permissions.has(mask, Permission.VIEW_CHANNEL)) {
                 continue;
             }
-            visible.add(ChannelResponse.from(channel, lockedFor(channel, mask)));
+            visible.add(ChannelResponse.from(channel, lockedFor(channel, mask),
+                    channel.getId().equals(afkChannelId)));
         }
         return visible;
     }
@@ -131,10 +136,12 @@ public class ChannelService {
         channel.setName(name.trim());
         channel = channelRepository.save(channel);
         messagingTemplate.convertAndSend(CHANNELS_CHANGED_TOPIC, System.currentTimeMillis());
-        // A renamed CATEGORY answers unlocked (the list's container rule).
+        // A renamed CATEGORY answers unlocked (the list's container rule); the AFK flag
+        // rides along so an optimistic update keeps it.
+        boolean afk = channel.getId().equals(profileRepository.singleton().getAfkChannelId());
         return ChannelResponse.from(channel, channel.getType() == ChannelType.CATEGORY
                 ? false
-                : lockedFor(channel, auth.resolveChannelMask(actor, channel)));
+                : lockedFor(channel, auth.resolveChannelMask(actor, channel)), afk);
     }
 
     @Transactional
@@ -289,6 +296,14 @@ public class ChannelService {
         if (channel.getType() == ChannelType.CATEGORY && channelRepository.existsByParentId(channelId)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Category is not empty — move or delete its channels first");
+        }
+        // Deleting the configured AFK channel disables the AFK sweep (the setting points
+        // at a bare id with no FK — the code owns the reset). Also before the evictions,
+        // for the same 400-must-not-mutate reason.
+        ServerProfile profile = profileRepository.singleton();
+        if (channelId.equals(profile.getAfkChannelId())) {
+            profile.setAfkChannelId(null);
+            profileRepository.save(profile);
         }
         // Evict every live voice session BEFORE destroying the channel's data: the LEFT/KICKED pushes
         // then reference a channel that still exists for concurrent readers, and a later FK/rollback

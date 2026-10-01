@@ -147,6 +147,9 @@ public class AuthService {
                     new UsernamePasswordAuthenticationToken(request.username(), request.password()));
             User user = userRepository.findByUsername(authentication.getName())
                     .orElseThrow(() -> unauthorized("Invalid username or password"));
+            if (user.isRemoved()) {
+                throw forbidden("This account was removed from the server");
+            }
             if (user.isBanned()) {
                 throw forbidden("This account is banned");
             }
@@ -191,6 +194,18 @@ public class AuthService {
                         .forEach(token -> token.setRevoked(true));
             }
             throw unauthorized("Refresh token reused — token family revoked");
+        }
+        if (stored.getUser().isRemoved()) {
+            // A removed account must not rotate tokens — the removal already renamed the account, so the
+            // subject of any access JWT is dead anyway; refuse and revoke the family to stop the churn
+            // (noRollbackFor keeps the revoke, same as the reuse branch above).
+            String familyId = stored.getFamilyId();
+            log.warn("[auth-refresh] REMOVED — user={} family={} presentedId={} from {}: family revoked",
+                    stored.getUser().getUsername(), familyId, stored.getId(), remoteAddress());
+            if (familyId != null) {
+                refreshTokenRepository.findByFamilyId(familyId).forEach(token -> token.setRevoked(true));
+            }
+            throw unauthorized("This account was removed from the server");
         }
         if (stored.getUser().isBanned()) {
             // A banned account must not rotate tokens — every access JWT is already 401'd by the filter,

@@ -131,7 +131,7 @@ class RbacIntegrationTest {
     }
 
     @Test
-    void hierarchy_ownerImmune_memberCannotKickOwner() throws Exception {
+    void hierarchy_ownerImmune_memberCannotRemoveOwner() throws Exception {
         String ownerToken = registerAndLogin("alice", "supersecret");
         register("bob", "supersecret");
         Long bobId = userRepository.findByUsername("bob").orElseThrow().getId();
@@ -142,11 +142,11 @@ class RbacIntegrationTest {
 
         String bobToken = login("bob", "supersecret");
         // bob has KICK_MEMBERS but cannot act on the OWNER (hierarchy) -> 403
-        mockMvc.perform(post("/api/members/" + ownerId + "/kick").header("Authorization", "Bearer " + bobToken))
+        mockMvc.perform(post("/api/members/" + ownerId + "/remove").header("Authorization", "Bearer " + bobToken))
                 .andExpect(status().isForbidden());
 
-        // owner can kick bob -> 200
-        mockMvc.perform(post("/api/members/" + bobId + "/kick").header("Authorization", "Bearer " + ownerToken))
+        // owner can remove bob -> 200
+        mockMvc.perform(post("/api/members/" + bobId + "/remove").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk());
     }
 

@@ -81,6 +81,18 @@ public class ServerProfile {
     @Column(name = "invite_ttl_minutes", columnDefinition = "int default 1440")
     private Integer inviteTtlMinutes;
 
+    /** The AFK sweep's target room — idle voice members are moved here after the timeout.
+     *  Null (or a channel that no longer exists / is not VOICE) disables the sweep. A bare
+     *  id with NO FK on purpose: the channel-deleted reset is enforced in code
+     *  (ChannelService.delete), and the H2 test schema regenerates from entities anyway. */
+    @Column(name = "afk_channel_id")
+    private Long afkChannelId;
+
+    /** How long a voice member may stay idle before the AFK sweep moves them (minutes).
+     *  Null on rows predating the column resolves to the code default (30). */
+    @Column(name = "afk_timeout_minutes", columnDefinition = "int default 30")
+    private Integer afkTimeoutMinutes;
+
     public ServerProfile(String name) {
         this.name = name;
     }

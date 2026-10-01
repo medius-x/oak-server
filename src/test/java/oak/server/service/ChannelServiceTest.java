@@ -4,6 +4,7 @@ import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
+import oak.server.entity.ServerProfile;
 import oak.server.entity.User;
 import oak.server.repository.ChannelParticipantRepository;
 import oak.server.repository.ChannelReadStateRepository;
@@ -25,6 +26,8 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -69,6 +72,8 @@ class ChannelServiceTest {
     private VoiceAccessEnforcer voiceEnforcer;
     @Mock
     private JanusVoiceAccessService voiceAccess;
+    @Mock
+    private oak.server.repository.ServerProfileRepository profileRepository;
 
     @InjectMocks
     private ChannelService channelService;
@@ -109,6 +114,7 @@ class ChannelServiceTest {
         channel.setId(42L);
         when(channelRepository.findById(42L)).thenReturn(Optional.of(channel));
         when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+        when(profileRepository.singleton()).thenReturn(new ServerProfile("srv"));
 
         channelService.delete(42L, "alice");
 
@@ -119,6 +125,40 @@ class ChannelServiceTest {
         order.verify(voiceAccess).destroyRoom(42L);
         order.verify(messageRepository).deleteByChannelId(42L);
         verify(messagingTemplate).convertAndSend(eq(ChannelService.CHANNELS_DELETED_TOPIC), eq(42L));
+    }
+
+    @Test
+    void deleteOfTheConfiguredAfkChannelResetsTheSetting() {
+        // Deleting the AFK target disables the sweep: the setting points at a bare id with
+        // no FK, so the reset is this code's job.
+        Channel channel = new Channel("afk", ChannelType.VOICE);
+        channel.setId(42L);
+        when(channelRepository.findById(42L)).thenReturn(Optional.of(channel));
+        when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+        ServerProfile profile = new ServerProfile("srv");
+        profile.setAfkChannelId(42L);
+        when(profileRepository.singleton()).thenReturn(profile);
+
+        channelService.delete(42L, "alice");
+
+        assertNull(profile.getAfkChannelId());
+        verify(profileRepository).save(profile);
+    }
+
+    @Test
+    void deleteOfANonAfkChannelLeavesTheSettingAlone() {
+        Channel channel = new Channel("temp", ChannelType.VOICE);
+        channel.setId(43L);
+        when(channelRepository.findById(43L)).thenReturn(Optional.of(channel));
+        when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+        ServerProfile profile = new ServerProfile("srv");
+        profile.setAfkChannelId(42L);
+        when(profileRepository.singleton()).thenReturn(profile);
+
+        channelService.delete(43L, "alice");
+
+        assertEquals(42L, profile.getAfkChannelId());
+        verify(profileRepository, never()).save(any(ServerProfile.class));
     }
 
     @Test
@@ -143,11 +183,13 @@ class ChannelServiceTest {
         when(channelRepository.findById(42L)).thenReturn(Optional.of(channel));
         when(channelRepository.save(any(Channel.class))).thenReturn(channel);
         when(auth.resolveChannelMask(actor, channel)).thenReturn(0L); // no CONNECT → locked
+        when(profileRepository.singleton()).thenReturn(new ServerProfile("srv")); // no AFK channel
 
         ChannelResponse response = channelService.rename(42L, "  lounge  ", "alice");
 
         assertEquals("lounge", response.name());
         assertTrue(response.locked(), "the response carries the actor's own locked flag");
+        assertFalse(response.afk());
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
     }

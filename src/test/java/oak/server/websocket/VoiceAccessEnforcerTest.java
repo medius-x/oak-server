@@ -220,6 +220,40 @@ class VoiceAccessEnforcerTest {
     }
 
     @Test
+    void evictEverywhereForceLeavesEveryRoomOfTheUserFromBothRegistries() {
+        // The member-removal hook: the victim sits in room 7 (tracker) and holds a token for room
+        // 8 — both rooms force-leave them, with no permission lookup and no database roundtrip.
+        when(tracker.snapshot()).thenReturn(List.of(
+                new VoiceChannelMembersDto(7L, List.of("victim", "bystander")),
+                new VoiceChannelMembersDto(9L, List.of("bystander"))));
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of(8L, List.of("victim")));
+
+        enforcer.evictEverywhere("victim", "admin");
+
+        verify(tracker).kick(7L, "victim");
+        verify(voiceAccess).forceKick(7L, "victim");
+        verify(voiceAccess).revokeTokens(7L, "victim");
+        verify(tracker).kick(8L, "victim");
+        verify(voiceAccess).forceKick(8L, "victim");
+        verify(voiceAccess).revokeTokens(8L, "victim");
+        verify(tracker, never()).kick(9L, "bystander");
+        verifyNoInteractions(auth);
+        verify(channelRepository, never()).findById(any());
+    }
+
+    @Test
+    void evictEverywhereForAMemberInNoRoomIsANoOp() {
+        when(tracker.snapshot()).thenReturn(List.of());
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
+
+        enforcer.evictEverywhere("nobody", "admin");
+
+        // the registry reads happen, but nobody is kicked and nobody is told
+        verify(tracker, never()).kick(anyLong(), anyString());
+        verifyNoInteractions(messagingTemplate);
+    }
+
+    @Test
     void forceLeaveRunsTheFourStepRecipeInOrder() {
         // Registry truth first (LEFT for everyone), then the forced layers, then the cooperative
         // push — a client that sees KICKED before its registry exit would flicker in the UI.

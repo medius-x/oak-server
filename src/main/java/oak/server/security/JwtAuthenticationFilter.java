@@ -50,11 +50,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "unknown user");
                     return;
                 }
-                // A banned account's still-valid access JWT must not reach any REST endpoint: ban takes
-                // effect now, not on the next login/CONNECT. Short-circuit (no filterChain.doFilter) so
-                // the protected resource is never served.
-                if (userDetails instanceof PrincipalUser principal && principal.isBanned()) {
-                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED, "banned");
+                // A banned or removed account's still-valid access JWT must not reach any REST endpoint:
+                // the state change takes effect now, not on the next login/CONNECT. Short-circuit (no
+                // filterChain.doFilter) so the protected resource is never served.
+                if (userDetails instanceof PrincipalUser principal && (principal.isBanned() || principal.isRemoved())) {
+                    response.sendError(HttpServletResponse.SC_UNAUTHORIZED, principal.isBanned() ? "banned" : "removed");
                     return;
                 }
                 UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(

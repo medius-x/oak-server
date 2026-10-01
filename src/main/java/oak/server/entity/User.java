@@ -87,6 +87,16 @@ public class User {
     @Column(name = "banned", nullable = false, columnDefinition = "boolean default false")
     private boolean banned;
 
+    /** Permanently removed from the server (the reworked kick) — there is no un-remove. Enforced at the
+     *  same four gates as {@link #banned} (REST filter, login, refresh, STOMP CONNECT). The account is
+     *  ANONYMIZED on removal (username → {@code deleted_<id>}, nickname → {@code Deleted-User-<id>}), so the
+     *  original login and nickname are freed for a fresh registration while every old message keeps its
+     *  true author (the live FK now resolves to the tombstone name — an impersonation is impossible by
+     *  construction). Stays listed by {@code GET /api/users} for authorship resolution; dropped from
+     *  {@code GET /api/members}. Same {@code columnDefinition} default rule as {@link #banned}. */
+    @Column(name = "removed", nullable = false, columnDefinition = "boolean default false")
+    private boolean removed;
+
     public User(String username, String passwordHash) {
         this.username = username;
         this.passwordHash = passwordHash;

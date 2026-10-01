@@ -443,6 +443,112 @@ oak.server
   интерсептора). Дружбу/присутствие сервер НЕ проверяет — офлайн-получатель = доставка
   в никуда (юзер-решение: живая карточка без persist). Тест VoiceInviteHandlerTest (4).
   — **392 теста**. Смоук: V12 на живой базе + категории/drag/invite по сценарию клиента.
+- [x] **Тройной раунд 2: удаление участника + передача овнера + AFK-канал (2026-10-01,
+  код готов, смоук pending; ДЕПЛОЙ ПАРНЫЙ со space-client — сервер первым: V13/V14/V15
+  + /kick→/remove + аддитивные ownership/afk эндпоинты).** **(A) «Remove from server»
+  (переделанный кик, навсегда):** `V13__user_removed.sql` (`users.removed boolean NOT NULL
+  DEFAULT false`, banned-калька). Гейты зеркалом banned в 4 местах: `PrincipalUser` +=
+  removed-поле (+ JpaUserDetailsService), `JwtAuthenticationFilter` 401 "removed",
+  `AuthService.login` 403 "This account was removed from the server" (ДО banned-ветки) +
+  refresh REMOVED-ветка (revoke family + 401, noRollbackFor как обычно), `AuthChannelInterceptor`
+  bannedOrRemoved → reject CONNECT. `MemberService.remove(userId, actor)`: гейт
+  **KICK_MEMBERS** (то же админ-поле, что у старого кика) + иерархия + овнер-таргет 403;
+  ПОРЯДОК: push `/user/queue/member.kick {by, banned:false, removed:true}` и голосовой
+  eviction СНАЧАЛА (живые сессии знают СТАРЫЙ username), потом **анонимизация** —
+  username → `deleted_<id>` (retry-суффикс `-2`, `-3`, … при коллизии), nickname →
+  `Deleted-User-<id>` (грамматика ника без пробелов), save, `publish("removed", id)` +
+  `/topic/users` push (репaint ростера). НИК ОСВОБОЖДАЕТСЯ (register под старым
+  username/nickname — 201), подмены авторства НЕТ по построению: Message.author — live
+  FK, wire authorUsername становится tombstone-логином; регистрант под старым ником =
+  другой id. `list()` фильтрует removed; `banned()` = banned ∪ removed (аудит; клиент
+  различает по MemberResponse.removed — 8-е поле); ban/unban удалённого → 400.
+  `VoiceAccessEnforcer.evictEverywhere(username, actor)` — union обоих реестров →
+  forceLeave по каждой комнате (occupiedChannels-рефактор, разделяемый с
+  enforceConnectForUser). Endpoint: `POST /api/members/{id}/remove` (старый /kick УДАЛЁН
+  — парный деплой). Тесты: MemberRemovalIntegrationTest (5: анонимизация+освобождение
+  имён+авторство-tombstone; смерть токенов 401/refresh/логин; гейты+овнер+404;
+  ban/unban-отказы; tombstone-коллизия-суффикс) + MemberServiceTest (2) +
+  evictEverywhere (2) + CONNECT-удалённого (1). **(B) Передача овнерства (pending
+  accept/decline):** `V14__ownership_transfers.sql` (identity-блок V9-рецепт ОБЯЗАТЕЛЕН);
+  `OwnershipTransfer` (Relationship-идиома: from/to @ManyToOne LAZY, status STRING-enum,
+  @CreationTimestamp) + `OwnershipTransferStatus` PENDING/ACCEPTED/DECLINED/CANCELLED +
+  `findFirstByStatusOrderByCreatedAtAsc` (одна PENDING на инстанс). DTO:
+  OwnershipTransferResponse (id+оба участника id/login/displayName+status+createdAt),
+  PendingOwnershipResponse (`{pending:null}` — всегда-JSON), OfferOwnershipRequest,
+  OwnershipEvent (OFFERED/ACCEPTED/DECLINED/CANCELLED). `OwnershipTransferService`:
+  offer (гейт isOwner 403 / self 400 / banned|removed 400; новая заявка ТИХО отменяет
+  существующую; push обоим), accept (403 не-адресат / 409 не-PENDING / **409 «The sender
+  is no longer the owner»**; снять OWNER с from → выдать to (findByKind(OWNER)); оба
+  MemberEvent rolesChanged → клиенты рефечат members+permissions, короны flip live;
+  push обоим), decline/cancel (противоположные стороны, 204), pending (party-scoped
+  snapshot), `cancelPendingFor(User)` — из `MemberService.remove()` и `ban()` в их tx
+  (заявка умирает с участником; уведомляется противоположная сторона). Controller:
+  GET /api/ownership/pending, POST /offer (201) /{id}/accept /decline /cancel.
+  **Смоук-фикс 1 (живой репорт «адресату ничего не пришло»): OWNERSHIP_QUEUE =
+  "/queue/ownership" БЕЗ /user-префикса** — convertAndSendToUser добавляет его сам
+  (конвенция /queue/member.kick и /queue/relationships; с префиксом пуш уходил в
+  /user/user/queue/ownership мимо клиентской подписки).
+  Тесты: OwnershipTransferIntegrationTest (5) + OwnershipTransferServiceTest (2, InOrder
+  свапа+пуши). **(C) AFK-канал:** `V15__voice_afk.sql` (`server_profile.afk_channel_id
+  bigint` NULL=выкл + `afk_timeout_minutes int DEFAULT 30`; БЕЗ FK — сброс при удалении
+  канала в `ChannelService.delete` кодом, ДО kickAll). `AfkController` (InviteController-
+  идиома): GET открыт всем, PUT под **MANAGE_CHANNELS** (фича канальная; 404 unknown /
+  400 не-VOICE / @Min(5)@Max(10080)); `public static timeoutOf` — null→дефолт 30
+  (inviteTtl-паттерн). Активность: `VoiceActivityRegistry` (ConcurrentHashMap username→
+  Instant; touch/lastActive, дефолт EPOCH — читается только для сидящих в комнатах,
+  протухшие записи безвредны), `VoiceActivityHandler` `@MessageMapping("/voice.activity")`
+  (тихий no-op вне комнат; @Controller-грабля), `VoiceMembershipHandler.join` тайтчит.
+  Move: `VoiceMembershipTracker.move(from, to, username)` — sessionsOf-скан (выделен из
+  kick) → enter каждой сессии (LEFT старой + JOINED новой на границах 0↔1, ре-сиид меток).
+  Свип: `VoiceAfkSweeper` `@Scheduled PT30S` + **@Transactional на scheduled-методе**
+  (self-invocation-правило): profile.singleton() → выключено/канал не VOICE → выход;
+  по каждому (канал ≠ AFK, username) с `lastActive < now−timeout` → moveToAfk: нет
+  CONNECT на AFK-канале → `forceLeave`; иначе `tracker.move` → `voiceAccess.forceKick`
+  (порвать старый Janus; клиент перезапустит /room — свежий токен, revokeTokens не нужен)
+  → push `VoiceControlEvent("MOVED", afkChannelId, null)` (byUsername null — wire
+  расширен, парный деплой). Тесты: VoiceActivityHandlerTest (4), tracker move (2),
+  **Смоук-фиксы раунда 3 (2026-10-02):** (а) **овнер не смещался** — accept пушил
+  MemberEvent/OwnershipEvent ВНУТРИ tx → рефечи читали докоммитное (invites-грабля):
+  ВСЕ пуши OwnershipTransferService (offer/accept/decline/cancel/cancelPending)
+  переведены в приватный `pushAfterCommit(Runnable)` (TransactionSynchronization
+  afterCommit). (б) **AFK-мьют не действовал** — sweeper шлёт mod-mute-стейт ДО
+  MOVED-пуша, а клиент на MOVED перезаходит комнатой (joinVoice, чей локальный
+  reset-меток затирал только что пришедший мьют): applyOnEnter перенесён ПОСЛЕ
+  MOVED-пуша (TCP-порядок одного сокета) + клиентский enteringAfkRoom-гейт (см.
+  space-client/CLAUDE.md). Тесты: sweeper InOrder обновлён.
+  **Смоук-фикс раунда 4 (2026-10-02): снятие AFK-designation оставляло мод-мьют
+  навсегда** (юзер-репорт: убрал тоггл — канал всё равно сервер-мьютит): метки
+  AfkVoicePolicy живут в трекере пер-канально и РЕ-СИИДЯТСЯ при каждом заходе —
+  designation уходила, метка оставалась. Лекарь: `AfkController.update` при смене/
+  снятии designation со старого канала зовёт НОВЫЙ `VoiceMembershipTracker.
+  clearModeratorMutes(channelId)` (снять mod-mute КАЖДОМУ меченому канала, ВКЛЮЧАЯ
+  несидящих — их пережившую метку ре-сиид воскрешал бы вечно; self-метки и implied
+  не трогаются) + `moderateAudio(unmute)` сидящим; трекер-тест (последний стейт по
+  username: self выживает, mod снят, включая ушедшего) + интеграция (PUT null
+  размьючивает staged-участника; @AfterEach-выход из трекера — синглтон-грабля).
+  **Ретро-мьют (живой репорт того же раунда: юзер сидел в комнате, её назначили AFK —
+  мьют не наступил):** AfkVoicePolicy работал только на ВХОДЕ; designation, назначенная
+  на занятую комнату, теперь подавляет ВСЕХ уже сидящих (`AfkController.update` при
+  landing-designation зовёт applyOnEnter по каждому сидящему — moderateAudio тут же
+  гейтит живых издателей forced-слоем); интеграционный тест occupied-room. —
+  **431 тест**.
+  **Раунд-2 переделка AFK (юзер-решения, 2026-10-02, после проверки Discord-фактов
+  поиском — В ДИСКОРДЕ AFK-канал: server-mute НЕ снимается юзером, запрет стрима,
+  МОЖЕТ жить в категории):** (1) **`ChannelResponse` += 8-е `boolean afk`** — флаг
+  сервера (afkChannelId == channel.id) в `list()`/`rename()`; PUT /api/server/afk
+  пингует `/topic/channels.changed` **AFTER COMMIT** (приватный twin
+  pingChannelsChangedAfterCommit в AfkController) — все зрители рефетчат бейджи.
+  (2) **Канальный супресс: НОВЫЙ `websocket/AfkVoicePolicy`** — КАЖДЫЙ вошедший в
+  AFK-канал (свипом или руками) получает МОДЕРАТОРСКИЙ мьют (`tracker.setMuted(true)`
+  + best-effort `moderateAudio`): self-unmute его не снимает, только модератор
+  (MUTE_MEMBERS) или выход из канала (метка пер-канальная, в других комнатах не
+  действует; повторный заход в AFK ре-сиидится трекером). Вызовы:
+  VoiceMembershipHandler.join (после enter) и VoiceAfkSweeper.moveToAfk (после
+  tracker.move — ДО forceKick). Forced-слой на входе no-op (издателя ещё нет) —
+  комплаенс честного клиента едет на voice.state-пуше setMuted; роgue-репаблиш в AFK
+  не гейтится (кооперативная модель, как voice-mute до итерации 4). Тесты: НОВЫЙ
+  AfkVoicePolicyTest (3) + sweeper InOrder с policy + интеграция afk-флага в списке. —
+  **428 тестов**.
 - [x] **СМОК-ФИКС: DISCUSSION-каналы утекали в DM-список (2026-09-24, юзер-репорт «фантомные
   DM с самим собой»; клиентская половина саги — space-client/CLAUDE.md).** `DmService.listMine`
   брал ВСЕ каналы участника (`findChannelIdsByUserId`) без фильтра типа — а трекинг обсуждений

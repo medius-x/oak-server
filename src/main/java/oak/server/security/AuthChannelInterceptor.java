@@ -22,7 +22,7 @@ import java.util.List;
 /**
  * Validates the JWT carried in the {@code Authorization} header of a STOMP CONNECT frame
  * and sets the authenticated principal on the session. A CONNECT without a valid token, or with a
- * token for a banned account, is rejected (the connection is dropped with an ERROR frame).
+ * token for a banned or removed account, is rejected (the connection is dropped with an ERROR frame).
  */
 @Component
 @RequiredArgsConstructor
@@ -45,18 +45,19 @@ public class AuthChannelInterceptor implements ChannelInterceptor {
             throw new MessageDeliveryException("Unauthorized: missing or invalid JWT on STOMP CONNECT");
         }
         String username = tokenProvider.extractUsername(token);
-        if (isBanned(username)) {
-            // Defense-in-depth: a banned member's still-valid access JWT must not open a real-time channel.
-            throw new MessageDeliveryException("Unauthorized: banned account");
+        if (bannedOrRemoved(username)) {
+            // Defense-in-depth: a banned or removed member's still-valid access JWT must not open a
+            // real-time channel.
+            throw new MessageDeliveryException("Unauthorized: banned or removed account");
         }
         Authentication authentication = new UsernamePasswordAuthenticationToken(username, null, AUTHORITIES);
         accessor.setUser(authentication);
         return message;
     }
 
-    private boolean isBanned(String username) {
+    private boolean bannedOrRemoved(String username) {
         return userRepository.findByUsername(username)
-                .map(User::isBanned)
+                .map(user -> user.isBanned() || user.isRemoved())
                 .orElse(false);
     }
 

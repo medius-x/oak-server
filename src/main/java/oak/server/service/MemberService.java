@@ -26,13 +26,17 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Member management: list members with roles, assign roles, kick, ban / unban. Single-tenant means
- * there is no membership entity to revoke, so "kick" is cooperative — it pushes a
- * {@code /queue/member.kick} command to the member's client to disconnect (and {@code banned=true}
- * when banning). "Ban" flags the account ({@link User#isBanned()}) so the member cannot log in or
- * open a STOMP connection again. All mutations broadcast a {@link MemberEvent}. Replacing a
- * member's roles also re-enforces CONNECT on that member's live voice sessions
- * ({@link VoiceAccessEnforcer}) — only their effective mask changed, so only their rooms recheck.
+ * Member management: list members with roles, assign roles, remove, ban / unban. "Remove from
+ * server" (the reworked kick) is PERMANENT: the account is flagged {@link User#isRemoved()},
+ * anonymized ({@code deleted_<id>} / {@code Deleted-User-<id>}, freeing the original login and
+ * nickname for a fresh registration) and can never come back — enforced at the same four gates as
+ * a ban (REST filter, login, refresh, STOMP CONNECT). Before the rename the victim's live
+ * sessions are told to disconnect ({@code /queue/member.kick} with {@code removed=true}) and are
+ * evicted from every voice room. "Ban" flags the account ({@link User#isBanned()}) so the member
+ * cannot log in or open a STOMP connection again — but a ban is reversible (unban), a removal is
+ * not. All mutations broadcast a {@link MemberEvent}. Replacing a member's roles also
+ * re-enforces CONNECT on that member's live voice sessions ({@link VoiceAccessEnforcer}) — only
+ * their effective mask changed, so only their rooms recheck.
  */
 @Service
 @RequiredArgsConstructor
@@ -49,18 +53,22 @@ public class MemberService {
     private final AttachmentUrlSigner signer;
     private final SimpMessagingTemplate messagingTemplate;
     private final VoiceAccessEnforcer voiceEnforcer;
+    private final OwnershipTransferService ownershipTransferService;
 
     @Transactional(readOnly = true)
     public List<MemberResponse> list() {
         return userRepository.findAllByOrderByIdAsc().stream()
+                .filter(user -> !user.isRemoved())
                 .map(user -> MemberResponse.from(user, signer, auth.isOwner(user)))
                 .toList();
     }
 
+    /** The moderation audit list: banned accounts (unban-able) and removed ones (permanent) —
+     *  {@link MemberResponse#removed()} tells the two apart. */
     @Transactional(readOnly = true)
     public List<MemberResponse> banned() {
         return userRepository.findAllByOrderByIdAsc().stream()
-                .filter(User::isBanned)
+                .filter(user -> user.isBanned() || user.isRemoved())
                 .map(user -> MemberResponse.from(user, signer, auth.isOwner(user)))
                 .toList();
     }
@@ -152,16 +160,59 @@ public class MemberService {
         return rename(userId, new RenameMemberRequest(login), actorUsername);
     }
 
+    /**
+     * "Remove from server" — the reworked kick, permanent by design. Gated by KICK_MEMBERS (it is the
+     * same admin surface the old kick lived behind; the irreversibility is communicated by the client's
+     * confirm copy, not by a different permission bit) plus the hierarchy; the OWNER cannot be removed.
+     *
+     * <p>Order matters: the victim's live sessions still know the OLD username, so the disconnect push
+     * and the voice eviction go out FIRST, and only then the account is flagged and anonymized
+     * ({@code deleted_<id>} / {@code Deleted-User-<id>}, with a suffix retry should a tombstone name
+     * collide). Anonymization frees the original login and nickname for a fresh registration while
+     * every old message keeps its true author — the wire's {@code authorUsername} now resolves to the
+     * tombstone row, so an impersonator registering under the freed name can never inherit the
+     * authorship (their row is a different id). A {@code /topic/users} push repaints the tombstone
+     * name everywhere (the rename machinery).
+     */
     @Transactional
-    public void kick(Long userId, String actorUsername) {
+    public void remove(Long userId, String actorUsername) {
         User actor = auth.requireUser(actorUsername);
         User target = userRepository.findById(userId)
                 .orElseThrow(() -> notFound("User not found"));
         auth.requireServer(actor, Permission.KICK_MEMBERS);
         auth.requireCanActOn(actor, target);
+        if (auth.isOwner(target)) {
+            throw forbidden("The owner cannot be removed");
+        }
+        // A pending ownership offer to or from the victim dies with them (inside the
+        // same tx — a removed recipient could never accept).
+        ownershipTransferService.cancelPendingFor(target);
         messagingTemplate.convertAndSendToUser(target.getUsername(), MEMBER_KICK_QUEUE,
-                Map.of("by", actor.getUsername(), "banned", false));
-        publish("kicked", target.getId());
+                Map.of("by", actor.getUsername(), "banned", false, "removed", true));
+        voiceEnforcer.evictEverywhere(target.getUsername(), actor.getUsername());
+        target.setRemoved(true);
+        // The tombstone names: unique by the user's own id, with an attempt suffix should someone
+        // already sit on the exact tombstone (an exotic but possible registration).
+        int attempt = 0;
+        while (userRepository.existsByUsername(tombstoneLogin(target.getId(), attempt))
+                || userRepository.existsByNickname(tombstoneNickname(target.getId(), attempt))) {
+            attempt++;
+        }
+        target.setUsername(tombstoneLogin(target.getId(), attempt));
+        target.setNickname(tombstoneNickname(target.getId(), attempt));
+        userRepository.save(target);
+        publish("removed", target.getId());
+        messagingTemplate.convertAndSend(UserController.USERS_TOPIC, UserSummary.from(target, signer));
+    }
+
+    /** {@code deleted_<id>} / {@code deleted_<id>-2}, {@code -3}, … — the removed account's login tombstone. */
+    private static String tombstoneLogin(Long userId, int attempt) {
+        return "deleted_" + userId + (attempt == 0 ? "" : "-" + (attempt + 1));
+    }
+
+    /** {@code Deleted-User-<id>} — the display-name tombstone (the nickname grammar, no spaces). */
+    private static String tombstoneNickname(Long userId, int attempt) {
+        return "Deleted-User-" + userId + (attempt == 0 ? "" : "-" + (attempt + 1));
     }
 
     @Transactional
@@ -174,6 +225,11 @@ public class MemberService {
         if (auth.isOwner(target)) {
             throw forbidden("The owner cannot be banned");
         }
+        if (target.isRemoved()) {
+            throw badRequest("This member was removed, not banned");
+        }
+        // A banned recipient can never accept; a banned sender is no longer acting owner.
+        ownershipTransferService.cancelPendingFor(target);
         target.setBanned(true);
         userRepository.save(target);
         messagingTemplate.convertAndSendToUser(target.getUsername(), MEMBER_KICK_QUEUE,
@@ -187,6 +243,9 @@ public class MemberService {
         auth.requireServer(actor, Permission.BAN_MEMBERS);
         User target = userRepository.findById(userId)
                 .orElseThrow(() -> notFound("User not found"));
+        if (target.isRemoved()) {
+            throw badRequest("This member was removed from the server — removal is permanent");
+        }
         target.setBanned(false);
         userRepository.save(target);
         publish("rolesChanged", target.getId());
@@ -202,5 +261,9 @@ public class MemberService {
 
     private static ResponseStatusException forbidden(String reason) {
         return new ResponseStatusException(HttpStatus.FORBIDDEN, reason);
+    }
+
+    private static ResponseStatusException badRequest(String reason) {
+        return new ResponseStatusException(HttpStatus.BAD_REQUEST, reason);
     }
 }
