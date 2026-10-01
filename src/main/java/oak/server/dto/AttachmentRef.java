@@ -25,6 +25,11 @@ import jakarta.validation.constraints.Size;
  * layout box via {@code aspect-ratio} BEFORE the bytes load, so attachment-heavy channels
  * never reflow under the viewport. Nullable forever — rows sent before this field keep the
  * estimating layout, and the codec's lenient reader maps absent fields to null.
+ *
+ * <p>{@code sizeBytes} is the object's byte size, likewise known only to the SENDER
+ * ({@code File.size} at upload; the server never terminates the bytes, so it cannot
+ * measure). Same trust model as width/height — stored and echoed verbatim. Nullable
+ * forever: pre-size rows keep rendering without a size line.
  */
 public record AttachmentRef(
         @Size(max = 512) String key,
@@ -32,16 +37,17 @@ public record AttachmentRef(
         @Size(max = 512) String thumbnailKey,
         @PositiveOrZero Long durationMillis,
         @PositiveOrZero Integer width,
-        @PositiveOrZero Integer height
+        @PositiveOrZero Integer height,
+        @PositiveOrZero Long sizeBytes
 ) {
 
     /** The pre-preview shape — kept for tests and for call sites that have no video metadata. */
     public AttachmentRef(String key, String fileName) {
-        this(key, fileName, null, null, null, null);
+        this(key, fileName, null, null, null, null, null);
     }
 
     /** The pre-dimension video-preview shape (no measured width/height yet). */
     public AttachmentRef(String key, String fileName, String thumbnailKey, Long durationMillis) {
-        this(key, fileName, thumbnailKey, durationMillis, null, null);
+        this(key, fileName, thumbnailKey, durationMillis, null, null, null);
     }
 }

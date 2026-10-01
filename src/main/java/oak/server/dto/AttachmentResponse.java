@@ -16,6 +16,9 @@ package oak.server.dto;
  * <p>{@code width}/{@code height} mirror {@link AttachmentRef} out: the media's intrinsic
  * pixel dimensions, so the client reserves the exact layout box before the bytes arrive.
  * Null for rows sent before the field existed.
+ *
+ * <p>{@code sizeBytes} mirrors {@link AttachmentRef} out (the sender-measured object size,
+ * shown by the client's plain-file card). Null for rows sent before the field existed.
  */
 public record AttachmentResponse(
         String fileName,
@@ -25,6 +28,7 @@ public record AttachmentResponse(
         String thumbnailUrl,
         Long durationMillis,
         Integer width,
-        Integer height
+        Integer height,
+        Long sizeBytes
 ) {
 }

@@ -97,6 +97,29 @@ class AttachmentIntegrationTest {
                 .andExpect(jsonPath("$[0].attachments[1].width").doesNotExist());
     }
 
+    /** The size passthrough (the plain-file card shows it): the sender-measured
+     *  {@code sizeBytes} echoes out verbatim; absent stays null (pre-size rows). */
+    @Test
+    void attachmentSizeBytesRoundTripAndAbsentStaysNull() throws Exception {
+        String token = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(token, "general", "TEXT");
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":null,\"attachments\":["
+                                + "{\"key\":\"doc-key\",\"fileName\":\"report.pdf\",\"sizeBytes\":2048},"
+                                + "{\"key\":\"pic-key\",\"fileName\":\"shot.png\"}]}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.attachments[0].sizeBytes").value(2048))
+                .andExpect(jsonPath("$.attachments[1].sizeBytes").doesNotExist());
+        // the persisted JSON column carries it too (history path)
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].attachments[0].sizeBytes").value(2048))
+                .andExpect(jsonPath("$[0].attachments[1].sizeBytes").doesNotExist());
+    }
+
     /** The fresh-link re-mint (a streamed playback that outlived its hour-old presigned URL):
      *  auth-gated, 404 on an unknown key, and for a key a message actually references it
      *  returns the re-signed URL field (null under the noop signer — structurally present). */

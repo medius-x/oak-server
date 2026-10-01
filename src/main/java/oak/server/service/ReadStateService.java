@@ -89,7 +89,8 @@ public class ReadStateService {
             // DISCUSSION channels are read-state-silent: their unread must never leak into the
             // parent channel's counters (or the server-wide badge sums clients compute over
             // this snapshot) — the delegation branch would otherwise happily include them.
-            if (channel.getType() == ChannelType.DISCUSSION) {
+            // A CATEGORY carries no messages at all — same silence.
+            if (channel.getType() == ChannelType.DISCUSSION || channel.getType() == ChannelType.CATEGORY) {
                 continue;
             }
             if (!auth.hasInChannel(user, channel, Permission.READ_MESSAGE_HISTORY)) {
@@ -117,9 +118,9 @@ public class ReadStateService {
         for (Channel channel : channelRepository.findAllByOrderByIdAsc()) {
             // A fresh member has no DM channels, but skip them defensively — DM read-state is created on
             // demand (the participant accrues unread from their first message), never seeded here.
-            // DISCUSSION channels are read-state-silent (see snapshot).
+            // DISCUSSION channels are read-state-silent (see snapshot); a CATEGORY carries no messages.
             if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM
-                    || channel.getType() == ChannelType.DISCUSSION) {
+                    || channel.getType() == ChannelType.DISCUSSION || channel.getType() == ChannelType.CATEGORY) {
                 continue;
             }
             Long lastMessageId = messageRepository.findTopByChannelIdOrderByIdDesc(channel.getId())

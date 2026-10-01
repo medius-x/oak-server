@@ -20,5 +20,9 @@ public enum ChannelType {
      *  survives the origin's deletion). Every permission resolves through the PARENT channel
      *  (the delegation branch in {@code AuthorizationService.hasInChannel}); tracking who
      *  follows a discussion = {@code ChannelParticipant} rows on it (posting auto-joins). */
-    DISCUSSION
+    DISCUSSION,
+    /** A collapsible sidebar section (Discord's category). A pure container: it carries no
+     *  messages and no participants — TEXT/VOICE channels reference it through
+     *  {@code Channel#parentId}. Deletion is refused while children remain. */
+    CATEGORY
 }

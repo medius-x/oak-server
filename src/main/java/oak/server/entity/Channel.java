@@ -64,6 +64,20 @@ public class Channel {
     @Column(name = "updated_at")
     private Instant updatedAt;
 
+    /** The CATEGORY channel this TEXT/VOICE channel is grouped under (Discord's
+     *  parent); null = top level. Kept as a BARE id, not a {@code @ManyToOne}
+     *  self-reference — the wire needs a Long anyway and a lazy proxy buys
+     *  nothing for a pure container (the {@code Discussion.parentChannel}
+     *  discipline). Categories themselves never carry one. */
+    @Column(name = "parent_id")
+    private Long parentId;
+
+    /** The manual sidebar order; {@code (position, id)} is the sort key. Dense after any
+     *  reorder (the write renumbers by list index); creations append
+     *  {@code max(position) + 1} — the Java default 0 must never leak to the wire. */
+    @Column(nullable = false)
+    private int position;
+
     public Channel(String name, ChannelType type) {
         this.name = name;
         this.type = type;

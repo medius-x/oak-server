@@ -825,7 +825,8 @@ public class MessageService {
                                 : attachmentUrlSigner.presignedGetUrl(ref.thumbnailKey()),
                         ref.durationMillis(),
                         ref.width(),
-                        ref.height()))
+                        ref.height(),
+                        ref.sizeBytes()))
                 .toList();
         ReplyInfo reply = replyInfo(message, replyOriginals, MAX_QUOTE_DEPTH);
         List<MentionResponse> mentions = withReplyMention(message, mentionParser.parse(

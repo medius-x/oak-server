@@ -405,6 +405,44 @@ oak.server
   активными); потраченных к моменту чистки уже не существует. Тест:
   InvitesCleanupTest (scheduled-вход без @Transactional; revoked+expired+active →
   выживают только активные). — **382 тестов**.
+- [x] **Тройной раунд (2026-10-01, серверная половина; клиентская — space-client/CLAUDE.md;
+  ДЕПЛОЙ ПАРНЫЙ — сервер первым).** **(A) sizeBytes:** `AttachmentRef` += 7-е `@PositiveOrZero
+  Long sizeBytes` + `AttachmentResponse` += 9-е (зеркало): размер знает только ОТПРАВИТЕЛЬ
+  (File.size — сервер байты не терминирует; модель доверия width/height), nullable навсегда
+  (легаси-строки JSON); единственная точка сборки `toResponse` дописала аргумент; intra-forward
+  копирует JSON verbatim → поле едет бесплатно; миграций НЕТ (JSON-колонка). Convenience-
+  конструкторы AttachmentRef/CreateChannelRequest делегируют null. **(B) Категории каналов
+  (Discord-секции) + sidebar-порядок:** `V12__channel_categories.sql` — CHECK += 'CATEGORY'
+  (DROP+ADD обязателен, V4-урок), `parent_id` (self-FK nullable) + `position int not null
+  default 0` + backfill `position = id` + индекс. `ChannelType` += CATEGORY (в конец);
+  `Channel` += голый `Long parentId` (БЕЗ @ManyToOne self — wire-Long, discussions-
+  дисциплина) + `int position`. `ChannelResponse` += 6-е/7-е `Long parentId, int position`
+  (wire-арность!); `CreateChannelRequest` += 3-е `Long parentId`. Репо +=
+  `findByTypeNotInOrderByPositionAscIdAsc` / `findTopByOrderByPositionDesc` /
+  `existsByParentId`. `ChannelService`: list() — порядок (position,id), CATEGORY всегда
+  `locked=false` (иначе lockedFor даёт ложный замок !READ); create() — валидации parent
+  (CATEGORY-с-parent 400 «A category cannot have a parent» / unknown 400 / не-CATEGORY
+  400) + `position = findTop...+1` (Java-дефолт 0 НЕ должен утекать — новый канал прыгал
+  бы в начало); delete() — ПЕРВОЙ проверкой `CATEGORY && existsByParentId` → 400 «Category
+  is not empty — move or delete its channels first» (до kickAll); rename категории —
+  разрешён, ответ unlocked. НОВОЕ `PUT /api/channels/order` (`ReorderChannelsRequest`
+  {entries: [{id, parentId|null}]}) — ПОЛНЫЙ список всех не-DM каналов+категорий ровно
+  по одному разу (частичный/дубль/чужой id → 400 «Reorder must list every channel and
+  category»); позиции перенумеровываются ПЛОТНО по индексу, parentId применяется в той же
+  tx; пинг `/topic/channels.changed` **AFTER COMMIT** (приватный `pingChannelsChangedAfterCommit`
+  — invites-урок: пинг до коммита = рефеч-гонка). ReadStateService: snapshot/seed skip
+  CATEGORY. VoiceMembershipHandler.join: не-VOICE channelId — тихий no-op. Тесты:
+  ChannelCategoryIntegrationTest (4: создание+порядок; 3×400-валидации; delete непустой
+  400+текст / rename / delete пустого; reorder 403-плебей/неполный-400/CATEGORY-child-400/
+  happy порядок+parent) — юзеры уникальны per-класс + @Transactional (иначе 409 на
+  повторной регистрации). **(C) /app/voice.invite:** `dto/VoiceInvite(channelId, channelName,
+  from, to)` + `websocket/VoiceInviteHandler` (CallSignalingHandler-калька, @Controller):
+  сервер штампует from и САМ резолвит channelName (стора получателя может не быть);
+  не-VOICE канал / отправитель без VIEW_CHANNEL / blank → ТИХИЙ no-op (call.signal-
+  дисциплина, перебор ничего не узнает); доставка `/user/queue/voice.invite` (вне
+  интерсептора). Дружбу/присутствие сервер НЕ проверяет — офлайн-получатель = доставка
+  в никуда (юзер-решение: живая карточка без persist). Тест VoiceInviteHandlerTest (4).
+  — **392 теста**. Смоук: V12 на живой базе + категории/drag/invite по сценарию клиента.
 - [x] **СМОК-ФИКС: DISCUSSION-каналы утекали в DM-список (2026-09-24, юзер-репорт «фантомные
   DM с самим собой»; клиентская половина саги — space-client/CLAUDE.md).** `DmService.listMine`
   брал ВСЕ каналы участника (`findChannelIdsByUserId`) без фильтра типа — а трекинг обсуждений

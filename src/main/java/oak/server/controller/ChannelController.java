@@ -6,6 +6,7 @@ import oak.server.dto.ChannelMyPermissions;
 import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.dto.RenameChannelRequest;
+import oak.server.dto.ReorderChannelsRequest;
 import oak.server.service.ChannelService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -71,5 +73,15 @@ public class ChannelController {
     public ChannelMyPermissions myPermissions(@PathVariable Long id,
                                               @AuthenticationPrincipal UserDetails principal) {
         return channelService.myPermissions(id, principal.getUsername());
+    }
+
+    /** The full-sidebar reorder (the drag-drop persist; {@code /api/roles/order} precedent):
+     *  every non-DM channel and category once, in the intended order, each with its parent.
+     *  {@code MANAGE_CHANNELS} is enforced in the service; clients refetch on the
+     *  channels-changed ping that fires after the commit. */
+    @PutMapping("/order")
+    public void reorder(@RequestBody @Valid ReorderChannelsRequest request,
+                        @AuthenticationPrincipal UserDetails principal) {
+        channelService.reorder(request, principal.getUsername());
     }
 }

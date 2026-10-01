@@ -3,6 +3,7 @@ package oak.server.websocket;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.VoiceCommand;
 import oak.server.entity.Channel;
+import oak.server.entity.ChannelType;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
@@ -38,7 +39,9 @@ public class VoiceMembershipHandler {
         }
         // CONNECT gate (defense-in-depth beside the REST /room check). Denied → don't enter the room.
         Optional<Channel> channel = channelRepository.findById(command.channelId());
-        if (channel.isEmpty()) {
+        // Only VOICE channels have rooms — a CATEGORY (or TEXT) id is a silent no-op, like any
+        // other denied join.
+        if (channel.isEmpty() || channel.get().getType() != ChannelType.VOICE) {
             return;
         }
         Optional<User> actor = auth.findUser(sender.getName());

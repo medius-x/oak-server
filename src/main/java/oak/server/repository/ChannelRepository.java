@@ -18,4 +18,15 @@ public interface ChannelRepository extends JpaRepository<Channel, Long> {
     /** All channels whose type is <em>not</em> in {@code excluded} — backs the public channel list,
      *  which must hide {@code DM}/{@code GROUP_DM} channels. */
     List<Channel> findByTypeNotInOrderByIdAsc(Collection<ChannelType> excluded);
+
+    /** The same public-channel set, in the manual sidebar order — {@code (position, id)}
+     *  (the list contract since categories). */
+    List<Channel> findByTypeNotInOrderByPositionAscIdAsc(Collection<ChannelType> excluded);
+
+    /** The current tail of the sidebar order — creations append {@code max(position) + 1}. */
+    Channel findTopByOrderByPositionDesc();
+
+    /** Whether any channel still groups under the given category (the non-empty
+     *  deletion gate). */
+    boolean existsByParentId(Long parentId);
 }

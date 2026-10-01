@@ -53,6 +53,18 @@ class AttachmentListCodecTest {
         assertEquals(1, back.size());
         assertNull(back.get(0).thumbnailKey());
         assertNull(back.get(0).durationMillis());
+        assertNull(back.get(0).sizeBytes());
+    }
+
+    @Test
+    void roundTripsSizeBytes() {
+        List<AttachmentRef> attachments = List.of(new AttachmentRef(
+                "attachments/abc/pic.png", "pic.png", null, null, null, null, 2048L));
+
+        List<AttachmentRef> back = codec.read(codec.write(attachments));
+
+        assertEquals(attachments, back);
+        assertEquals(2048L, back.get(0).sizeBytes());
     }
 
     @Test
