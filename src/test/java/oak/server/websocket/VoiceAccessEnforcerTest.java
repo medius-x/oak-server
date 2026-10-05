@@ -11,7 +11,6 @@ import oak.server.service.AuthorizationService;
 import oak.server.service.JanusVoiceAccessService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -32,11 +31,13 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit coverage of the live-session enforcement: which members {@code enforceConnect} evicts (and
- * the exact four-step recipe it runs), the two-registry input (STOMP tracker + live token holders —
- * a non-STOMP rogue is only visible in the latter), the per-user and everywhere sweeps fed by the
- * role hooks, that an empty room costs no database roundtrip, and the recipe's ordering. Plain
- * Mockito — tracker/auth/gateway are mocked, so no broker and no Janus are involved.
+ * Unit coverage of the live-session enforcement: which members {@code enforceChannelChange} evicts
+ * (and the exact four-step recipe it runs), the two-registry input (STOMP tracker + live token
+ * holders — a non-STOMP rogue is only visible in the latter), the per-user and everywhere sweeps
+ * fed by the role hooks, the SPEAK half of every sweep (security round 6: a lost right perm-mutes
+ * the sitter, a granted one lifts the mark — never touching an ordinary moderator mute), that an
+ * empty room costs no database roundtrip, and the recipe's ordering. Plain Mockito —
+ * tracker/auth/gateway are mocked, so no broker and no Janus are involved.
  */
 @ExtendWith(MockitoExtension.class)
 class VoiceAccessEnforcerTest {
@@ -56,7 +57,7 @@ class VoiceAccessEnforcerTest {
     private VoiceAccessEnforcer enforcer;
 
     @Test
-    void enforceConnectKicksTheLoserAndSparesTheKeeper() {
+    void enforceChannelChangeKicksTheLoserAndSparesTheKeeper() {
         Channel lounge = voiceChannel(7L);
         User alice = user(1L, "alice");
         User bob = user(2L, "bob");
@@ -68,8 +69,9 @@ class VoiceAccessEnforcerTest {
         when(auth.findUser("bob")).thenReturn(Optional.of(bob));
         when(auth.hasInChannel(alice, lounge, Permission.CONNECT)).thenReturn(false);
         when(auth.hasInChannel(bob, lounge, Permission.CONNECT)).thenReturn(true);
+        when(auth.hasInChannel(bob, lounge, Permission.SPEAK)).thenReturn(true);
 
-        enforcer.enforceConnect(7L, "admin");
+        enforcer.enforceChannelChange(7L, "admin");
 
         verify(tracker).kick(7L, "alice");
         verify(voiceAccess).forceKick(7L, "alice");
@@ -79,10 +81,11 @@ class VoiceAccessEnforcerTest {
                 eq(new VoiceControlEvent("KICKED", 7L, "admin")));
         verify(tracker, never()).kick(7L, "bob");
         verify(voiceAccess, never()).forceKick(7L, "bob");
+        verify(tracker, never()).setPermMuted(anyLong(), eq("bob"), any(Boolean.class));
     }
 
     @Test
-    void enforceConnectSweepsTokenHoldersInvisibleToTheTracker() {
+    void enforceChannelChangeSweepsTokenHoldersInvisibleToTheTracker() {
         // A rogue talking to Janus directly never joins via STOMP — the tracker is empty, but its
         // token (minted through /room under its real name) is in the token registry.
         Channel lounge = voiceChannel(7L);
@@ -93,7 +96,7 @@ class VoiceAccessEnforcerTest {
         when(auth.findUser("rogue")).thenReturn(Optional.of(rogue));
         when(auth.hasInChannel(rogue, lounge, Permission.CONNECT)).thenReturn(false);
 
-        enforcer.enforceConnect(7L, "admin");
+        enforcer.enforceChannelChange(7L, "admin");
 
         verify(tracker).kick(7L, "rogue");
         verify(voiceAccess).forceKick(7L, "rogue");
@@ -101,34 +104,34 @@ class VoiceAccessEnforcerTest {
     }
 
     @Test
-    void enforceConnectOnAnEmptyRoomSkipsTheDatabaseEntirely() {
+    void enforceChannelChangeOnAnEmptyRoomSkipsTheDatabaseEntirely() {
         // The overwhelmingly common mutation happens on a channel with nobody in voice — it must
         // cost nothing beyond the two in-memory registry reads.
         when(tracker.snapshot()).thenReturn(List.of());
         when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
 
-        enforcer.enforceConnect(7L, "admin");
+        enforcer.enforceChannelChange(7L, "admin");
 
         verify(channelRepository, never()).findById(any());
         verifyNoInteractions(auth, messagingTemplate);
     }
 
     @Test
-    void enforceConnectForAnUnknownChannelIsANoOp() {
+    void enforceChannelChangeForAnUnknownChannelIsANoOp() {
         // Defensive branch: unreachable from the override hooks (they validated the channel), so
         // an occupied room + a vanished row must simply do nothing rather than NPE.
         when(tracker.snapshot()).thenReturn(List.of(new VoiceChannelMembersDto(7L, List.of("alice"))));
         when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
         when(channelRepository.findById(7L)).thenReturn(Optional.empty());
 
-        enforcer.enforceConnect(7L, "admin");
+        enforcer.enforceChannelChange(7L, "admin");
 
         verify(tracker, never()).kick(anyLong(), anyString());
         verifyNoInteractions(auth, messagingTemplate);
     }
 
     @Test
-    void enforceConnectEvictsADeletedUserSittingInVoice() {
+    void enforceChannelChangeEvictsADeletedUserSittingInVoice() {
         // A user row that no longer resolves has no permissions by definition — kick, and never
         // even ask hasInChannel (there is no User to ask about).
         when(tracker.snapshot()).thenReturn(List.of(new VoiceChannelMembersDto(7L, List.of("ghost"))));
@@ -136,7 +139,7 @@ class VoiceAccessEnforcerTest {
         when(channelRepository.findById(7L)).thenReturn(Optional.of(voiceChannel(7L)));
         when(auth.findUser("ghost")).thenReturn(Optional.empty());
 
-        enforcer.enforceConnect(7L, "admin");
+        enforcer.enforceChannelChange(7L, "admin");
 
         verify(tracker).kick(7L, "ghost");
         verify(voiceAccess).forceKick(7L, "ghost");
@@ -144,7 +147,71 @@ class VoiceAccessEnforcerTest {
     }
 
     @Test
-    void enforceConnectForUserEvictsAcrossEveryRoomTheUserOccupies() {
+    void speakLossPermMutesTheSitterInsteadOfEvicting() {
+        // Security round 6: CONNECT without SPEAK is the muted-listener posture — the member
+        // STAYS (they may hear the room), only their mouth goes dark at the gateway.
+        Channel stage = voiceChannel(7L);
+        User listener = user(4L, "listener");
+        when(tracker.snapshot()).thenReturn(List.of(new VoiceChannelMembersDto(7L, List.of("listener"))));
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
+        when(channelRepository.findById(7L)).thenReturn(Optional.of(stage));
+        when(auth.findUser("listener")).thenReturn(Optional.of(listener));
+        when(auth.hasInChannel(listener, stage, Permission.CONNECT)).thenReturn(true);
+        when(auth.hasInChannel(listener, stage, Permission.SPEAK)).thenReturn(false);
+        when(tracker.isPermMuted(7L, "listener")).thenReturn(false);
+
+        enforcer.enforceChannelChange(7L, "admin");
+
+        verify(tracker, never()).kick(anyLong(), anyString());
+        verify(tracker).setPermMuted(7L, "listener", true);
+        verify(voiceAccess).moderateAudio(7L, "listener", true);
+    }
+
+    @Test
+    void speakRegainLiftsTheMarkFollowingTheUnion() {
+        // The right came back while the member sits with the mark: the mark lifts, but the
+        // gateway follows the UNION — an unmute must not open the audio of a member still
+        // muted by another origin (an AFK moderator mute holding true below).
+        Channel stage = voiceChannel(7L);
+        User member = user(5L, "member");
+        when(tracker.snapshot()).thenReturn(List.of(new VoiceChannelMembersDto(7L, List.of("member"))));
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
+        when(channelRepository.findById(7L)).thenReturn(Optional.of(stage));
+        when(auth.findUser("member")).thenReturn(Optional.of(member));
+        when(auth.hasInChannel(member, stage, Permission.CONNECT)).thenReturn(true);
+        when(auth.hasInChannel(member, stage, Permission.SPEAK)).thenReturn(true);
+        when(tracker.isPermMuted(7L, "member")).thenReturn(true);
+        when(tracker.isMuted(7L, "member")).thenReturn(true);
+
+        enforcer.enforceChannelChange(7L, "admin");
+
+        verify(tracker).setPermMuted(7L, "member", false);
+        verify(voiceAccess).moderateAudio(7L, "member", true);
+    }
+
+    @Test
+    void anUnmarkedSpeakerStaysUntouched() {
+        // SPEAK held, no mark alive — the sweep must not even publish (setPermMuted publishes
+        // only on change) nor touch the gateway.
+        Channel lounge = voiceChannel(7L);
+        User speaker = user(2L, "bob");
+        when(tracker.snapshot()).thenReturn(List.of(new VoiceChannelMembersDto(7L, List.of("bob"))));
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
+        when(channelRepository.findById(7L)).thenReturn(Optional.of(lounge));
+        when(auth.findUser("bob")).thenReturn(Optional.of(speaker));
+        when(auth.hasInChannel(speaker, lounge, Permission.CONNECT)).thenReturn(true);
+        when(auth.hasInChannel(speaker, lounge, Permission.SPEAK)).thenReturn(true);
+        when(tracker.isPermMuted(7L, "bob")).thenReturn(false);
+
+        enforcer.enforceChannelChange(7L, "admin");
+
+        verify(tracker, never()).setPermMuted(anyLong(), anyString(), any(Boolean.class));
+        verify(voiceAccess, never()).moderateAudio(anyLong(), anyString(), any(Boolean.class));
+        verify(tracker, never()).kick(anyLong(), anyString());
+    }
+
+    @Test
+    void enforceForMemberEvictsAcrossEveryRoomTheUserOccupies() {
         // The member-role hook: alice sits in room 7 (tracker) and holds a token for room 8 —
         // she keeps CONNECT in 8, lost it in 7, so only room 7 evicts her.
         Channel lounge = voiceChannel(7L);
@@ -159,8 +226,9 @@ class VoiceAccessEnforcerTest {
         when(auth.findUser("alice")).thenReturn(Optional.of(alice));
         when(auth.hasInChannel(alice, lounge, Permission.CONNECT)).thenReturn(false);
         when(auth.hasInChannel(alice, stage, Permission.CONNECT)).thenReturn(true);
+        when(auth.hasInChannel(alice, stage, Permission.SPEAK)).thenReturn(true);
 
-        enforcer.enforceConnectForUser("alice", "admin");
+        enforcer.enforceForMember("alice", "admin");
 
         verify(tracker).kick(7L, "alice");
         verify(voiceAccess).forceKick(7L, "alice");
@@ -259,7 +327,7 @@ class VoiceAccessEnforcerTest {
         // push — a client that sees KICKED before its registry exit would flicker in the UI.
         enforcer.forceLeave(7L, "bob", "alice");
 
-        InOrder order = inOrder(tracker, voiceAccess, messagingTemplate);
+        org.mockito.InOrder order = inOrder(tracker, voiceAccess, messagingTemplate);
         order.verify(tracker).kick(7L, "bob");
         order.verify(voiceAccess).forceKick(7L, "bob");
         order.verify(voiceAccess).revokeTokens(7L, "bob");

@@ -82,7 +82,7 @@ class ChannelOverrideServiceTest {
         assertEquals(3L, response.roleId());
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
-        verify(voiceEnforcer).enforceConnect(7L, "alice");
+        verify(voiceEnforcer).enforceChannelChange(7L, "alice");
     }
 
     @Test
@@ -96,7 +96,7 @@ class ChannelOverrideServiceTest {
 
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
-        verify(voiceEnforcer).enforceConnect(7L, "alice");
+        verify(voiceEnforcer).enforceChannelChange(7L, "alice");
     }
 
     @Test
@@ -113,7 +113,7 @@ class ChannelOverrideServiceTest {
 
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
-        verify(voiceEnforcer).enforceConnect(7L, "alice");
+        verify(voiceEnforcer).enforceChannelChange(7L, "alice");
     }
 
     @Test
@@ -127,7 +127,7 @@ class ChannelOverrideServiceTest {
 
         verify(messagingTemplate).convertAndSend(
                 eq(ChannelService.CHANNELS_CHANGED_TOPIC), any(Long.class));
-        verify(voiceEnforcer).enforceConnect(7L, "alice");
+        verify(voiceEnforcer).enforceChannelChange(7L, "alice");
     }
 
     @Test
@@ -145,7 +145,7 @@ class ChannelOverrideServiceTest {
                 .convertAndSend(anyString(), any(Object.class));
         // A denied mutation enforces nothing either — no eviction may fire for it.
         org.mockito.Mockito.verify(voiceEnforcer, org.mockito.Mockito.never())
-                .enforceConnect(any(), anyString());
+                .enforceChannelChange(any(), anyString());
     }
 
     // --- fixtures ---

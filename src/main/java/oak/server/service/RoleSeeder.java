@@ -51,6 +51,7 @@ public class RoleSeeder implements ApplicationRunner {
             Permission.ADD_REACTIONS.bit,
             Permission.CONNECT.bit,
             Permission.SPEAK.bit,
+            Permission.STREAM.bit,
             Permission.USE_VAD.bit,
             Permission.CHANGE_NICKNAME.bit,
             Permission.VIEW_CHANNEL.bit);
@@ -65,6 +66,7 @@ public class RoleSeeder implements ApplicationRunner {
         ensureEveryoneViewChannel();
         ensureEveryoneChangeNickname();
         ensureEveryoneAddReactions();
+        ensureEveryoneStream();
         seedOwner();
         ensureOwnerAssigned();
     }
@@ -129,6 +131,24 @@ public class RoleSeeder implements ApplicationRunner {
             everyone.setPermissions(everyone.getPermissions() | Permission.ADD_REACTIONS.bit);
             roleRepository.save(everyone);
             log.warn("[RBAC] @everyone was missing ADD_REACTIONS — re-granted (reactions stay "
+                    + "available to ordinary members)");
+        });
+    }
+
+    /** Unconditionally re-grants {@link Permission#STREAM} to the stored @everyone row on every
+     *  boot, mirroring {@link #ensureEveryoneAddReactions()}. STREAM joined {@link
+     *  #EVERYONE_DEFAULTS} with the security round 6 client gate (the share/camera buttons read
+     *  it) — every live database was seeded without the bit, and without the repair the buttons
+     *  would vanish for ordinary members on deploy day; revoking the bit per-role/per-channel is
+     *  the intended way to take streaming away, never flipping the base row. */
+    public void ensureEveryoneStream() {
+        roleRepository.findByKind(RoleKind.EVERYONE).ifPresent(everyone -> {
+            if ((everyone.getPermissions() & Permission.STREAM.bit) != 0) {
+                return;
+            }
+            everyone.setPermissions(everyone.getPermissions() | Permission.STREAM.bit);
+            roleRepository.save(everyone);
+            log.warn("[RBAC] @everyone was missing STREAM — re-granted (screen share stays "
                     + "available to ordinary members)");
         });
     }

@@ -71,6 +71,12 @@ public class VoiceMembershipTracker {
     private final Map<Long, Set<String>> modDeafenedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> impliedSelfMutedByChannel = new HashMap<>();
     private final Map<Long, Set<String>> impliedModMutedByChannel = new HashMap<>();
+    /** The SPEAK-permission mute (security round 6): a member sitting in a channel they may CONNECT
+     *  to but not SPEAK in. Unlike a moderator mute it is derived state — written by the join-time
+     *  policy and the permission sweeps, never by a control command — so neither a self-unmute nor
+     *  a moderator's Unmute lifts it (each writes its own set). It DIES with the leave: the right
+     *  is re-derived on the next entry, so a surviving mark would only go stale. */
+    private final Map<Long, Set<String>> permMutedByChannel = new HashMap<>();
     private final Object lock = new Object();
 
     /** Records that {@code sessionId} (authenticated as {@code username}) is now in {@code channelId}. */
@@ -146,12 +152,24 @@ public class VoiceMembershipTracker {
         publishStateIfChanged(deafenChanged || impliedChanged, channelId, username);
     }
 
+    /** The SPEAK-permission mute (join-time policy / permission sweep) — see {@link #permMutedByChannel}. */
+    public void setPermMuted(Long channelId, String username, boolean muted) {
+        publishStateIfChanged(applyState(permMutedByChannel, channelId, username, muted), channelId, username);
+    }
+
+    public boolean isPermMuted(Long channelId, String username) {
+        synchronized (lock) {
+            return stateIn(permMutedByChannel, channelId, username);
+        }
+    }
+
     public boolean isMuted(Long channelId, String username) {
         synchronized (lock) {
             return stateIn(selfMutedByChannel, channelId, username)
                     || stateIn(modMutedByChannel, channelId, username)
                     || stateIn(impliedSelfMutedByChannel, channelId, username)
-                    || stateIn(impliedModMutedByChannel, channelId, username);
+                    || stateIn(impliedModMutedByChannel, channelId, username)
+                    || stateIn(permMutedByChannel, channelId, username);
         }
     }
 
@@ -226,9 +244,10 @@ public class VoiceMembershipTracker {
                     || stateIn(impliedModMutedByChannel, channelId, username);
             boolean selfDeafened = stateIn(selfDeafenedByChannel, channelId, username);
             boolean modDeafened = stateIn(modDeafenedByChannel, channelId, username);
+            boolean permMuted = stateIn(permMutedByChannel, channelId, username);
             state = new VoiceControlState(username, channelId,
-                    selfMuted || modMuted, selfDeafened || modDeafened,
-                    selfMuted, selfDeafened, modMuted, modDeafened);
+                    selfMuted || modMuted || permMuted, selfDeafened || modDeafened,
+                    selfMuted, selfDeafened, modMuted, modDeafened, permMuted);
         }
         messagingTemplate.convertAndSend(VOICE_STATE_TOPIC, state);
     }
@@ -246,7 +265,8 @@ public class VoiceMembershipTracker {
                 || stateIn(selfDeafenedByChannel, channelId, username)
                 || stateIn(modDeafenedByChannel, channelId, username)
                 || stateIn(impliedSelfMutedByChannel, channelId, username)
-                || stateIn(impliedModMutedByChannel, channelId, username);
+                || stateIn(impliedModMutedByChannel, channelId, username)
+                || stateIn(permMutedByChannel, channelId, username);
     }
 
     /** Must run under {@link #lock}: toggles a state set, returning whether it actually changed. */
@@ -295,12 +315,14 @@ public class VoiceMembershipTracker {
                 channelUserCount.remove(channelId);
             }
             // last session gone — the SELF toggles reset (a rejoin starts with devices on; the implied
-            // self-mute dies with its deafen), but the MODERATOR state deliberately SURVIVES — implied
-            // mute included: a server-deafen outlives the target leaving/rejoining/kick just like an
-            // explicit mute (re-published on the next join). Remove from the real (mutable) sets only
-            // — Set.of() from getOrDefault is immutable.
+            // self-mute dies with its deafen), the PERMISSION mute too (the right is re-derived by the
+            // join-time policy on the next entry, a surviving mark would only go stale), but the
+            // MODERATOR state deliberately SURVIVES — implied mute included: a server-deafen outlives
+            // the target leaving/rejoining/kick just like an explicit mute (re-published on the next
+            // join). Remove from the real (mutable) sets only — Set.of() from getOrDefault is immutable.
             for (Map<Long, Set<String>> byChannel
-                    : List.of(selfMutedByChannel, selfDeafenedByChannel, impliedSelfMutedByChannel)) {
+                    : List.of(selfMutedByChannel, selfDeafenedByChannel, impliedSelfMutedByChannel,
+                            permMutedByChannel)) {
                 Set<String> usernames = byChannel.get(channelId);
                 if (usernames != null) {
                     usernames.remove(username);

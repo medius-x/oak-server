@@ -300,6 +300,41 @@ class VoiceMembershipTrackerTest {
     }
 
     @Test
+    void permMuteSurvivesSelfAndModeratorUnmutes() {
+        // Security round 6: the SPEAK-permission mute is derived state — neither origin's
+        // unmute may lift it, only the permission sweep does (each writes its own set).
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setPermMuted(CHANNEL_A, "alice", true);
+
+        tracker.setSelfMuted(CHANNEL_A, "alice", true);
+        tracker.setSelfMuted(CHANNEL_A, "alice", false);   // self-unmute — the perm mute survives
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"));
+        tracker.setMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "alice", false);       // moderator Unmute — still survives
+        assertTrue(tracker.isPermMuted(CHANNEL_A, "alice"));
+        assertTrue(tracker.isMuted(CHANNEL_A, "alice"));
+
+        List<VoiceControlState> states = captureStates(5);
+        VoiceControlState afterModUnmute = states.get(4);
+        assertTrue(afterModUnmute.muted(), "the union stays muted — the perm origin holds it");
+        assertTrue(afterModUnmute.permMuted());
+        assertFalse(afterModUnmute.modMuted(), "the origin flags keep the moderator and the permission apart");
+        assertFalse(afterModUnmute.selfMuted());
+    }
+
+    @Test
+    void permMuteDiesWithTheLeave() {
+        // The right is re-derived on the next entry (SpeakVoicePolicy), so a surviving mark
+        // would only go stale — unlike a moderator mute, the leave clears it.
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.setPermMuted(CHANNEL_A, "alice", true);
+        tracker.exit("s1");
+
+        assertFalse(tracker.isPermMuted(CHANNEL_A, "alice"));
+        assertFalse(tracker.isMuted(CHANNEL_A, "alice"));
+    }
+
+    @Test
     void leavingDropsSelfDeafenButKeepsModeratorDeafen() {
         tracker.enter("s1", "alice", CHANNEL_A);
         tracker.setSelfDeafened(CHANNEL_A, "alice", true);

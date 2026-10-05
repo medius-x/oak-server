@@ -33,6 +33,7 @@ public class VoiceMembershipHandler {
     private final ChannelRepository channelRepository;
     private final VoiceActivityRegistry activityRegistry;
     private final AfkVoicePolicy afkVoicePolicy;
+    private final SpeakVoicePolicy speakVoicePolicy;
 
     @MessageMapping("/voice.join")
     public void join(VoiceCommand command, Principal sender, @Header("simpSessionId") String sessionId) {
@@ -55,6 +56,8 @@ public class VoiceMembershipHandler {
         activityRegistry.touch(sender.getName());
         // The AFK room suppresses everyone in it (swept or joined by hand) — Discord semantics.
         afkVoicePolicy.applyOnEnter(sender.getName(), command.channelId());
+        // The SPEAK gate: connecting to hear is not being allowed to talk (security round 6).
+        speakVoicePolicy.applyOnEnter(actor.get(), channel.get());
     }
 
     @MessageMapping("/voice.leave")

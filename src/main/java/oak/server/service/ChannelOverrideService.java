@@ -74,7 +74,7 @@ public class ChannelOverrideService {
         override.setDeny(deny);
         override = overrideRepository.save(override);
         pingChannelsChanged();
-        voiceEnforcer.enforceConnect(channelId, actorUsername);
+        voiceEnforcer.enforceChannelChange(channelId, actorUsername);
         return ChannelOverrideResponse.from(override);
     }
 
@@ -84,7 +84,7 @@ public class ChannelOverrideService {
         overrideRepository.findByChannelIdAndRoleId(channelId, roleId)
                 .ifPresent(overrideRepository::delete);
         pingChannelsChanged();
-        voiceEnforcer.enforceConnect(channelId, actorUsername);
+        voiceEnforcer.enforceChannelChange(channelId, actorUsername);
     }
 
     // --- member-level (per-user) overrides: the private-channel "allow these specific people" ---
@@ -114,7 +114,7 @@ public class ChannelOverrideService {
         override.setDeny(deny);
         override = userOverrideRepository.save(override);
         pingChannelsChanged();
-        voiceEnforcer.enforceConnect(channelId, actorUsername);
+        voiceEnforcer.enforceChannelChange(channelId, actorUsername);
         return ChannelUserOverrideResponse.from(override);
     }
 
@@ -124,7 +124,7 @@ public class ChannelOverrideService {
         userOverrideRepository.findByChannelIdAndUserId(channelId, userId)
                 .ifPresent(userOverrideRepository::delete);
         pingChannelsChanged();
-        voiceEnforcer.enforceConnect(channelId, actorUsername);
+        voiceEnforcer.enforceChannelChange(channelId, actorUsername);
     }
 
     private void pingChannelsChanged() {

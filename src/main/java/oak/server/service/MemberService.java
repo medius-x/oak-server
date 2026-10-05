@@ -112,7 +112,7 @@ public class MemberService {
         userRepository.save(target);
         // The member's effective mask may have just lost CONNECT — evict them from rooms they no
         // longer belong in (same in-transaction visibility as the override hooks; see VoiceAccessEnforcer).
-        voiceEnforcer.enforceConnectForUser(target.getUsername(), actorUsername);
+        voiceEnforcer.enforceForMember(target.getUsername(), actorUsername);
         publish("rolesChanged", target.getId());
         return MemberResponse.from(target, signer, auth.isOwner(target), auth.dmRestricted(target));
     }

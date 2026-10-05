@@ -267,9 +267,10 @@ public class ChannelService {
         });
     }
 
-    /** The member's resolved SEND_MESSAGES / ATTACH_FILES on one channel (override-aware) — for the
-     *  client to gate the composer. Channel-scoped (unlike {@code /api/users/me/permissions}, which is
-     *  server-wide), so private channels and per-channel denies are honoured. */
+    /** The member's resolved SEND_MESSAGES / ATTACH_FILES / STREAM on one channel (override-aware) —
+     *  for the client to gate the composer and the voice share buttons. Channel-scoped (unlike
+     *  {@code /api/users/me/permissions}, which is server-wide), so private channels and per-channel
+     *  denies are honoured. */
     @Transactional(readOnly = true)
     public ChannelMyPermissions myPermissions(Long channelId, String username) {
         Channel channel = channelRepository.findById(channelId)
@@ -277,7 +278,8 @@ public class ChannelService {
         User user = auth.requireUser(username);
         return new ChannelMyPermissions(
                 auth.hasInChannel(user, channel, Permission.SEND_MESSAGES),
-                auth.hasInChannel(user, channel, Permission.ATTACH_FILES));
+                auth.hasInChannel(user, channel, Permission.ATTACH_FILES),
+                auth.hasInChannel(user, channel, Permission.STREAM));
     }
 
     /** Deletes a channel and everything tied to it (messages + per-channel overrides), then broadcasts

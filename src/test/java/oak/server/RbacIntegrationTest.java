@@ -330,7 +330,8 @@ class RbacIntegrationTest {
         mockMvc.perform(get("/api/channels/" + channelId + "/permissions/me").header("Authorization", "Bearer " + bobToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.sendMessages").value(true))
-                .andExpect(jsonPath("$.attachFiles").value(true));
+                .andExpect(jsonPath("$.attachFiles").value(true))
+                .andExpect(jsonPath("$.stream").value(true));
 
         // deny SEND_MESSAGES for @everyone on this channel
         Channel channel = channelRepository.findById(channelId).orElseThrow();
@@ -343,7 +344,34 @@ class RbacIntegrationTest {
         mockMvc.perform(get("/api/channels/" + channelId + "/permissions/me").header("Authorization", "Bearer " + bobToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.sendMessages").value(false))
-                .andExpect(jsonPath("$.attachFiles").value(true));
+                .andExpect(jsonPath("$.attachFiles").value(true))
+                .andExpect(jsonPath("$.stream").value(true));
+    }
+
+    @Test
+    void channelMyPermissions_streamDenyHidesTheWireFlag() throws Exception {
+        // Security round 6: the share/camera gate is client-side, fed by this flag — a per-channel
+        // STREAM deny must reach the wire (the AFK-style hiding is the client's part).
+        String ownerToken = registerAndLogin("streamer", "supersecret");
+        String bobToken = registerAndLogin("watcher", "supersecret");
+        Long voiceId = createChannel(ownerToken, "stage", "VOICE");
+
+        mockMvc.perform(get("/api/channels/" + voiceId + "/permissions/me").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stream").value(true));
+
+        Channel channel = channelRepository.findById(voiceId).orElseThrow();
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(channel, everyone, 0L, Permission.STREAM.bit));
+
+        mockMvc.perform(get("/api/channels/" + voiceId + "/permissions/me").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stream").value(false));
+        // the owner bypasses the override through ADMINISTRATOR
+        mockMvc.perform(get("/api/channels/" + voiceId + "/permissions/me").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.stream").value(true));
     }
 
     @Test

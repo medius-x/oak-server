@@ -9,11 +9,14 @@ package oak.server.dto;
  * a client-side {@code mod = union ∖ self} derivation is AMBIGUOUS when both hold (union=true,
  * self=true leaves mod unknowable), which lost the moderator's flag whenever the member was also
  * self-muted. {@code muted}/{@code deafened} remain the union (the compliance semantics; union is
- * derivable, kept for readability/compat). Clients paint the origin (self = yellow, moderator =
- * red, moderator wins) and keep the two toggles independent. WIRE: fields are append-only; both
- * mirrors change in one pass (the client mappers do not tolerate unknown fields — paired deploy).
+ * derivable, kept for readability/compat). The ninth field {@code permMuted} is the SPEAK-permission
+ * mute (security round 6): a member sitting in a channel without {@code Permission#SPEAK} — it paints
+ * the same red as a moderator mute, but neither a self-unmute nor a moderator's Unmute lifts it;
+ * only the permission sweep does. WIRE: fields are append-only; both mirrors change in one pass
+ * (the client mappers do not tolerate unknown fields — paired deploy).
  */
 public record VoiceControlState(String username, Long channelId, boolean muted, boolean deafened,
                                 boolean selfMuted, boolean selfDeafened,
-                                boolean modMuted, boolean modDeafened) {
+                                boolean modMuted, boolean modDeafened,
+                                boolean permMuted) {
 }
