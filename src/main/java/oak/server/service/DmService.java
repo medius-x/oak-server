@@ -50,6 +50,11 @@ import java.util.Set;
  *
  * <p><b>Blocking:</b> a DM / group invite cannot involve a user who blocks, or is blocked by, the actor.
  *
+ * <p><b>DM restriction:</b> a member holding a role with {@code RESTRICT_PRIVATE_MESSAGES} (see
+ * {@code AuthorizationService.dmRestricted}) can neither start nor receive DMs and cannot be added
+ * to a group; existing conversations stay readable (the send-side gate for those lives in
+ * {@code MessageService} via {@code requireDmSendAllowed}).
+ *
  * <p><b>Events:</b> each mutation publishes a {@link DmChannelEvent} to every participant on
  * {@code /user/queue/dm.channels} via {@code convertAndSendToUser(username, ...)}.
  */
@@ -114,6 +119,12 @@ public class DmService {
         if (relationshipRepository.blockedEitherDirection(me, recipient)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot message a blocked user");
         }
+        if (auth.dmRestricted(me)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to send private messages");
+        }
+        if (auth.dmRestricted(recipient)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This member cannot receive private messages");
+        }
         String key = dmKey(me.getId(), recipient.getId());
         Optional<Channel> existing = channelRepository.findByDmKey(key);
         if (existing.isPresent()) {
@@ -140,6 +151,9 @@ public class DmService {
     @Transactional
     public DmChannelResponse createGroupDm(String username, List<Long> participantIds, String name) {
         User me = auth.requireUser(username);
+        if (auth.dmRestricted(me)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to send private messages");
+        }
         List<User> others = resolveOthers(me, participantIds);
         int total = 1 + others.size();
         if (total < GROUP_MIN) {
@@ -171,6 +185,12 @@ public class DmService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found"));
         if (relationshipRepository.blockedEitherDirection(me, toAdd)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot add a blocked user");
+        }
+        if (auth.dmRestricted(me)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You are not allowed to send private messages");
+        }
+        if (auth.dmRestricted(toAdd)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This member cannot receive private messages");
         }
         if (participantRepository.existsByChannelIdAndUserId(channelId, userId)) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "Already a participant");
@@ -262,6 +282,9 @@ public class DmService {
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "User not found: " + id));
             if (relationshipRepository.blockedEitherDirection(me, other)) {
                 throw new ResponseStatusException(HttpStatus.FORBIDDEN, "You cannot add a blocked user");
+            }
+            if (auth.dmRestricted(other)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "This member cannot receive private messages");
             }
             others.add(other);
         }

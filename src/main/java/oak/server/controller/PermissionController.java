@@ -12,7 +12,8 @@ import java.util.List;
 
 /**
  * The permission catalog — name + group for every {@link Permission}, in enum order. The client
- * renders the role-editor checkboxes grouped (General / Text / Voice) from this. Read-only, JWT only.
+ * renders the role-editor checkboxes grouped (General / Text / Voice) from this. Reserved (retired)
+ * bits are omitted — they own a position for mask stability but no row in the editor. Read-only, JWT only.
  */
 @RestController
 @RequestMapping("/api/permissions")
@@ -22,6 +23,7 @@ public class PermissionController {
     @GetMapping
     public List<PermissionCatalogEntry> catalog() {
         return Arrays.stream(Permission.values())
+                .filter(permission -> !permission.isReserved())
                 .map(permission -> new PermissionCatalogEntry(permission.name(), permission.getGroup().name()))
                 .toList();
     }

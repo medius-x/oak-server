@@ -41,12 +41,13 @@ public class RoleSeeder implements ApplicationRunner {
     /** Position of the OWNER role — far above any custom role (which are small dense integers). */
     public static final int OWNER_POSITION = Integer.MAX_VALUE / 2;
 
-    /** Defaults granted to everyone — keeps the app usable for members with no other roles. */
+    /** Defaults granted to everyone — keeps the app usable for members with no other roles.
+     *  EMBED_LINKS was dropped when the bit retired (2026-10-02): V16 clears it from existing
+     *  rows, and fresh seeds must not re-set it. */
     static final long EVERYONE_DEFAULTS = Permissions.union(
             Permission.SEND_MESSAGES.bit,
             Permission.READ_MESSAGE_HISTORY.bit,
             Permission.ATTACH_FILES.bit,
-            Permission.EMBED_LINKS.bit,
             Permission.ADD_REACTIONS.bit,
             Permission.CONNECT.bit,
             Permission.SPEAK.bit,

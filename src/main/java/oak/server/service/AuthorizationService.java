@@ -2,6 +2,7 @@ package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
 import oak.server.entity.Channel;
+import oak.server.entity.ChannelParticipant;
 import oak.server.entity.ChannelRoleOverride;
 import oak.server.entity.ChannelType;
 import oak.server.entity.ChannelUserOverride;
@@ -269,6 +270,64 @@ public class AuthorizationService {
             return isOwner(actor);
         }
         return topPosition(actor) > role.getPosition();
+    }
+
+    // --- private-message restriction (RESTRICT_PRIVATE_MESSAGES — the one subtractive permission) ---
+
+    /**
+     * Whether the member is barred from direct messages: some explicitly held role carries the
+     * {@link Permission#RESTRICT_PRIVATE_MESSAGES} bit in its RAW mask. Deliberately NOT resolved
+     * through {@link #effectiveBase}: the OR-of-roles model cannot subtract a bit, its
+     * ADMINISTRATOR/OWNER short-circuit to ALL would make every admin look restricted, and the bit
+     * must never leak into the {@code /users/me/permissions} name list (it is not a grant). The
+     * @everyone copy of the bit is ignored — restriction is expressed per held role only, so a
+     * single checkbox on @everyone cannot silence the whole instance. OWNER and ADMINISTRATOR
+     * holders are immune (the privilege model everywhere else); to restrict an admin, first take
+     * the admin bit away.
+     */
+    public boolean dmRestricted(User user) {
+        if (isOwner(user) || hasServer(user, Permission.ADMINISTRATOR)) {
+            return false;
+        }
+        Set<Role> roles = user.getRoles();
+        if (roles == null) {
+            return false;
+        }
+        for (Role role : roles) {
+            // The OWNER role's mask is ALL — it "carries" every bit without meaning any of them.
+            if (role.getKind() == RoleKind.OWNER) {
+                continue;
+            }
+            if (Permissions.has(role.getPermissions(), Permission.RESTRICT_PRIVATE_MESSAGES)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The send-side DM gate for existing conversations. In a 1:1 DM the restriction freezes BOTH
+     * sides — a message to a restricted member would be a received one — while a group DM only
+     * silences the restricted member themselves (one restricted member must not freeze the chat
+     * for everyone else). Reads (history, read-state, subscriptions) are NOT gated: existing
+     * conversations stay readable. Server channels are a no-op — their authority is SEND_MESSAGES.
+     */
+    public void requireDmSendAllowed(User author, Channel channel) {
+        if (channel == null
+                || (channel.getType() != ChannelType.DM && channel.getType() != ChannelType.GROUP_DM)) {
+            return;
+        }
+        if (dmRestricted(author)) {
+            throw forbidden("You are not allowed to send private messages");
+        }
+        if (channel.getType() == ChannelType.DM) {
+            for (ChannelParticipant participant : participantRepository.findByChannelId(channel.getId())) {
+                User member = participant.getUser();
+                if (!member.getId().equals(author.getId()) && dmRestricted(member)) {
+                    throw forbidden("This member cannot receive private messages");
+                }
+            }
+        }
     }
 
     // --- require* helpers (throw 403 on denial) ---

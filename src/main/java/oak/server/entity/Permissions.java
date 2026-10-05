@@ -43,12 +43,26 @@ public final class Permissions {
         return set;
     }
 
-    /** The names of every permission set in {@code mask}, sorted for stable output. */
+    /** The names of every permission set in {@code mask}, sorted for stable output. Reserved
+     *  (retired) bits are skipped — they never surface on the wire; a stale persisted bit
+     *  (a pre-V16 database) would otherwise leak a "RESERVED_…" name into role/permission lists. */
     public static Set<String> names(long mask) {
         Set<String> names = new TreeSet<>();
         for (Permission permission : fromMask(mask)) {
-            names.add(permission.name());
+            if (!permission.isReserved()) {
+                names.add(permission.name());
+            }
         }
+        return names;
+    }
+
+    /** Wire name list for a MEMBER's effective grants: {@link #names} minus the subtractive
+     *  {@link Permission#RESTRICT_PRIVATE_MESSAGES} — it is not a grant (an ADMINISTRATOR's mask is
+     *  ALL and would carry it without any restricting role), so it must not reach client
+     *  {@code can()}-style gating. Role round-trips (the editor's checked set) still use {@link #names}. */
+    public static Set<String> grantNames(long mask) {
+        Set<String> names = names(mask);
+        names.remove(Permission.RESTRICT_PRIVATE_MESSAGES.name());
         return names;
     }
 

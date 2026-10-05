@@ -175,6 +175,10 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
         // Channel-scoped SEND_MESSAGES (respects overrides; OWNER/ADMINISTRATOR bypass).
         auth.requireInChannel(author, channel, Permission.SEND_MESSAGES);
+        // DMs are membership-based, so the check above degenerates to a participant check there —
+        // the private-message restriction needs its own gate (a restricted member may not send,
+        // and a 1:1 with one is frozen for BOTH sides; reads stay open).
+        auth.requireDmSendAllowed(author, channel);
         // Posting a message that carries attachments additionally requires ATTACH_FILES (channel-scoped).
         if (!attachments.isEmpty()) {
             auth.requireInChannel(author, channel, Permission.ATTACH_FILES);
@@ -511,6 +515,8 @@ public class MessageService {
         User actor = userRepository.findByUsername(actorUsername)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
         auth.requireInChannel(actor, targetChannel, Permission.SEND_MESSAGES);
+        // A forward into a DM is a new DM message — the same restriction gate as create() applies.
+        auth.requireDmSendAllowed(actor, targetChannel);
 
         String content = request.content();
         List<AttachmentRef> attachments;

@@ -59,7 +59,7 @@ public class MemberService {
     public List<MemberResponse> list() {
         return userRepository.findAllByOrderByIdAsc().stream()
                 .filter(user -> !user.isRemoved())
-                .map(user -> MemberResponse.from(user, signer, auth.isOwner(user)))
+                .map(user -> MemberResponse.from(user, signer, auth.isOwner(user), auth.dmRestricted(user)))
                 .toList();
     }
 
@@ -69,7 +69,7 @@ public class MemberService {
     public List<MemberResponse> banned() {
         return userRepository.findAllByOrderByIdAsc().stream()
                 .filter(user -> user.isBanned() || user.isRemoved())
-                .map(user -> MemberResponse.from(user, signer, auth.isOwner(user)))
+                .map(user -> MemberResponse.from(user, signer, auth.isOwner(user), auth.dmRestricted(user)))
                 .toList();
     }
 
@@ -114,7 +114,7 @@ public class MemberService {
         // longer belong in (same in-transaction visibility as the override hooks; see VoiceAccessEnforcer).
         voiceEnforcer.enforceConnectForUser(target.getUsername(), actorUsername);
         publish("rolesChanged", target.getId());
-        return MemberResponse.from(target, signer, auth.isOwner(target));
+        return MemberResponse.from(target, signer, auth.isOwner(target), auth.dmRestricted(target));
     }
 
     /** Sets a member's NICKNAME — the display name every surface shows and the only name mentions
@@ -147,7 +147,7 @@ public class MemberService {
         userRepository.save(target);
         publish("renamed", target.getId());
         messagingTemplate.convertAndSend(UserController.USERS_TOPIC, UserSummary.from(target, signer));
-        return MemberResponse.from(target, signer, auth.isOwner(target));
+        return MemberResponse.from(target, signer, auth.isOwner(target), auth.dmRestricted(target));
     }
 
     /** Resets the nickname to the member's login handle (the fresh-account default). 409 if that

@@ -82,7 +82,8 @@ public class UserController {
     @GetMapping("/me/permissions")
     public MyPermissions myPermissions(@AuthenticationPrincipal UserDetails principal) {
         User user = requireUser(principal);
-        return new MyPermissions(Permissions.names(auth.effectiveBase(user)), auth.isOwner(user));
+        return new MyPermissions(Permissions.grantNames(auth.effectiveBase(user)), auth.isOwner(user),
+                auth.dmRestricted(user));
     }
 
     /**

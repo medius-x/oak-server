@@ -1,6 +1,7 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import java.util.List;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
 import oak.server.entity.Permission;
@@ -67,6 +68,34 @@ class RbacIntegrationTest {
                 .andExpect(jsonPath("$.owner").value(true))
                 .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.hasItem("ADMINISTRATOR")))
                 .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.hasItem("MANAGE_CHANNELS")));
+    }
+
+    @Test
+    void retiredPermissionBitsNeverSurfaceOnTheWire() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+
+        // The catalog carries no reserved rows (they only occupy their ordinal)…
+        MvcResult catalogResult = mockMvc.perform(get("/api/permissions").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        List<String> catalogNames = JsonPath.read(catalogResult.getResponse().getContentAsString(), "$[*].name");
+        assertFalse(catalogNames.stream().anyMatch(name -> name.startsWith("RESERVED_")), "catalog must carry no reserved bits");
+        assertFalse(catalogNames.contains("EMBED_LINKS"));
+        assertFalse(catalogNames.contains("USE_EXTERNAL_EMOJIS"));
+
+        // …and the OWNER's "every permission" name list skips them too — the ADMINISTRATOR
+        // short-circuit sets every BIT (reserved included), names() must filter them out.
+        mockMvc.perform(get("/api/users/me/permissions").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.hasItem("RESERVED_EMBED_LINKS"))))
+                .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.hasItem("RESERVED_USE_EXTERNAL_EMOJIS"))));
+
+        // Fresh @everyone defaults carry neither retired bit (V16 clears legacy rows).
+        long retiredBits = Permission.RESERVED_EMBED_LINKS.bit | Permission.RESERVED_USE_EXTERNAL_EMOJIS.bit;
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        assertEquals(0L, everyone.getPermissions() & retiredBits);
     }
 
     @Test
