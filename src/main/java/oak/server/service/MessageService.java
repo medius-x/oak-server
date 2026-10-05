@@ -135,6 +135,9 @@ public class MessageService {
     private final AttachmentListCodec attachmentListCodec;
     private final MessageIdempotencyCache idempotencyCache;
     private final AttachmentObjectStore objectStore;
+    /** The H3a gate: message attachments must be slots minted by the upload endpoint —
+     *  prefix-checked, and rejected when known to be minted for someone else. */
+    private final AttachmentSlotRegistry slotRegistry;
     /** Publishes {@link MessagePostedInDiscussion} instead of calling DiscussionService
      *  directly — DiscussionService depends on THIS service for the lazy-create flow, and a
      *  back-call would close a bean cycle. */
@@ -156,7 +159,7 @@ public class MessageService {
             }
         }
         String content = request.content();
-        List<AttachmentRef> attachments = sanitized(request.attachments());
+        List<AttachmentRef> attachments = sanitized(request.attachments(), authorUsername);
         // A sticker satisfies the content-or-attachment rule on its own (sticker-only sends
         // have null content) and rides NO extra permission — it is not a file attachment,
         // exactly like a ":name:" emoji token in text.
@@ -573,7 +576,7 @@ public class MessageService {
             originAuthorName = request.originAuthorName();
             originCreatedAt = request.originCreatedAt();
             trusted = false;
-            attachments = sanitized(request.attachments());
+            attachments = sanitized(request.attachments(), actorUsername);
             // The client-supplied tree rides the same trust model as every mode-b field; the
             // depth cap runs BEFORE persisting so a hostile payload cannot bloat the column.
             originReply = nestedReplyCodec.capDepth(request.originReply(), MAX_QUOTE_DEPTH);
@@ -962,11 +965,16 @@ public class MessageService {
         return flat.length() <= REPLY_PREVIEW_MAX ? flat : flat.substring(0, REPLY_PREVIEW_MAX) + "…";
     }
 
-    /** Normalizes an incoming attachment list: null → empty, null ELEMENTS dropped, and a
-     *  blank {@code key} element is a 400 (the key is the only thing the server cannot invent —
-     *  the client must have uploaded the bytes and minted it first). Enforces
-     *  {@link #MAX_ATTACHMENTS} the same way. */
-    private List<AttachmentRef> sanitized(List<AttachmentRef> attachments) {
+    /** Normalizes an incoming attachment list: null → empty, null ELEMENTS dropped, a blank
+     *  {@code key} element is a 400 (the key is the only thing the server cannot invent — the
+     *  client must have uploaded the bytes and minted it first), and {@link #MAX_ATTACHMENTS}
+     *  is enforced. The key namespace gate (H3a): every key — including a video
+     *  {@code thumbnailKey} — must be an {@code attachments/} slot minted by the upload
+     *  endpoint, and a key this instance minted for ANOTHER user is rejected (smuggling a
+     *  foreign object — e.g. someone's avatar or an emoji read from the public catalogs —
+     *  into a message made it permanently re-signable via /api/attachments/link). A key the
+     *  registry does not know still passes: pending uploads must survive a server restart. */
+    private List<AttachmentRef> sanitized(List<AttachmentRef> attachments, String authorUsername) {
         if (attachments == null) {
             return List.of();
         }
@@ -976,12 +984,28 @@ public class MessageService {
                     "At most " + MAX_ATTACHMENTS + " attachments per message");
         }
         for (AttachmentRef ref : kept) {
-            if (ref.key() == null || ref.key().isBlank()) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                        "Attachment is missing its key (upload the file first)");
+            requireUploadSlot(ref.key(), authorUsername);
+            if (ref.thumbnailKey() != null && !ref.thumbnailKey().isBlank()) {
+                requireUploadSlot(ref.thumbnailKey(), authorUsername);
             }
         }
         return kept;
+    }
+
+    /** Hard prefix boundary + soft ownership check — see {@link #sanitized}. */
+    private void requireUploadSlot(String key, String authorUsername) {
+        if (key == null || key.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Attachment is missing its key (upload the file first)");
+        }
+        if (!key.startsWith("attachments/")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Unknown attachment slot (upload the file first)");
+        }
+        if (slotRegistry.isKnownForeignTo(key, authorUsername)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Attachment belongs to another member (upload the file first)");
+        }
     }
 
     /** Validates a client-selected attachment subset for an intra-instance forward (the image

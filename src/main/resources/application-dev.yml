@@ -1,6 +1,8 @@
 # OAK server — local development profile.
 # Targets the peripheral services brought up by env/docker-compose.yml.
-# Defaults below mirror env/.env; override any value via environment variable.
+# The .env file is imported below, so the Spring side and the compose side
+# share ONE source of truth for secrets; real environment variables still
+# win over .env values (standard Spring precedence).
 
 # Verbose WebSocket/STOMP logging in dev — shows handshakes, CONNECT, SUBSCRIBE, MESSAGE routing.
 logging:
@@ -9,6 +11,13 @@ logging:
     org.springframework.messaging.simp: DEBUG
 
 spring:
+  # env/.env is git-ignored (per-machine secrets since the security round
+  # 2026-10-05); env/.env.example is the committed template. optional — a
+  # missing file only falls back to the defaults below. The explicit
+  # [.properties] suffix makes Spring parse the extensionless-dotfile name as
+  # a properties file (verified live: without it the import is silently
+  # ignored and the placeholder fallbacks below win).
+  config.import: optional:file:./env/.env[.properties]
   datasource:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:oak}
     username: ${POSTGRES_USER:oak}
@@ -62,36 +71,47 @@ oak:
 
   # MinIO — S3-compatible object storage for media attachments.
   # oak-server generates presigned URLs; clients upload/download directly.
+  # The credentials are the SCOPED APP USER (bucket-only policy, created by
+  # the one-shot minio-init compose service) — NOT the MinIO root: a leaked
+  # app key cannot list/delete outside oak-attachments.
   minio:
     enabled: ${MINIO_ENABLED:true}                           # false in tests (noop signer)
     endpoint: ${MINIO_ENDPOINT:http://localhost:9000}        # server -> MinIO (internal)
     public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}  # client -> MinIO (baked into presigned URLs)
-    access-key: ${MINIO_ROOT_USER:oak_minio}
-    secret-key: ${MINIO_ROOT_PASSWORD:oak_minio_secret}
+    access-key: ${MINIO_APP_USER:oak_app}
+    secret-key: ${MINIO_APP_PASSWORD:oak_app_dev_secret_change_me}
     bucket: ${MINIO_BUCKET:oak-attachments}  # created by oak-server at startup if missing
 
   # Janus — SFU for 3+ participant voice/video rooms & screen sharing.
   # oak-server manages rooms via REST; the JavaFX client connects over WebSocket.
+  # admin-secret has NO safe fallback: it guards the Admin API AND derives every
+  # room pin/secret — it must come from env/.env (or a real env var), unique
+  # per deployment. Without it Janus admin calls fail loudly (403), which is
+  # the point.
   janus:
     rest-url: ${JANUS_REST_URL:http://localhost:8088/janus}  # server -> Janus REST
     ws-url: ${JANUS_WS_URL:ws://localhost:8188}              # client -> Janus WebSocket
-    admin-secret: ${JANUS_ADMIN_SECRET:janus_admin_secret}
+    admin-secret: ${JANUS_ADMIN_SECRET:change-me-janus-admin}
     admin-url: ${JANUS_ADMIN_URL:http://localhost:7088/admin}  # Admin API (token bookkeeping)
     admin-enabled: ${JANUS_ADMIN_ENABLED:true}                # false in tests -> noop service
 
   # Coturn — TURN server for P2P fallback (1-on-1 calls behind NAT).
-  # These are handed to WebRTC clients as part of their ICE config.
+  # static-auth-secret backs coturn's --use-auth-secret mode: each
+  # /api/call/config call mints a short-lived per-member ticket
+  # (TurnCredentialIssuer); the wire (username/credential fields) is unchanged.
   turn:
     host: ${TURN_HOST:localhost}
     # 34780 mirrors env/.env: Docker Desktop leaked UDP 3478 on the host.
     port: ${TURN_LISTEN_PORT:34780}
-    user: ${TURN_USER:oak}
-    password: ${TURN_PASSWORD:oakturn123}
+    static-auth-secret: ${TURN_STATIC_AUTH_SECRET:change-me-turn-static-auth}
+    credential-ttl: ${TURN_CREDENTIAL_TTL:1h}  # parsed as Duration
     realm: ${TURN_REALM:oak.local}
 
 # Notes:
-#  - MinIO bucket (oak-attachments) is NOT created automatically. Either create it
-#    via the MinIO console (http://localhost:9001) or have oak-server create it on
-#    startup via the MinIO admin SDK.
+#  - Secrets (MinIO app password, Janus admin secret, TURN static-auth secret)
+#    live in env/.env (git-ignored; template: env/.env.example). First run:
+#    `cp env/.env.example env/.env`, generate secrets (`openssl rand -hex 32`),
+#    `docker compose up -d` (minio-init creates the scoped app user), restart oak-server.
 #  - Everything here is plain HTTP/WS (no TLS). TLS termination belongs on a reverse
-#    proxy in front of oak-server for non-dev environments.
+#    proxy in front of oak-server for non-dev environments; for LAN deployments do
+#    NOT host-map Janus :7088 and the MinIO console :9001.

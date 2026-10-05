@@ -607,6 +607,173 @@ oak.server
   restricted молчит, остальные пишут, его не добавить; OWNER/ADMIN иммунны; бит на
   @everyone никого не ограничивает; снятие роли живо размораживает; wire-флаги без
   утечки имени бита). — **439 тестов (было 431)**.
+- [x] **Безопасность раунд 1 из 5: запрет STOMP SEND в брокерские топики (2026-10-05,
+  security-аудит; НОВЫЙ `websocket/SendDestinationInterceptor` + регистрация в
+  `WebSocketConfig.configureClientInboundChannel` третьим интерсептором).** Корневая
+  дыра аудита (CRITICAL): простой брокер НЕ авторизует SEND по назначению — клиентский
+  фрейм с destination `/topic/channel.5` или `/user/<victim>/queue/...` раздавался
+  подписчикам КАК БУДТО его послал сервер. Это давало любому аутентифицированному
+  участнику (stompy против `/ws`): инжект самодельных `MessageResponse` в любые
+  каналы/чужие DM (рендер + mention-пинги, не персистится), спуф `call.signal RING` с
+  подменённым `from` (сервер штампует from только на ЛЕГИТМНОМ `/app`-пути), forged
+  `member.kick`/`voice.control KICKED` в очереди жертв (клиент сам рвёт сессию —
+  remote-logout без прав), спуф presence/voice-state, fan-out амплификацию без rate
+  limit. Фикс: интерсептор дропает (null + WARN с username) любой SEND, чей destination
+  вне `/app/`** — у клиента нет легитимной причины публиковать в брокер (все
+  клиент→сервер команды = @MessageMapping под `/app`; `/user/queue/...` пишет только
+  сервер через convertAndSendToUser). CONNECT/SUBSCRIBE не тронуты (их ведут
+  AuthChannelInterceptor / ChannelSubscriptionInterceptor). Тесты: НОВЫЙ
+  `SendDestinationInterceptorTest` (8: /app проходит; /topic, /user/чужая-queue,
+  /queue, голый /app, null-destination — дроп; SUBSCRIBE/CONNECT passthrough). —
+  **447 тестов (было 439)**. Wire не менялся — деплой только сервер. Контекст
+  полного аудита (C1–C2, H1–H9, M1–M8, L) и план раундов 2–5 — в сессии 2026-10-05;
+  раунды 2 (секреты деплоя: Janus admin secret/MinIO IAM/TURN auth-secret), 3
+  (REST/MinIO ключи+квоты), 4 (Janus pin-сверка/ban-evict/display-сверка), 5
+  (получатели call/voice-invite + override/voice-read гейты) — утверждены юзером.
+- [x] **Безопасность раунд 2 из 5: секреты деплоя — Janus admin secret / MinIO scoped
+  IAM / TURN REST-API креды (2026-10-05, C2+H5+H6; ЖИВАЯ ВЕРИФИКАЦИЯ ПРОЙДЕНА).**
+  **(1) env/.env УШЁЛ ИЗ РЕПО:** `.gitignore` += `env/.env` (git rm --cached); шаблон
+  `env/.env.example` (change-me-плейсхолдеры + инструкция `openssl rand -hex 32`);
+  локальный env/.env перегенерён (секреты только на этой машине; POSTGRES/MINIO_ROOT
+  не тронуты — volume привязан к ним). **SSOT для Spring:** `spring.config.import:
+  optional:file:./env/.env[.properties]` в application-dev.yml — Spring и compose читают
+  ОДИН файл. **ГРАБЛЯ (живая): расширение `.env` Spring МОЛЧА игнорирует** (dotfile без
+  распознанного расширения ≠ properties) — обязателен суффикс формата `[.properties]`;
+  без него import тихо пропускается и побеждают фолбэки yml (симптом: MinIO
+  signature-does-not-match при верных кредах в .env). **(2) JANUS (C2):** janus.jcfg
+  `admin_secret = "@JANUS_ADMIN_SECRET@"` ПЛЕЙСХОЛДЕР; Dockerfile ENTRYPOINT sed'ит
+  env в конфиг при старте контейнера (ENV-фолбэк для голого docker run = change-me);
+  compose передаёт `JANUS_ADMIN_SECRET` из .env. Секрет больше НЕ в образе/репо; PIN
+  всех комнат (HMAC от него) стал невычислимым извне. Живая проверка: admin-запрос с
+  новым секретом авторизуется, со старым публичным `janus_admin_secret` — 403.
+  7088 остаётся host-mapped ТОЛЬКО для dev-топологии (oak-server на хосте; Windows
+  port-proxy не даёт отличить источник — ACL бессилен); PROD-NOTE в compose: в реальном
+  деплое держать в docker-сети. **(3) MinIO (H5):** НОВЫЙ one-shot сервис `minio-init`
+  (image minio/minio:latest — ВНУТРИ него есть /usr/bin/mc, тянуть minio/mc НЕ надо:
+  Docker Hub с этой машины недоступен; depends_on healthy) создаёт scoped-юзера
+  oak_app + policy `oak-app` (CreateBucket на *, ListBucket/GetBucketLocation на
+  бакет, s3:* на objects) — идемпотентен. application-dev.yml: `oak.minio.access-key/
+  secret-key` читают `MINIO_APP_USER/MINIO_APP_PASSWORD` (НЕ root: root остался только
+  для консоли/минта юзера). Живая проверка: mc с oak_app видит только oak-attachments;
+  oak-server стартовал с app-кредами (bucket verify прошёл). **(4) TURN (H6):** coturn
+  `--use-auth-secret --static-auth-secret=${TURN_STATIC_AUTH_SECRET}` (минус --user и
+  --lt-cred-mech — coturn WARNING'ал о смешении методов, use-auth-secret самодостаточен);
+  `TurnProperties` = (host, port, staticAuthSecret, credentialTtl, realm); НОВЫЙ
+  `service/TurnCredentialIssuer` — REST-API тикет `<expiry-epoch>:<login>` +
+  base64(HMAC-SHA1(secret, username)), TTL 1ч (аллокации переживают экспаери креда);
+  CallController минтит FRESH тикет на каждый /api/call/config — wire НЕ менялся
+  (username/credential те же поля RTCIceServer), space-client не тронут. Тесты: НОВЫЙ
+  `TurnCredentialIssuerTest` (5: RFC-2202-вектор HMAC; username-формат; base64-раундтрип
+  20 байт; детерминизм; expiry-продвижение) + CallConfigIntegrationTest переписан
+  (regex `<epoch>:alice` вместо статической пары). — **452 теста (было 447)**.
+  **ДЕПЛОЙ-ИНСТРУКЦИЯ: docker compose build janus && docker compose up -d → рестарт
+  oak-server** (старый процесс с прежним admin-secret получит 403 на add_token — голос
+  до рестарта мёртв; это намеренно громко). Прод-границы задокументированы: 7088/9001
+  не хостить, TLS-прокси — backlog (provisioning).
+- [x] **Безопасность раунд 3 из 5: REST/MinIO ключи и квоты (2026-10-05, H1–H4; НОВЫЙ
+  `service/AttachmentSlotRegistry`).** **(H1) Avatar/server-icon confirm-гейт:** каждый
+  минт-слот (`/me/avatar[/original]`, `/api/server/avatar[/original]`) регистрируется в
+  реестре key→owner (in-memory, TTL 24ч, кап 10k с деградацией к «unknown»); confirm
+  принимает ТОЛЬКО ключи правильного namespace (`avatars/` не-оригинал / `avatars/originals/`
+  / `server-avatars/`) И выданные ЭТОМУ юзеру — прежде принимался любой ≤512-символьный
+  ключ, и последующий replace/remove УДАЛЯЛ чужой объект (все эмодзи/стикеры/чужие аватары
+  инстанса — вandalism-примитив любого участника). Рестарт сервера между PUT и confirm
+  (секунды) = «upload again» — осознанная цена. NoopAttachmentUrlSigner.newOriginalKey
+  приведён к реальному namespace `avatars/originals/noop/`. **(H3a) sanitized()-гейт
+  сообщений:** каждый ключ аттача И thumbnailKey обязан начинаться с `attachments/`
+  (чужой namespace — 400), ключ, известный как выданный ДРУГОМУ юзеру — 400 (контрабанда
+  чужого объекта в вечную переподписку через /link); НЕизвестный ключ проходит (пережил
+  рестарт — префикс есть жёсткая граница). sanitized() получил authorUsername-параметр
+  (create + forward-режим-b). **(H4) Минт-слотов гейт:** POST /api/attachments теперь
+  требует server-scoped ATTACH_FILES (канальные override проверяются в create сообщения,
+  где канал известен) + per-user rolling-квота 60 слотов/10мин → 429 (было: любой аккаунт
+  мог минтить бесконечно — DoS диска с коллатеральной чисткой ЧУЖИХ сообщений ночным GC).
+  Signed content-length НЕ делается: presigned PUT не несёт условий (только POST-policy,
+  = клиентские правки) — задокументированная граница. **(H2) ChannelService.delete
+  type-guard:** DM/GROUP_DM/DISCUSSION id → 400 «Not a server channel» (калька rename)
+  ДО evictions/purge — MANAGE_CHANNELS-держатель больше не может перебором id снести
+  чужие личные переписки. Тесты: AttachmentSlotRegistryTest (5: владелец/чужой/unknown,
+  TTL, кап окна, скольжение через advanceClockBy-шейм), AttachmentIntegrationTest += 2
+  (namespace-гейт вкл. thumbnail; rate-limit 60→429, другой юзер жив), UserAvatarIntegration
+  Test += confirmRejectsForeignAndUnmintedKeys, ChannelServiceTest += deleteRefusesDmAnd
+  DiscussionIds; фикстуры тестов переведены на attachments/-ключи (att/→attachments/).
+  — **461 тест (было 452)**. Wire не менялся — деплой только сервер;客户端 space-client
+  НЕ тронут (кросс-инстанс форвард ре-аплоадит через тот же POST — гейт проходит у
+  легитимного отправителя с ATTACH_FILES).
+- [x] **Безопасность раунд 4 из 5: Janus enforcement (2026-10-05, H7+H8+H9).**
+  **(H7) ensureRoom pin-сверка:** существующая комната «наша» только если НАШ pin её
+  открывает — verify-join контроль-сессией; plugin-error 433 в ACK или poll → ГРОМКИЙ
+  `JanusAdminException("squatted")` + ERROR-лог (RoomController → 503) вместо тихого
+  вечного 433 у всех клиентов (room-id = channelId, токены plugin-scoped — любой участник
+  мог застолбить id своим pin'ом ДО ленивого создания; destroy чужой комнаты невозможен —
+  plugin-secret не наш, поэтому детект+диагностика, не самолечение). Парсер
+  `pluginErrorCode` (async videoroom-ошибки в plugindata). Пин-проба без joined-события в
+  poll-бюджете = WARN «treat as ours» — НИКОГДА не squatted-вердикт на транспортном
+  сбое. **(H8) ban() эвиктит из голоса:** `voiceEnforcer.evictEverywhere` в ban() (калька
+  remove()) — REST/STOMP режут мгновенно, но rogue с уже минченым токеном продолжал
+  вещать/слушать до таймаута сессии. **(H9) display-спуф-контрмера:** НОВЫЙ
+  `kickUnknownPublishers(channelId, knownUsernames)` в JanusVoiceAccessService (Http —
+  kick по publisher ID без display-матча; Noop — пусто): каждый паблишер с display,
+  не резолвящимся в живого участника комнаты (tracker ∪ tokenHolders) и не «oak-control» =
+  ghost → мгновенный kick; НОВЫЙ `VoiceGhostSweeper` (@Scheduled PT60S
+  `oak.voice.ghost-sweep-interval`) прогоняет UNION обоих реестров — пустые комнаты ноль
+  запросов, обитаемая = один passive-join за тик; мгновенность по-прежнему у модераторских
+  действий. Тесты: JanusVoiceAccessServiceTest += 4 (squatted-433; pluginErrorCode;
+  kickUnknownPublishers только ghost по id; exists-тест получил poll-стаб),
+  VoiceGhostSweeperTest (2: union-множества; idle — никогда), MemberServiceTest +=
+  banEvictsTheVictimFromVoiceToo. — **467 тестов (было 461)**. Wire не менялся.
+- [x] **Безопасность раунд 5 из 5: получатели личных пушей + read-гейты метаданных
+  (2026-10-05, M1–M3; НОВЫЙ `service/DirectContactGate`).** **(M1) Гейт адресата для
+  1:1-каналов связи:** `/app/call.signal` и `/app/voice.invite` прежде ретранслировали
+  `to` КАК ЕСТЬ — любой участник звонил/приглашал ЛЮБОГО (вкл. заблокировавших его и
+  замороженных RESTRICT_PRIVATE_MESSAGES — звонок был обходом запрета ЛС), без лимита.
+  НОВЫЙ `DirectContactGate.canReach(sender, target, cardPush)`: rate-окна (все сигналы
+  300/10мин — ICE-бёрсты влезают; card-push кадры RING/voice-invite 10/10мин против
+  ринг-спама) → не-self, target существует и не banned/removed → нет блока в обе стороны
+  (RelationshipRepository.blockedEitherDirection) → ни одна сторона не dmRestricted
+  (личная связь ВКЛЮЧАЕТ звонки). Дропы тихие (call.signal-дисциплина). Оба хендлера
+  (CallSignalingHandler + VoiceInviteHandler после VIEW-гейта) прогоняют кадры через
+  гейт; wire не менялся. **(M2) Override-чтения под MANAGE_CHANNELS:**
+  `ChannelOverrideService.list/listUserOverrides` += actorUsername + requireServer
+  (контроллерные GET + @AuthenticationPrincipal) — прежде матрицы ролей и СПИСОК
+  ЮЗЕРНЕЙМОВ с приватным допуском читались любым по перебору id, ломая конфиденциальность
+  скрытых каналов на уровне метаданных. **(M3) `GET /api/voice/members` VIEW-фильтрован:**
+  VoiceMembershipController фильтрует snapshot по hasInChannel(VIEW_CHANNEL) (канал
+  удалён/неизвестен — строка выкидывается) — occupancy скрытых голосовых больше не
+  выдаётся одним GET; RESIDUAL (осознанный): live-дельты `/topic/voice` /
+  `/topic/voice.state` остаются broadcast (простой брокер не умеет per-viewer доставку) —
+  закрыта pull-сторона, помечено в javadoc контроллера. Тесты: НОВЫЕ
+  DirectContactGateTest (6; staged-фикстура с lenient-стабами — негативные пути
+  шорт-circuit'ят до поздних проверек, STRICT_STUBS), CallSignalingHandlerTest (4),
+  VoiceInviteHandlerTest += gated-кейс (+mock), PrivateChannelIntegrationTest +=
+  overrideListsAndVoiceSnapshotStayInvisibleToNonManagers (M2 403/200 + M3 скрытый
+  VOICE-канал исчезает из снапшота плебея, живёт у овнера). — **479 тестов (было 467)**.
+  Wire не менялся — деплой только сервер.
+
+  **ИТОГ АУДИТА 2026-10-05 (5 раундов, все серверные):** закрыты C1 (STOMP-инжект), C2
+  (Janus admin secret), H1–H9 (арбитражные удаления объектов, DM-purge, capability-ключи,
+  квоты, MinIO IAM, TURN-тикеты, squoттинг, ban-эвикт, display-спуф), M1–M3 (получатели,
+  override-read, voice-read). ОСТАЛОСЬ (по согласованию — распланировать отдельно после
+  смоука): M4 SPEAK/STREAM-раунд, M5 link-preview SSRF (клиент), M6 login-брутфорс-лимит,
+  M7 safeStorage-токены + server-side logout, M8 AFK-видео/mod-deafen форс, L1–L8
+  (bans-лист, LIKE-oracle, CORS, content-type, server-scoped модерация, логины в
+  /api/users, AFK-GET, edit-after-revoke, TLS/токен-в-URL). СМОУК (объединённый, после
+  рестарта oak-server из IDEA): два клиента — голос/шар/звонок живы (секреты-SSOT),
+  бан сидящего, мьют, скрытый голос-канал невидим плебею в сайдбаре, Server Settings →
+  Channels у менеджера открывается, аватарка/эмодзи грузятся, аттачи отправляются.
+- [x] **Смоук-фикс аудита, раунд 5: DirectContactGate НЕ гейтит RESTRICT_PRIVATE_
+  MESSAGES (2026-10-05, живой репорт «у вызываемого нет ни звука, ни тоста»).** По
+  серверному логу: ВСЕ кадры звонка (RING+HANGUP, обе стороны) падали в
+  `[call.signal] dropped (gated)`; в БД у admin11 висела роль «No-DM» с битом
+  RESTRICT_PRIVATE_MESSAGES — остаток смоука пермишшен-раунда. Первая редакция M1-гейта
+  считала звонок «личной связью» и гасила его при dmRestricted любой стороны — ВОПРЕКИ
+  юзер-решению раунда пермишшенов («дружба и звонки 1:1 — НЕ трогаем»). Фикс:
+  dmRestricted-проверка УДАЛЕНА из DirectContactGate (блокировки/banned/removed/rate
+  остались); гейт теперь сам INFO-логирует причину каждого отказа
+  (`[contact-gate] X → Y: refused (blocked pair | ring rate limit | …)`) — «почему
+  тишина» читается прямо с лога. Тест dmRestrictionDoesNotGateCalls переписан на
+  verify-never(dmRestricted). Граница задокументирована в javadoc: RESTRICT живёт
+  ТОЛЬКО в DmService/MessageService. — 479 тестов. Рестарт oak-server нужен.
 - [ ] **Схлопнуть миграции V3–V5 в чистый набор ПЕРЕД УПАКОВКОЙ (#470).** V5 существует только потому, что кривая V4 успела примениться на живой dev-базе (checksum нельзя менять post factum); свежий инстанс гоняет три миграции там, где хватает двух. Перед релизом: слить identity-блок V5 внутрь V4 (V3 не трогать — она чистая), проверить на THROWAWAY-базе (прецедент oak_v1check из #482: чистая база исполняет V1→V4 с нуля + validate чист), живую dev-базу перебазлайнить (DROP TABLE flyway_schema_history + рестарт с baseline-on-migrate — рецепт «чистый V1» из #482; данные V3/V4/V5-колонок совместимы, identity на пустой-непустой колонке через ADD GENERATED валиден только пока таблица пуста — на dev тредов нет, проверить `SELECT count(*) FROM discussions` ПЕРЕД сносом). ГРАБЛЯ (уже пойманы в #482): удаление файла миграции из src НЕ удаляет его из target/classes — `mvn clean` обязателен; TaskStop не убивает spring-boot:run-JVM (taskkill /T /F по 8080-листенеру).
 - [x] **Приватные каналы (Locked/Hidden) — `VIEW_CHANNEL` + пер-пользовательские оверрайды.** Discord-style: TEXT-канал / VOICE-комната ограничивает вход списком ролей и ПОЛЬЗОВАТЕЛЕЙ. **Движок:** (1) `Permission.VIEW_CHANNEL` дописан в САМЫЙ КОНЕЦ enum (ordinal 28; вставка «в конец группы» ремапила бы биты всех последующих групп — правило в javadoc исправлено); (2) НОВАЯ сущность `ChannelUserOverride` (channel,user,allow,deny; unique(channel_id,user_id)) + репозиторий (`findWithUserByChannelId` c `@EntityGraph`; derived-имя `findByChannelIdWithUser` НЕ парсится — Spring читает суффикс как свойство) + REST `/api/channels/{id}/overrides/users[/{userId}]` (GET открыт, PUT/DELETE под MANAGE_CHANNELS; `ChannelUserOverrideResponse` несёт username — клиенту не джойнить); (3) **Слоистая резолюция** `AuthorizationService.resolveChannelMask(User,Channel)`: base → слой @everyone-строки → слой ролей (allow|/deny|, deny внутри слоя побеждает) → слой личной строки юзера — ЗАМЕНА прежней аккумуляции с глобальным deny-wins (при ней role-allow НИКОГДА не перебил бы @everyone-deny — приватные каналы невозможны; поведенческое изменение осознанное, регрессия запинана тестом roleAllowBeatsEveryoneDeny); (4) **VIEW — мастер-гейт** в `hasInChannel`: без VIEW любой другой permission = false (скрытый канал 403-ит всё, хотя @everyone-base всё ещё даёт READ/SEND) — один гейт закрыл ВСЕ существующие call-sites (messages/read-state/voice/mentions/myPermissions); (5) `GET /api/channels` — viewer-фильтрованный: скрытые (!VIEW) omitted, `ChannelResponse` += 5-е поле `boolean locked` (per-viewer: TEXT без READ / VOICE без CONNECT) → **wire-деплой ПАРНЫЙ**; create-broadcast остаётся `locked=false` (каналы создаются публичными); (6) `/topic/channels.changed` — ping телом `Long`-timestamp после КАЖДОЙ мутации оверрайдов (role+user × upsert+delete) — broadcast без данных, ничего не утекает; клиент делает diff-refetch; (7) `ChannelService.delete` += purge `channel_user_overrides`; (8) **`RoleSeeder.ensureEveryoneViewChannel()`** — безусловный ре-грант VIEW-бита @everyone при каждом старте: БД, засеянная ДО появления бита, иначе делает ВСЕ каналы невидимыми всем кроме OWNER (instance-wide darkness — ADD_REACTIONS-прецедент ручной миграции тут неприемлем). **Интерсептор** переименован `DmSubscriptionInterceptor` → `ChannelSubscriptionInterceptor`: TEXT/VOICE-темы гейтятся по `READ_MESSAGE_HISTORY` (НЕ по VIEW — Locked-канал остаётся в списке аутсайдера, клиент подписывается на его тему, и VIEW-гейт пропустил бы LIVE-тела сообщений при 403 истории; скрытые каналы ловит мастер-гейт). Тесты: `PrivateChannelIntegrationTest` (миграция бита; hidden невидим аутсайдеру, виден member-allow/role-allow/owner; locked-флаг per-viewer TEXT+VOICE; мастер-гейт: GET/POST сообщений 403 + read-states без канала без единого явного READ-deny; user-override CRUD) + `ChannelOverrideServiceTest` (ping на все 4 мутации; void-метод requireServer стабится doThrow, не when()). 204 теста. Смоук pending.
 - [x] **Janus token_auth + per-room pin/secret + принудительный mute/kick (безопасность SFU).** Закрыты две дыры ревью: (1) Janus стоял на дефолтном конфиге образа — НИКАКОЙ аутентификации (любой, знающий ip:8088, мог `list` → join → **слушать любую комнату**; admin API 7088 торчал наружу с дефолтным `admin_secret = "janusoverlord"`); (2) модераторские mute/kick были чисто кооперативными (враждебный клиент игнорирует `/user/queue/voice.control` и продолжает вещать). **Модель доступа (apisecret отвергнут — общий секрет без per-user/отзыва, строго слабее):** `token` — per-visit, SecureRandom-hex, регистрируется Admin API `add_token` с `plugins=[videoroom]`, клиент несёт его на каждом запросе (ПОЛЕМ ТЕЛА на POST, `?token=` на GET long-poll); `pin` — per-channel `HMAC-SHA256(adminSecret, "oak-voice-pin:"+id)`, обязателен в `join` (закрывает «легитимный юзер входит в чужую комнату перебором id» — токены plugin-scoped, НЕ room-scoped); `secret` — HMAC с доменом `"oak-voice-secret:"`, ТОЛЬКО серверу: им подписаны `kick`/`moderate` (без него 429), гриферство чужих комнат закрыто. **Комнаты создаёт СЕРВЕР** (`ensureRoom`: эфемерная контроль-сессия, exists → create с pin+secret; create-гонка лечится рек-check exists) — клиент больше не зовёт create. `service/JanusVoiceAccessService` (interface + `HttpJanusVoiceAccessService` @ConditionalOnProperty `oak.janus.admin-enabled` + `Noop...` — калька Minio-паттерна, test-профиль отдаёт константы "test-token"/"test-pin"): `issueVoiceToken` (карта username→(channel→tokens) кап 8, эвикция старейшего через remove_token; `bootstrapCleanup` = list_tokens+remove_all на старте — stored-токены переживают рестарт сервера, умирают только с рестартом Janus), `revokeTokens` (по ПАРЕ (channel,user) — кик из комнаты А не рвёт голос в Б; re-entry честного юзера не блокируется — новый /room = новый токен), `forceKick`/`moderateAudio` — fire-and-forget на однопоточном daemon-экзекуторе `oak-janus-admin` (STOMP-поток не блокируется; действия одной комнаты упорядочены): mint токен → create session → attach → **passive join с pin** → poll `joined` → `publishers[]` → матч `display == username` (ВСЕ сессии юзера, зеркало `tracker.kick`) → `kick{id,secret}` / `moderate{room,id,mid,mute,secret}` → destroy. **Грабли videoroom 1.1.4 (все проверены живым curl):** `unmoderate` из старых док НЕ существует — есть только `moderate` с ОБЯЗАТЕЛЬНЫМ `mute:true|false`; `listparticipants` НЕ возвращает streams/mid — единственный источник audio-mid = `joined`-событие passive-join (join без публикации легален); join без pin → 429, с неверным → 433; kick НЕ блокирует re-entry (для этого revokeTokens). `VoiceControlHandler`: mute → `tracker.setMuted` + `moderateAudio` (кооперативный voice.state-пуш ОСТАЁТСЯ — мгновенный UI честного клиента); kick → `tracker.kick` + `forceKick` + `revokeTokens` + KICKED; **deafen БЕЗ принудительного слоя** (moderate глушит только ИСХОДЯЩИЕ m-line — «заставить враждебного не слышать» API нет). `JanusProperties` += `adminUrl`/`adminEnabled`; `RestClientJanusAdminClient` — первый исходящий HTTP сервера (Spring `RestClient`, 3с/10с; poll-таймаут = легальное «нет событий»). **Wire:** `RoomResponse(janusUrl, roomId, token, pin)` — 4 поля, деплой ПАРНЫЙ. Конфиг: локальный образ `oak-janus:secured` (`env/janus/Dockerfile`, `build: ./janus` в compose) с ДВУМЯ запечёнными конфигами: `janus.jcfg` (дефолт + `token_auth = true` + `admin_secret = "janus_admin_secret"` == `.env` `JANUS_ADMIN_SECRET`) и `janus.transport.http.jcfg` с `admin_http = true`; после правки конфигов — `docker compose build janus`. **ГРАБЛИ ЖИВОЙ ОТЛАДКИ (полдня охоты):** (1) в canyan-дефолте Admin/monitor API ВЫКЛЮЧЕН (`admin_http = false`) — с token_auth Janus фаталится на старте («No Admin/monitor transport is available, but the stored token based authentication mechanism is enabled... giving up!», exit 1, **логи ПУСТЫ** — буфер stdout умирает с процессом; контейнер рестарт-циклит «Restarting (1)» и выглядит как «мёртвый порт»); (2) **этот билд игнорирует токен в query на POST** (`?token=` → 403) и принимает его в query только на GET long-poll — все POST несут `"token"` ПОЛЕМ В ТЕЛЕ (правки в `RestClientJanusAdminClient.addTokenField` и клиентском `JanusClient.withBodyToken`; проверено живым curl); (3) при зависании/краше демона Docker Desktop утекает фантомная аллокация порта (у нас 2000): контейнер рестарт-циклит с «Bind for 0.0.0.0:2000 failed: port is already allocated» при ПУСТОМ netstat — лечится только полным перезапуском Docker Desktop (прецедент: TURN 3478→34780 в compose — тот же класс утечки). **Деплой ПОСЛЕДОВАТЕЛЬНЫЙ: сервер → клиент → `docker compose up -d --build janus` → рестарт oak-server** (token_auth мгновенно валит старых клиентов; bootstrap-чистка сносит устаревшие токены). Остаточные риски v1: display-спуф (матчатся оба, кик выкинет обоих); revoke не рвёт живую WebRTC — сессию жнёт Janus ≤ session_timeout (~60 с), мгновенность даёт plugin-kick. Тесты: `JanusVoiceAccessServiceTest` + `RoomControllerIntegrationTest` (token/pin). 214 теста. Смоук pending.

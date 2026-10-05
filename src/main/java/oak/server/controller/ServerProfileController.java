@@ -13,6 +13,7 @@ import oak.server.entity.Permission;
 import oak.server.entity.ServerProfile;
 import oak.server.entity.User;
 import oak.server.repository.ServerProfileRepository;
+import oak.server.service.AttachmentSlotRegistry;
 import oak.server.service.AttachmentUrlSigner;
 import oak.server.service.AuthorizationService;
 import org.springframework.http.HttpStatus;
@@ -50,6 +51,7 @@ public class ServerProfileController {
     private final AttachmentUrlSigner attachmentUrlSigner;
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
+    private final AttachmentSlotRegistry slotRegistry;
 
     /** The instance name + icon. Open to any authenticated member. */
     @GetMapping
@@ -102,6 +104,7 @@ public class ServerProfileController {
         requireManageServer(principal);
         requireImageExtension(request.fileName());
         String key = attachmentUrlSigner.newServerAvatarKey(request.fileName());
+        slotRegistry.registerMint(key, principal.getUsername());
         return new AttachmentUploadResponse(key, attachmentUrlSigner.presignedPutUrl(key));
     }
 
@@ -112,19 +115,34 @@ public class ServerProfileController {
         requireManageServer(principal);
         requireImageExtension(request.fileName());
         String key = attachmentUrlSigner.newOriginalKey(request.fileName());
+        slotRegistry.registerMint(key, principal.getUsername());
         return new AttachmentUploadResponse(key, attachmentUrlSigner.presignedPutUrl(key));
     }
 
     /**
      * Binds freshly-uploaded icon objects to the instance, called by the client after the MinIO PUTs
      * succeed (so a failed upload never leaves dangling keys). {@code originalKey} is optional — null
-     * on a re-crop keeps the existing original. {@code MANAGE_SERVER}.
+     * on a re-crop keeps the existing original. {@code MANAGE_SERVER}. Keys must be slots minted
+     * for the confirming user (the H1 gate — a foreign key must not become deletable here).
      */
     @PostMapping("/avatar/confirm")
     @Transactional
     public ServerProfileResponse confirmAvatar(@AuthenticationPrincipal UserDetails principal,
                                                @RequestBody @Valid AvatarKeysRequest request) {
         requireManageServer(principal);
+        if (!request.avatarKey().startsWith("server-avatars/")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a server icon slot");
+        }
+        if (!slotRegistry.isOwnedBy(request.avatarKey(), principal.getUsername())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Unknown server icon slot — upload the image first");
+        }
+        if (request.originalKey() != null
+                && (!request.originalKey().startsWith("avatars/originals/")
+                        || !slotRegistry.isOwnedBy(request.originalKey(), principal.getUsername()))) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Unknown server icon original slot — upload the image first");
+        }
         ServerProfile profile = profile();
         String previousAvatarKey = profile.getAvatarKey();
         profile.setAvatarKey(request.avatarKey());

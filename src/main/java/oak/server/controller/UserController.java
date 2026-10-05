@@ -17,6 +17,7 @@ import oak.server.entity.Permission;
 import oak.server.entity.Permissions;
 import oak.server.entity.User;
 import oak.server.repository.UserRepository;
+import oak.server.service.AttachmentSlotRegistry;
 import oak.server.service.AttachmentUrlSigner;
 import oak.server.service.AuthService;
 import oak.server.service.AuthorizationService;
@@ -52,6 +53,7 @@ public class UserController {
     private final SimpMessagingTemplate messagingTemplate;
     private final AuthorizationService auth;
     private final AuthService authService;
+    private final AttachmentSlotRegistry slotRegistry;
 
     /** STOMP topic a live user update (e.g. an avatar change) is pushed to: {@code /topic/users}. */
     public static final String USERS_TOPIC = "/topic/users";
@@ -126,8 +128,10 @@ public class UserController {
     @PostMapping("/me/avatar")
     public AttachmentUploadResponse requestAvatarUpload(@AuthenticationPrincipal UserDetails principal,
                                                         @RequestBody @Valid AttachmentUploadRequest request) {
+        requireUser(principal);
         requireImageExtension(request.fileName());
         String key = attachmentUrlSigner.newAvatarKey(request.fileName());
+        slotRegistry.registerMint(key, principal.getUsername());
         return new AttachmentUploadResponse(key, attachmentUrlSigner.presignedPutUrl(key));
     }
 
@@ -135,8 +139,10 @@ public class UserController {
     @PostMapping("/me/avatar/original")
     public AttachmentUploadResponse requestOriginalUpload(@AuthenticationPrincipal UserDetails principal,
                                                           @RequestBody @Valid AttachmentUploadRequest request) {
+        requireUser(principal);
         requireImageExtension(request.fileName());
         String key = attachmentUrlSigner.newOriginalKey(request.fileName());
+        slotRegistry.registerMint(key, principal.getUsername());
         return new AttachmentUploadResponse(key, attachmentUrlSigner.presignedPutUrl(key));
     }
 
@@ -144,12 +150,22 @@ public class UserController {
      * Binds freshly-uploaded avatar objects to the current user, called by the client after the MinIO
      * PUTs succeed (so a failed upload never leaves dangling keys). {@code originalKey} is optional —
      * null on a re-crop keeps the existing original.
+     *
+     * <p>Key validation (security round 3, H1): every key must be a slot minted FOR THIS USER by
+     * {@code /me/avatar}[/original] — previously any {@code ≤512}-char string was accepted, so a
+     * member could adopt someone else's avatar/emoji key and the subsequent replace/remove would
+     * DELETE that foreign MinIO object. A slot minted before a server restart is forgotten — the
+     * client simply re-uploads (the two-phase confirm spans seconds, not restarts).
      */
     @PostMapping("/me/avatar/confirm")
     @Transactional
     public UserResponse confirmAvatar(@AuthenticationPrincipal UserDetails principal,
                                       @RequestBody @Valid AvatarKeysRequest request) {
         User user = requireUser(principal);
+        requireOwnAvatarSlot(request.avatarKey(), user, false);
+        if (request.originalKey() != null) {
+            requireOwnAvatarSlot(request.originalKey(), user, true);
+        }
         String previousAvatarKey = user.getAvatarKey();
         user.setAvatarKey(request.avatarKey());
         String previousOriginalKey = null;
@@ -219,6 +235,24 @@ public class UserController {
         if (!lower.endsWith(".png") && !lower.endsWith(".jpg") && !lower.endsWith(".jpeg")) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
                     "Avatar must be a PNG or JPEG image");
+        }
+    }
+
+    /** The confirm gate (H1): the key must live in the right avatar namespace AND be a slot
+     *  this server minted for THIS user — any foreign key (another user's avatar, a public
+     *  emoji/sticker key read from the catalogs) used to be adoptable here, and the following
+     *  replace/remove would delete the foreign object from MinIO. */
+    private void requireOwnAvatarSlot(String key, User user, boolean originalSlot) {
+        if (originalSlot) {
+            if (!key.startsWith("avatars/originals/")) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not an avatar original slot");
+            }
+        } else if (!key.startsWith("avatars/") || key.startsWith("avatars/originals/")) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not an avatar slot");
+        }
+        if (!slotRegistry.isOwnedBy(key, user.getUsername())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Unknown avatar slot — upload the image first");
         }
     }
 }

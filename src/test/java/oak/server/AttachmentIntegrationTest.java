@@ -52,13 +52,14 @@ class AttachmentIntegrationTest {
                 .andExpect(jsonPath("$.key").isNotEmpty());
 
         // an attachment-only message (empty text) is valid -> 201; the wire carries the list form
+        // (the key must live in the attachments/ namespace — the H3a slot gate)
         mockMvc.perform(post("/api/channels/" + channelId + "/messages")
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
-                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"some-key\",\"fileName\":\"pic.png\"}]}"))
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"attachments/abc/pic.png\",\"fileName\":\"pic.png\"}]}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.attachments[0].fileName").value("pic.png"))
-                .andExpect(jsonPath("$.attachments[0].key").value("some-key"))
+                .andExpect(jsonPath("$.attachments[0].key").value("attachments/abc/pic.png"))
                 .andExpect(jsonPath("$.authorUsername").value("alice"));
 
         // a message with neither content nor attachments -> 400
@@ -82,8 +83,8 @@ class AttachmentIntegrationTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
                         .content("{\"content\":null,\"attachments\":["
-                                + "{\"key\":\"vid-key\",\"fileName\":\"clip.mp4\",\"width\":1920,\"height\":1080},"
-                                + "{\"key\":\"pic-key\",\"fileName\":\"shot.png\"}]}"))
+                                + "{\"key\":\"attachments/abc/clip.mp4\",\"fileName\":\"clip.mp4\",\"width\":1920,\"height\":1080},"
+                                + "{\"key\":\"attachments/abc/shot.png\",\"fileName\":\"shot.png\"}]}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.attachments[0].width").value(1920))
                 .andExpect(jsonPath("$.attachments[0].height").value(1080))
@@ -107,8 +108,8 @@ class AttachmentIntegrationTest {
                         .header("Authorization", "Bearer " + token)
                         .contentType(JSON)
                         .content("{\"content\":null,\"attachments\":["
-                                + "{\"key\":\"doc-key\",\"fileName\":\"report.pdf\",\"sizeBytes\":2048},"
-                                + "{\"key\":\"pic-key\",\"fileName\":\"shot.png\"}]}"))
+                                + "{\"key\":\"attachments/abc/report.pdf\",\"fileName\":\"report.pdf\",\"sizeBytes\":2048},"
+                                + "{\"key\":\"attachments/abc/shot2.png\",\"fileName\":\"shot.png\"}]}"))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.attachments[0].sizeBytes").value(2048))
                 .andExpect(jsonPath("$.attachments[1].sizeBytes").doesNotExist());
@@ -184,6 +185,52 @@ class AttachmentIntegrationTest {
                 .andReturn();
         assertNull(JsonPath.read(freshLink.getResponse().getContentAsString(), "$.url"),
                 "the preview's fresh link is structurally present (null only under the noop signer)");
+    }
+
+    /** The H3a namespace gate: a message may only reference attachments/ keys — a foreign
+     *  namespace key (another user's avatar, a public emoji object) used to be persistable
+     *  here, making it permanently re-signable via /api/attachments/link. */
+    @Test
+    void messageRejectsForeignNamespaceKeys() throws Exception {
+        String token = registerAndLogin("dave", "supersecret");
+        Long channelId = createChannel(token, "gated", "TEXT");
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"avatars/originals/u1/x.png\",\"fileName\":\"x.png\"}]}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"custom-emojis/u1/grin.png\",\"fileName\":\"grin.png\"}]}"))
+                .andExpect(status().isBadRequest());
+        // a video THUMBNAIL key rides the same gate
+        mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"\",\"attachments\":[{\"key\":\"attachments/abc/clip.mp4\","
+                                + "\"fileName\":\"clip.mp4\",\"thumbnailKey\":\"stickers/u1/thumb.jpg\"}]}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    /** The H4 mint quota: the rolling per-user window is capped, so disk-exhaustion via
+     *  slot spam returns 429 instead of unlimited slots. */
+    @Test
+    void uploadMintingIsRateLimitedPerUser() throws Exception {
+        String token = registerAndLogin("erin", "supersecret");
+        for (int mint = 0; mint < 60; mint++) {
+            mockMvc.perform(post("/api/attachments").header("Authorization", "Bearer " + token)
+                            .contentType(JSON).content("{\"fileName\":\"f" + mint + ".png\"}"))
+                    .andExpect(status().isOk());
+        }
+        mockMvc.perform(post("/api/attachments").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"fileName\":\"over.png\"}"))
+                .andExpect(status().isTooManyRequests());
+        // another user is unaffected (the window is per-user)
+        String other = registerAndLogin("frank", "supersecret");
+        mockMvc.perform(post("/api/attachments").header("Authorization", "Bearer " + other)
+                        .contentType(JSON).content("{\"fileName\":\"fine.png\"}"))
+                .andExpect(status().isOk());
     }
 
     private String registerAndLogin(String username, String password) throws Exception {

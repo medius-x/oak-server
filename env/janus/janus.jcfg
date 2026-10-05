@@ -47,7 +47,11 @@ general: {
 									# without this, the Admin API MUST
 									# be enabled, as tokens are added and removed
 									# through messages sent there.
-	admin_secret = "janus_admin_secret"	# String that all Janus requests must contain
+	admin_secret = "@JANUS_ADMIN_SECRET@"	# PLACEHOLDER — the Dockerfile entrypoint seds the
+									# JANUS_ADMIN_SECRET env var over it at container
+									# start (compose passes it from env/.env). All Janus
+									# requests must contain it to be accepted by the
+									# admin/monitor; only needed with the admin API enabled.
 									# to be accepted/authorized by the admin/monitor.
 									# only needed if you enabled the admin API
 									# in any of the available transports.

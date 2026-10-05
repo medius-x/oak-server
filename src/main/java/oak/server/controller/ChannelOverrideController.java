@@ -22,10 +22,11 @@ import java.util.List;
 
 /**
  * Per-channel permission overrides — role-level ({@code /overrides/{roleId}}) and member-level
- * ({@code /overrides/users/{userId}}, Discord's member overrides). Lists are open to any member;
- * create/replace/delete require {@code MANAGE_CHANNELS} (enforced in
- * {@link ChannelOverrideService}). Path is distinct from {@code /api/channels/{id}/room} and the
- * channel/messages controllers.
+ * ({@code /overrides/users/{userId}}, Discord's member overrides). EVERYTHING — lists included —
+ * requires {@code MANAGE_CHANNELS} (enforced in {@link ChannelOverrideService}): the matrices
+ * disclose which roles and which specific members are allow-listed into a channel, so an open
+ * read leaked hidden channels' access lists by id sweep (security round 5, M2). Path is distinct
+ * from {@code /api/channels/{id}/room} and the channel/messages controllers.
  */
 @RestController
 @RequestMapping("/api/channels/{channelId}/overrides")
@@ -35,8 +36,9 @@ public class ChannelOverrideController {
     private final ChannelOverrideService channelOverrideService;
 
     @GetMapping
-    public List<ChannelOverrideResponse> list(@PathVariable Long channelId) {
-        return channelOverrideService.list(channelId);
+    public List<ChannelOverrideResponse> list(@PathVariable Long channelId,
+                                              @AuthenticationPrincipal UserDetails principal) {
+        return channelOverrideService.list(channelId, principal.getUsername());
     }
 
     @PutMapping("/{roleId}")
@@ -58,8 +60,9 @@ public class ChannelOverrideController {
     // --- member-level (per-user) overrides: "allow these specific people" ---
 
     @GetMapping("/users")
-    public List<ChannelUserOverrideResponse> listUsers(@PathVariable Long channelId) {
-        return channelOverrideService.listUserOverrides(channelId);
+    public List<ChannelUserOverrideResponse> listUsers(@PathVariable Long channelId,
+                                                       @AuthenticationPrincipal UserDetails principal) {
+        return channelOverrideService.listUserOverrides(channelId, principal.getUsername());
     }
 
     @PutMapping("/users/{userId}")

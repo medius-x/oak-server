@@ -291,6 +291,15 @@ public class ChannelService {
         auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         Channel channel = channelRepository.findById(channelId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        // The admin route is for SERVER channels only (the rename guard, word for word):
+        // DM/group-DM ids share the sequence and a MANAGE_CHANNELS holder must not be able
+        // to enumerate and permanently purge other users' private conversations (security
+        // audit H2) — DMs die via their participant-gated endpoint, discussions via the
+        // parent's MANAGE_MESSAGES close.
+        if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM
+                || channel.getType() == ChannelType.DISCUSSION) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a server channel");
+        }
         // A non-empty category is refused (Discord parity): its children must be moved or
         // deleted first. Checked BEFORE the voice evictions — a 400 must not kick anyone.
         if (channel.getType() == ChannelType.CATEGORY && channelRepository.existsByParentId(channelId)) {

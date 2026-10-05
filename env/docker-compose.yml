@@ -64,6 +64,29 @@ services:
       timeout: 5s
       retries: 5
 
+  # ─────────────────────── MinIO bootstrap (one-shot) ──────────────────
+  # Creates the scoped app user oak-server signs/uploads with (bucket-only
+  # policy, no admin): the root credentials above stay console/bootstrap-only,
+  # so a leaked app credential cannot read/list/delete outside oak-attachments
+  # or manage the instance. Idempotent — safe on every `docker compose up`.
+  # Reuses the minio image itself (it ships the mc client at /usr/bin/mc) —
+  # no extra image to pull.
+  minio-init:
+    image: minio/minio:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD}
+        echo '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:CreateBucket"],"Resource":["arn:aws:s3:::*"]},{"Effect":"Allow","Action":["s3:ListBucket","s3:GetBucketLocation"],"Resource":["arn:aws:s3:::oak-attachments"]},{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::oak-attachments/*"]}]}' > /tmp/oak-app-policy.json
+        mc admin policy create local oak-app /tmp/oak-app-policy.json || true
+        mc admin user add local ${MINIO_APP_USER} ${MINIO_APP_PASSWORD}
+        mc admin policy attach local oak-app --user ${MINIO_APP_USER} || true
+        echo "[minio-init] app user ${MINIO_APP_USER} ready (bucket-only policy)"
+
   # ──────────────────────────────── Janus ──────────────────────────────
   # SFU for multi-user voice/video (3+) and screen sharing.
   # oak-server creates rooms via the HTTP REST API (port 8088);
@@ -72,16 +95,26 @@ services:
   janus:
     # Locally built image: canyan/janus-gateway + janus/janus.jcfg with
     # token_auth = true (every API request must carry a token minted by
-    # oak-server via the Admin API; see JanusVoiceAccessService) and
-    # admin_secret = "janus_admin_secret" (matches JANUS_ADMIN_SECRET in .env —
-    # the stock default "janusoverlord" is a live hole with 7088 host-mapped).
-    # BAKED IN, not bind-mounted: a bind-mounted janus.jcfg wedges janus on
-    # Docker Desktop file sharing (live bug — see janus/Dockerfile). Rebuild
-    # after editing the config: docker compose build janus.
+    # oak-server via the Admin API; see JanusVoiceAccessService) and a
+    # RUNTIME-SUBSTITUTED admin_secret — the image entrypoint seds
+    # JANUS_ADMIN_SECRET (passed below from .env) into the baked config at
+    # container start, so the secret never lives in the image or the repo.
+    # It must equal oak-server's oak.janus.admin-secret: it guards the Admin
+    # API (token minting) AND is the HMAC key every videoroom pin/secret
+    # derives from.
+    # The config is BAKED IN, not bind-mounted: a bind-mounted janus.jcfg
+    # wedges janus on Docker Desktop file sharing (live bug — see
+    # janus/Dockerfile). Rebuild after editing it: docker compose build janus.
+    # PROD NOTE: 7088 is host-mapped only for the dev topology (oak-server
+    # runs on the host). In a real deployment keep it inside the Docker
+    # network — the admin secret is the only thing between the network and
+    # gateway-wide token minting.
     build: ./janus
     image: oak-janus:secured
     container_name: oak-janus
     restart: unless-stopped
+    environment:
+      JANUS_ADMIN_SECRET: ${JANUS_ADMIN_SECRET}
     ports:
       - "${JANUS_REST_PORT:-8088}:8088"     # REST API  (oak-server -> Janus)
       - "${JANUS_WS_PORT:-8188}:8188"       # WebSocket (JavaFX -> Janus)
@@ -116,10 +149,14 @@ services:
       # The non-standard port (34780, not 3478): Docker Desktop leaked UDP 3478
       # on this host once (stale port-proxy), so we map 34780 -> 3478.
       - --external-ip=${TURN_EXTERNAL_IP}
-      - --user=${TURN_USER}:${TURN_PASSWORD}
+      # Short-lived REST-API credentials (no static user anymore): oak-server
+      # mints time-boxed per-request tickets signed with TURN_STATIC_AUTH_SECRET
+      # (see TurnCredentialIssuer) — a leaked credential expires instead of
+      # opening the relay forever.
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_STATIC_AUTH_SECRET}
       - --min-port=${TURN_MIN_PORT}
       - --max-port=${TURN_MAX_PORT}
-      - --lt-cred-mech
       - --fingerprint
       - --no-multicast-peers
       - --no-cli

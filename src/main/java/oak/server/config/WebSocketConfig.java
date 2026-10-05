@@ -3,6 +3,7 @@ package oak.server.config;
 import lombok.RequiredArgsConstructor;
 import oak.server.security.AuthChannelInterceptor;
 import oak.server.websocket.ChannelSubscriptionInterceptor;
+import oak.server.websocket.SendDestinationInterceptor;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.ChannelRegistration;
@@ -38,6 +39,11 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
      *  topics to members with READ_MESSAGE_HISTORY (the unauthorizing simple broker would
      *  otherwise allow id-enumeration eavesdropping). */
     private final ChannelSubscriptionInterceptor channelSubscriptionInterceptor;
+    /** Drops client {@code SEND} frames to broker destinations ({@code /topic}, {@code /queue},
+     *  {@code /user/...}) — the broker fans those out as if the server sent them, which without
+     *  the gate is a message/identity-spoofing primitive for any authenticated member. Clients
+     *  may only send to {@code /app/**} handler destinations. */
+    private final SendDestinationInterceptor sendDestinationInterceptor;
 
     /** STOMP heartbeat interval (ms) in both directions (server can-send / wants-receive). */
     static final long HEARTBEAT_MS = 10_000;
@@ -65,6 +71,6 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureClientInboundChannel(ChannelRegistration registration) {
-        registration.interceptors(authChannelInterceptor, channelSubscriptionInterceptor);
+        registration.interceptors(authChannelInterceptor, channelSubscriptionInterceptor, sendDestinationInterceptor);
     }
 }

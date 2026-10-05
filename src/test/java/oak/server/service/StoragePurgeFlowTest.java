@@ -48,7 +48,7 @@ class StoragePurgeFlowTest {
         Long channelId = createChannel(ownerToken, "general");
         for (int index = 0; index < 6; index++) {
             postMessage(ownerToken, channelId, "old " + index, index % 2 == 0
-                    ? String.format("{\"attachments\":[{\"key\":\"att/flow-%d\",\"fileName\":\"%d.png\"}]}", index, index)
+                    ? String.format("{\"attachments\":[{\"key\":\"attachments/flow-%d\",\"fileName\":\"%d.png\"}]}", index, index)
                     : null);
         }
         assertEquals(6, messageRepository.count());

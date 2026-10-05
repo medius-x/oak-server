@@ -33,3 +33,5 @@ build/
 
 ### Mac OS ###
 .DS_Store
+### OAK env secrets (per-machine, never commit)
+env/.env

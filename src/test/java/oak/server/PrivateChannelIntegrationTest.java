@@ -296,6 +296,56 @@ class PrivateChannelIntegrationTest {
                 .andExpect(jsonPath("$").isEmpty());
     }
 
+    /** M2+M3 (security round 5): the override matrices (role ACL + who is allow-listed) and
+     *  the voice-occupancy snapshot must not leak a hidden channel to a plain member — both
+     *  reads used to be open to anyone by id sweep. */
+    @Test
+    void overrideListsAndVoiceSnapshotStayInvisibleToNonManagers() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        register("bob", "supersecret");
+        String carolToken = registerAndLogin("carol", "supersecret");
+
+        Long textId = createChannel(ownerToken, "hidden-text", "TEXT");
+        Channel textChannel = channelRepository.findById(textId).orElseThrow();
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(textChannel, everyone, 0L, Permission.VIEW_CHANNEL.bit));
+        Long bobId = userRepository.findByUsername("bob").orElseThrow().getId();
+        mockMvc.perform(put("/api/channels/" + textId + "/overrides/users/" + bobId)
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"allow\":[\"VIEW_CHANNEL\"],\"deny\":[]}"))
+                .andExpect(status().isOk());
+
+        // M2: a plain member cannot read either matrix (role ACL or the user-grant list).
+        mockMvc.perform(get("/api/channels/" + textId + "/overrides")
+                        .header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/channels/" + textId + "/overrides/users")
+                        .header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isForbidden());
+        // The manager still reads both.
+        mockMvc.perform(get("/api/channels/" + textId + "/overrides")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/channels/" + textId + "/overrides/users")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].username").value("bob"));
+
+        // M3: a hidden VOICE room's occupancy is omitted from the plain member's snapshot.
+        Long voiceId = createChannel(ownerToken, "hidden-voice", "VOICE");
+        Channel voiceChannel = channelRepository.findById(voiceId).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(voiceChannel, everyone, 0L, Permission.VIEW_CHANNEL.bit));
+        stageInVoice("bob", voiceId);
+        mockMvc.perform(get("/api/voice/members").header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.channelId==" + voiceId + ")]").isEmpty());
+        mockMvc.perform(get("/api/voice/members").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[?(@.channelId==" + voiceId + ")]").isNotEmpty());
+    }
+
     // --- helpers (the RbacIntegrationTest idiom) ---
 
     /** Live-session enforcement: rewriting an override evicts a member who just lost CONNECT from

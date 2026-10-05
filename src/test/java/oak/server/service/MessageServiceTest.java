@@ -96,6 +96,12 @@ class MessageServiceTest {
     private AttachmentListCodec attachmentListCodec = new AttachmentListCodec(
             tools.jackson.databind.json.JsonMapper.builder().build());
 
+    /** A REAL registry (spy-wrapped for @InjectMocks): the sanitized() slot gate reads it on
+     *  every create with attachments — a mock would need stubs everywhere, and the real thing
+     *  simply answers "unknown key" (the soft check passes) unless a test registers a mint. */
+    @Spy
+    private oak.server.service.AttachmentSlotRegistry slotRegistry = new oak.server.service.AttachmentSlotRegistry();
+
     @InjectMocks
     private MessageService messageService;
 
@@ -344,20 +350,20 @@ class MessageServiceTest {
         Message existing = new Message(channel, author, "pics");
         existing.setId(100L);
         existing.setAttachments(attachmentListCodec.write(java.util.List.of(
-                new AttachmentRef("att/orphan", "a.png", null, null),
-                new AttachmentRef("att/forwarded", "b.png", null, null))));
+                new AttachmentRef("attachments/orphan", "a.png", null, null),
+                new AttachmentRef("attachments/forwarded", "b.png", null, null))));
 
         when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
         when(messageRepository.findByIdAndChannelId(100L, channelId)).thenReturn(Optional.of(existing));
         when(auth.requireUser("alice")).thenReturn(author);
-        // "att/forwarded" still hangs on another message (a forward's copy) — it must survive.
-        when(messageRepository.countByAttachmentsTextLike("%att/orphan%")).thenReturn(0L);
-        when(messageRepository.countByAttachmentsTextLike("%att/forwarded%")).thenReturn(1L);
+        // "attachments/forwarded" still hangs on another message (a forward's copy) — it must survive.
+        when(messageRepository.countByAttachmentsTextLike("%attachments/orphan%")).thenReturn(0L);
+        when(messageRepository.countByAttachmentsTextLike("%attachments/forwarded%")).thenReturn(1L);
 
         messageService.delete(channelId, 100L, "alice");
 
-        verify(objectStore).delete("att/orphan");
-        verify(objectStore, org.mockito.Mockito.never()).delete("att/forwarded");
+        verify(objectStore).delete("attachments/orphan");
+        verify(objectStore, org.mockito.Mockito.never()).delete("attachments/forwarded");
     }
 
     @Test
@@ -371,8 +377,8 @@ class MessageServiceTest {
         Message existing = new Message(channel, author, "pics");
         existing.setId(messageId);
         existing.setAttachments(attachmentListCodec.write(java.util.List.of(
-                new AttachmentRef("att/keep", "keep.png", null, null),
-                new AttachmentRef("att/drop", "drop.png", null, null))));
+                new AttachmentRef("attachments/keep", "keep.png", null, null),
+                new AttachmentRef("attachments/drop", "drop.png", null, null))));
 
         when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
         when(messageRepository.findByIdAndChannelId(messageId, channelId)).thenReturn(Optional.of(existing));
@@ -380,13 +386,13 @@ class MessageServiceTest {
         when(messageRepository.save(any(Message.class))).thenReturn(existing);
         when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
         when(reactionRepository.findByMessageId(messageId)).thenReturn(java.util.List.of());
-        when(messageRepository.countByAttachmentsTextLike("%att/drop%")).thenReturn(0L);
+        when(messageRepository.countByAttachmentsTextLike("%attachments/drop%")).thenReturn(0L);
 
         messageService.edit(channelId, messageId, new EditMessageRequest("pics",
-                java.util.List.of(new AttachmentRef("att/keep", "keep.png", null, null))), "alice");
+                java.util.List.of(new AttachmentRef("attachments/keep", "keep.png", null, null))), "alice");
 
-        verify(objectStore).delete("att/drop");
-        verify(objectStore, org.mockito.Mockito.never()).delete("att/keep");
+        verify(objectStore).delete("attachments/drop");
+        verify(objectStore, org.mockito.Mockito.never()).delete("attachments/keep");
     }
 
     @Test

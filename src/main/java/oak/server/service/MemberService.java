@@ -234,6 +234,10 @@ public class MemberService {
         userRepository.save(target);
         messagingTemplate.convertAndSendToUser(target.getUsername(), MEMBER_KICK_QUEUE,
                 Map.of("by", actor.getUsername(), "banned", true));
+        // H8: a ban must reach the VOICE rooms too (the remove() twin): REST/STOMP cut off
+        // instantly, but a rogue already holding a minted token+pin keeps publishing/listening
+        // until the eviction revokes the token and kicks the gateway publishers.
+        voiceEnforcer.evictEverywhere(target.getUsername(), actor.getUsername());
         publish("banned", target.getId());
     }
 

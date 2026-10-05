@@ -57,4 +57,9 @@ public class NoopJanusVoiceAccessService implements JanusVoiceAccessService {
     public void destroyRoom(long channelId) {
         // No-op.
     }
+
+    @Override
+    public void kickUnknownPublishers(long channelId, java.util.Set<String> knownUsernames) {
+        // No-op.
+    }
 }

@@ -7,6 +7,7 @@ import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.service.AuthorizationService;
+import oak.server.service.DirectContactGate;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -21,6 +22,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -29,8 +31,8 @@ import static org.mockito.Mockito.when;
 /**
  * Unit coverage of {@link VoiceInviteHandler}: the relay stamps the sender, resolves
  * the channel name itself, and stays SILENT on every malformed or forbidden shape
- * (a non-VOICE channel, a sender without VIEW_CHANNEL, blank fields) — the
- * call.signal discipline of not leaking anything through an error.
+ * (a non-VOICE channel, a sender without VIEW_CHANNEL, blank fields, a gated
+ * recipient) — the call.signal discipline of not leaking anything through an error.
  */
 @ExtendWith(MockitoExtension.class)
 class VoiceInviteHandlerTest {
@@ -41,6 +43,8 @@ class VoiceInviteHandlerTest {
     private ChannelRepository channelRepository;
     @Mock
     private AuthorizationService auth;
+    @Mock
+    private DirectContactGate contactGate;
 
     @InjectMocks
     private VoiceInviteHandler handler;
@@ -52,6 +56,7 @@ class VoiceInviteHandlerTest {
         User sender = new User("alice", "pw");
         when(auth.findUser("alice")).thenReturn(Optional.of(sender));
         when(auth.hasInChannel(sender, room, Permission.VIEW_CHANNEL)).thenReturn(true);
+        when(contactGate.canReach(eq("alice"), eq("bob"), eq(true))).thenReturn(true);
 
         handler.relay(new VoiceInvite(7L, null, null, "bob"), principal("alice"));
 
@@ -62,6 +67,21 @@ class VoiceInviteHandlerTest {
         assertEquals("lobby", delivered.channelName());
         assertEquals("alice", delivered.from());
         assertEquals("bob", delivered.to());
+    }
+
+    @Test
+    void staysSilentWhenTheRecipientIsGated() {
+        // M1: blocks, DM restriction and rate limits apply to invite cards too.
+        Channel room = channel(7L, "lobby", ChannelType.VOICE);
+        when(channelRepository.findById(7L)).thenReturn(Optional.of(room));
+        User sender = new User("alice", "pw");
+        when(auth.findUser("alice")).thenReturn(Optional.of(sender));
+        when(auth.hasInChannel(sender, room, Permission.VIEW_CHANNEL)).thenReturn(true);
+        when(contactGate.canReach(eq("alice"), eq("bob"), eq(true))).thenReturn(false);
+
+        handler.relay(new VoiceInvite(7L, null, null, "bob"), principal("alice"));
+
+        verify(messagingTemplate, never()).convertAndSendToUser(anyString(), anyString(), any());
     }
 
     @Test

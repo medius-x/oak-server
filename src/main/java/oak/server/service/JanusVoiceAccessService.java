@@ -57,4 +57,13 @@ public interface JanusVoiceAccessService {
      * before it.
      */
     void destroyRoom(long channelId);
+
+    /**
+     * Kicks every publisher in the room whose {@code display} resolves to none of
+     * {@code knownUsernames} (the room's live members per the tracker and the token registry).
+     * The display-spoof countermeasure: moderation matches by display, so a garbage-display
+     * publisher would otherwise be un-mutable forever, and a copied display impersonates the
+     * victim. Fire-and-forget like the other forced actions.
+     */
+    void kickUnknownPublishers(long channelId, java.util.Set<String> knownUsernames);
 }

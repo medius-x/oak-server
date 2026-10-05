@@ -92,6 +92,37 @@ class UserAvatarIntegrationTest {
                 .andExpect(status().isNotFound());
     }
 
+    /** The H1 confirm gate: only slots minted FOR THE CONFIRMING USER bind — adopting
+     *  someone else's avatar key (or any foreign-namespace key) used to make that object
+     *  deletable via the following replace/remove. */
+    @Test
+    void confirmRejectsForeignAndUnmintedKeys() throws Exception {
+        String alice = registerAndLogin("alice", "supersecret");
+        String mallory = registerAndLogin("mallory", "supersecret");
+
+        // Alice mints her own slot; Mallory tries to bind it as HIS avatar -> 400
+        String aliceKey = slotKey(alice, "/api/users/me/avatar", "alice.png");
+        mockMvc.perform(post("/api/users/me/avatar/confirm").header("Authorization", "Bearer " + mallory)
+                        .contentType(JSON).content(String.format("{\"avatarKey\":\"%s\"}", aliceKey)))
+                .andExpect(status().isBadRequest());
+
+        // a foreign-namespace key (public emoji object) -> 400 regardless of mint state
+        mockMvc.perform(post("/api/users/me/avatar/confirm").header("Authorization", "Bearer " + mallory)
+                        .contentType(JSON)
+                        .content("{\"avatarKey\":\"custom-emojis/u1/grin.png\"}"))
+                .andExpect(status().isBadRequest());
+
+        // a well-formed but never-minted avatars/ key (pre-restart slot) -> 400
+        mockMvc.perform(post("/api/users/me/avatar/confirm").header("Authorization", "Bearer " + mallory)
+                        .contentType(JSON)
+                        .content("{\"avatarKey\":\"avatars/ghost/never.png\"}"))
+                .andExpect(status().isBadRequest());
+
+        // Mallory's account is untouched — nothing foreign became deletable
+        User after = userRepository.findByUsername("mallory").orElseThrow();
+        assertNull(after.getAvatarKey());
+    }
+
     private String slotKey(String token, String endpoint, String fileName) throws Exception {
         MvcResult result = mockMvc.perform(post(endpoint).header("Authorization", "Bearer " + token)
                         .contentType(JSON).content(String.format("{\"fileName\":\"%s\"}", fileName)))

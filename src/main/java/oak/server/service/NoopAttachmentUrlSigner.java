@@ -26,7 +26,9 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner, AttachmentO
 
     @Override
     public String newOriginalKey(String fileName) {
-        return key("avatars/noop/originals", fileName);
+        // Mirrors the real signer's namespace (avatars/originals/) — the avatar confirm
+        // gate prefix-checks it, and the noop key must pass like the real one.
+        return key("avatars/originals/noop", fileName);
     }
 
     @Override

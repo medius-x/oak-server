@@ -49,7 +49,11 @@ public class ChannelOverrideService {
     private final VoiceAccessEnforcer voiceEnforcer;
 
     @Transactional(readOnly = true)
-    public List<ChannelOverrideResponse> list(Long channelId) {
+    public List<ChannelOverrideResponse> list(Long channelId, String actorUsername) {
+        // M2: the matrices disclose who is allow-listed into a channel — same gate as the
+        // mutations (previously any member could read every channel's ACL by id sweep,
+        // defeating hidden channels' member confidentiality).
+        auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         requireChannel(channelId);
         return overrideRepository.findByChannelId(channelId).stream()
                 .map(ChannelOverrideResponse::from)
@@ -86,7 +90,9 @@ public class ChannelOverrideService {
     // --- member-level (per-user) overrides: the private-channel "allow these specific people" ---
 
     @Transactional(readOnly = true)
-    public List<ChannelUserOverrideResponse> listUserOverrides(Long channelId) {
+    public List<ChannelUserOverrideResponse> listUserOverrides(Long channelId, String actorUsername) {
+        // M2: usernames with private grants to a hidden channel — the most sensitive read here.
+        auth.requireServer(auth.requireUser(actorUsername), Permission.MANAGE_CHANNELS);
         requireChannel(channelId);
         return userOverrideRepository.findWithUserByChannelId(channelId).stream()
                 .map(ChannelUserOverrideResponse::from)

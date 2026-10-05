@@ -72,18 +72,18 @@ class MessageEditDeleteIntegrationTest {
         String aliceToken = registerAndLogin("alice", "supersecret");
         Long channelId = createChannel(aliceToken, "general", "TEXT");
         Long messageId = postMessageWithAttachments(aliceToken, channelId, "pics",
-                java.util.List.of("att/a", "att/b"));
+                java.util.List.of("attachments/a", "attachments/b"));
 
-        // remove "att/a" — ONE PATCH carrying the surviving subset; the response carries the key
+        // remove "attachments/a" — ONE PATCH carrying the surviving subset; the response carries the key
         mockMvc.perform(patch(messageUrl(channelId, messageId))
                         .header("Authorization", "Bearer " + aliceToken)
                         .contentType(JSON)
-                        .content("{\"content\":\"one pic now\",\"attachments\":[{\"key\":\"att/b\",\"fileName\":\"b.png\"}]}"))
+                        .content("{\"content\":\"one pic now\",\"attachments\":[{\"key\":\"attachments/b\",\"fileName\":\"b.png\"}]}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.content").value("one pic now"))
                 .andExpect(jsonPath("$.editedAt").exists())
                 .andExpect(jsonPath("$.attachments.length()").value(1))
-                .andExpect(jsonPath("$.attachments[0].key").value("att/b"))
+                .andExpect(jsonPath("$.attachments[0].key").value("attachments/b"))
                 .andExpect(jsonPath("$.attachments[0].fileName").value("b.png"));
 
         // history reflects the removal
@@ -91,20 +91,20 @@ class MessageEditDeleteIntegrationTest {
                         .header("Authorization", "Bearer " + aliceToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].attachments.length()").value(1))
-                .andExpect(jsonPath("$[0].attachments[0].key").value("att/b"));
+                .andExpect(jsonPath("$[0].attachments[0].key").value("attachments/b"));
 
         // a foreign key (not currently attached) -> 400
         mockMvc.perform(patch(messageUrl(channelId, messageId))
                         .header("Authorization", "Bearer " + aliceToken)
                         .contentType(JSON)
-                        .content("{\"content\":\"x\",\"attachments\":[{\"key\":\"att/zzz\",\"fileName\":\"z.png\"}]}"))
+                        .content("{\"content\":\"x\",\"attachments\":[{\"key\":\"attachments/zzz\",\"fileName\":\"z.png\"}]}"))
                 .andExpect(status().isBadRequest());
         // a duplicated key -> 400
         mockMvc.perform(patch(messageUrl(channelId, messageId))
                         .header("Authorization", "Bearer " + aliceToken)
                         .contentType(JSON)
-                        .content("{\"content\":\"x\",\"attachments\":[{\"key\":\"att/b\",\"fileName\":\"b.png\"},"
-                                + "{\"key\":\"att/b\",\"fileName\":\"b.png\"}]}"))
+                        .content("{\"content\":\"x\",\"attachments\":[{\"key\":\"attachments/b\",\"fileName\":\"b.png\"},"
+                                + "{\"key\":\"attachments/b\",\"fileName\":\"b.png\"}]}"))
                 .andExpect(status().isBadRequest());
         // stripping the LAST attachment while blanking the text -> 400 (the resulting message
         // would be empty)

@@ -149,6 +149,13 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
         String secret = roomSecret(channelId);
         withControlHandle(control -> {
             if (roomExists(control, channelId)) {
+                // H7: an existing room is OURS only if our pin opens it. Room ids equal channel
+                // ids and videoroom tokens are plugin-scoped, not room-scoped — any member can
+                // `create` the id with THEIR pin before our lazy creation, and blindly trusting
+                // the exists-probe turns every legitimate join into a permanent 433. A wrong-pin
+                // probe fails LOUDLY here (the /room caller gets a 503 with the cause in the
+                // log) instead of every client climbing its rejoin ladder against a squatted room.
+                verifyRoomPin(control, channelId, pin);
                 return;
             }
             Map<String, Object> create = new HashMap<>();
@@ -164,6 +171,58 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
                 throw new JanusAdminException("room create failed: " + errorText(created));
             }
         });
+    }
+
+    /** Passive-joins with OUR pin and expects success — a 433 means the room exists but is not
+     *  ours (squatted); anything else that is not a plain join failure rethrows as a gateway
+     *  error. Package-private error-code helper for the unit test. */
+    private void verifyRoomPin(ControlSession control, long channelId, String pin) {
+        Map<String, Object> join = new HashMap<>();
+        join.put("request", "join");
+        join.put("room", channelId);
+        join.put("ptype", "publisher");
+        join.put("display", CONTROL_DISPLAY);
+        join.put("pin", pin);
+        JsonNode ack = client.message(control.sessionId(), control.handleId(), join, control.token());
+        Integer ackError = pluginErrorCode(ack);
+        if (ackError != null) {
+            throw pinProbeFailure(channelId, ackError);
+        }
+        for (int attempt = 0; attempt < 3; attempt++) {
+            for (JsonNode event : client.poll(control.sessionId(), control.token())) {
+                JsonNode data = event.path("plugindata").path("data");
+                Integer eventError = pluginErrorCode(event);
+                if (eventError != null) {
+                    throw pinProbeFailure(channelId, eventError);
+                }
+                if ("joined".equals(data.path("videoroom").asText())) {
+                    return; // our pin opened the room — it is ours
+                }
+            }
+        }
+        // No joined event and no error within the poll budget — treat as ours but note it:
+        // never a squatted verdict on a transport hiccup.
+        log.warn("Pin probe of room {} produced no joined event within the poll budget", channelId);
+    }
+
+    private static JanusAdminException pinProbeFailure(long channelId, int errorCode) {
+        if (errorCode == 433) {
+            log.error("Voice room {} is SQUATTED: it exists but rejects our pin "
+                    + "(a member pre-created the id with their own pin). Destroy the foreign room "
+                    + "on the gateway or restart Janus to recover the channel.", channelId);
+            return new JanusAdminException("voice room " + channelId + " exists with a foreign pin (squatted)");
+        }
+        return new JanusAdminException("voice room " + channelId + " pin probe failed: error " + errorCode);
+    }
+
+    /** Videoroom plugin error code ({@code 426}/{@code 429}/{@code 433}… ride the plugindata
+     *  asynchronously); null when the frame carries no plugin error. */
+    static Integer pluginErrorCode(JsonNode frame) {
+        JsonNode data = frame.path("plugindata").path("data");
+        if ("error".equals(data.path("videoroom").asText()) && data.path("error_code").isNumber()) {
+            return data.path("error_code").asInt();
+        }
+        return null;
     }
 
     // --- fire-and-forget path (VoiceControlHandler) ---
@@ -247,6 +306,41 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
             snapshot.put(room.getKey(), List.copyOf(room.getValue()));
         }
         return snapshot;
+    }
+
+    @Override
+    public void kickUnknownPublishers(long channelId, java.util.Set<String> knownUsernames) {
+        submitAction(() -> kickUnknownPublishersNow(channelId, knownUsernames));
+    }
+
+    /**
+     * H9, the display-spoof countermeasure: the forced layer matches publishers by
+     * {@code display}, which the CLIENT picks freely — a rogue joining with a garbage display is
+     * invisible to {@code moderateAudio} and impersonates whoever's name it copies. Every
+     * publisher whose display resolves to NEITHER a live member of the room (tracker ∪ token
+     * holders) NOR our own control display is a ghost with no legitimate identity: it is kicked
+     * by publisher id on the spot (id-based kick needs no display match). Synchronous core —
+     * package-private for the unit test.
+     */
+    void kickUnknownPublishersNow(long channelId, java.util.Set<String> knownUsernames) {
+        withRoomPublishers(channelId, (publishers, control) -> {
+            String secret = roomSecret(channelId);
+            for (JsonNode publisher : publishers) {
+                String display = publisher.path("display").asText(null);
+                if (display == null || display.equals(CONTROL_DISPLAY)
+                        || knownUsernames.contains(display)) {
+                    continue;
+                }
+                Map<String, Object> kick = new HashMap<>();
+                kick.put("request", "kick");
+                kick.put("room", channelId);
+                kick.put("id", publisher.path("id").asLong());
+                kick.put("secret", secret);
+                JsonNode response = client.message(control.sessionId(), control.handleId(), kick, control.token());
+                logResult("ghost-publisher kick '" + display + "' (id "
+                        + publisher.path("id").asLong() + ") from room " + channelId, response);
+            }
+        });
     }
 
     @Override

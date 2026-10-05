@@ -1,6 +1,7 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -44,10 +45,13 @@ class CallConfigIntegrationTest {
     void callConfigReturnsIceServers() throws Exception {
         String token = registerAndLogin("alice", "supersecret");
 
+        // The TURN credential is a fresh REST-API ticket: "<future-expiry>:<login>" plus a
+        // base64 HMAC-SHA1 (unit-tested in TurnCredentialIssuerTest) — not a static pair.
         mockMvc.perform(get("/api/call/config").header("Authorization", "Bearer " + token))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.iceServers[0].username").value("oak"))
-                .andExpect(jsonPath("$.iceServers[0].credential").value("test-secret"))
+                .andExpect(jsonPath("$.iceServers[0].username").value(
+                        Matchers.matchesPattern("^\\d{9,}:alice$")))
+                .andExpect(jsonPath("$.iceServers[0].credential").isNotEmpty())
                 .andExpect(jsonPath("$.iceServers[0].urls[0]").value("stun:localhost:3478"));
     }
 

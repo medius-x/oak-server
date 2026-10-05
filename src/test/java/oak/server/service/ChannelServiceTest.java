@@ -175,6 +175,27 @@ class ChannelServiceTest {
     }
 
     @Test
+    void deleteRefusesDmAndDiscussionIds() {
+        // The admin route is for SERVER channels only (H2): channel ids share one sequence, so
+        // a MANAGE_CHANNELS holder must not reach another user's DM by enumeration — the guard
+        // fires before ANY eviction or purge.
+        for (ChannelType type : new ChannelType[]{ChannelType.DM, ChannelType.GROUP_DM, ChannelType.DISCUSSION}) {
+            Channel foreign = new Channel("foreign", type);
+            foreign.setId(42L);
+            when(channelRepository.findById(42L)).thenReturn(Optional.of(foreign));
+            when(auth.requireUser("alice")).thenReturn(user(1L, "alice"));
+
+            ResponseStatusException thrown = assertThrows(ResponseStatusException.class,
+                    () -> channelService.delete(42L, "alice"));
+            assertEquals(org.springframework.http.HttpStatus.BAD_REQUEST, thrown.getStatusCode());
+
+            verify(voiceEnforcer, never()).kickAll(any(), anyString());
+            verify(voiceAccess, never()).destroyRoom(anyLong());
+            verify(messageRepository, never()).deleteByChannelId(anyLong());
+        }
+    }
+
+    @Test
     void renameTrimsPingsChannelsChangedAndReturnsViewerLocked() {
         Channel channel = new Channel("general", ChannelType.VOICE);
         channel.setId(42L);

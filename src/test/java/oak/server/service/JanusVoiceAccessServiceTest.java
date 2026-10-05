@@ -198,11 +198,67 @@ class JanusVoiceAccessServiceTest {
         when(client.attach(anyLong(), anyString())).thenReturn(2L);
         when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(json(
                 "{\"janus\":\"success\",\"plugindata\":{\"data\":{\"videoroom\":\"success\",\"exists\":true}}}"));
+        // The H7 pin probe polls for the join outcome — an empty poll budget means
+        // "no error frame seen", which the probe treats as owned (WARN, never a verdict).
+        when(client.poll(anyLong(), anyString())).thenReturn(List.of());
 
         service.ensureRoom(5L);
 
         verify(client, never()).message(anyLong(), anyLong(),
                 argThat(body -> "create".equals(body.get("request"))), anyString());
+    }
+
+    @Test
+    void ensureRoomFailsLoudlyWhenTheRoomIsSquatted() {
+        // H7: room ids equal channel ids and tokens are plugin-scoped, so a member can
+        // pre-create the id with THEIR pin — the exists-probe alone would silently trust the
+        // foreign room. Our pin probe must turn the 433 into a loud JanusAdminException.
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString()))
+                .thenReturn(json("{\"janus\":\"success\",\"plugindata\":{\"data\":"
+                        + "{\"videoroom\":\"success\",\"exists\":true}}}"))
+                .thenReturn(json("{\"janus\":\"success\",\"plugindata\":{\"data\":"
+                        + "{\"videoroom\":\"error\",\"error_code\":433,\"error\":\"Unauthorized (wrong pin)\"}}}"));
+
+        JanusAdminException thrown = assertThrows(JanusAdminException.class, () -> service.ensureRoom(5L));
+        org.junit.jupiter.api.Assertions.assertTrue(thrown.getMessage().contains("squatted"));
+    }
+
+    @Test
+    void pluginErrorCodeReadsAsyncVideoroomErrors() {
+        assertEquals(433, HttpJanusVoiceAccessService.pluginErrorCode(json(
+                "{\"plugindata\":{\"data\":{\"videoroom\":\"error\",\"error_code\":433}}}")));
+        assertNull(HttpJanusVoiceAccessService.pluginErrorCode(json(
+                "{\"plugindata\":{\"data\":{\"videoroom\":\"joined\"}}}")));
+        assertNull(HttpJanusVoiceAccessService.pluginErrorCode(json("{\"janus\":\"success\"}")));
+    }
+
+    @Test
+    void kickUnknownPublishersKicksOnlyGhostsById() {
+        // H9: a display the room's live members do not know is a ghost — kicked by publisher
+        // id (no display match needed); known members and our own control display stay.
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(success());
+        when(client.poll(anyLong(), anyString())).thenReturn(List.of(json("""
+                {"plugindata":{"data":{"videoroom":"joined","publishers":[
+                  {"id": 111, "display": "alice"},
+                  {"id": 222, "display": "totally-ghost"},
+                  {"id": 333, "display": "oak-control"}
+                ]}}}
+                """)));
+
+        service.kickUnknownPublishersNow(5L, java.util.Set.of("alice"));
+
+        verify(client).message(eq(1L), eq(2L), argThat(body ->
+                        "kick".equals(body.get("request")) && Long.valueOf(222L).equals(body.get("id"))),
+                anyString());
+        verify(client, never()).message(anyLong(), anyLong(), argThat(body ->
+                        "kick".equals(body.get("request")) && Long.valueOf(111L).equals(body.get("id"))),
+                anyString());
     }
 
     @Test

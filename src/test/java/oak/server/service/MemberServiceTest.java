@@ -98,6 +98,23 @@ class MemberServiceTest {
         assertThat(victim.getNickname()).isEqualTo("Deleted-User-3-2");
     }
 
+    @Test
+    void banEvictsTheVictimFromVoiceToo() {
+        // H8: REST/STOMP cut a banned member instantly, but an already-minted token+pin keeps
+        // a rogue client publishing — the ban must run the same voice eviction as remove().
+        User actor = user(1L, "admin");
+        User victim = user(4L, "victim");
+        victim.setBanned(false);
+        when(auth.requireUser("admin")).thenReturn(actor);
+        when(userRepository.findById(4L)).thenReturn(Optional.of(victim));
+        when(auth.isOwner(victim)).thenReturn(false);
+
+        memberService.ban(4L, "admin");
+
+        assertThat(victim.isBanned()).isTrue();
+        verify(voiceEnforcer).evictEverywhere("victim", "admin");
+    }
+
     private static User user(Long id, String username) {
         User user = new User(username, "hash");
         user.setId(id);
