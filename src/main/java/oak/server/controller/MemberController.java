@@ -37,9 +37,11 @@ public class MemberController {
         return memberService.list();
     }
 
+    /** The moderation audit — L1 (security round 7): BAN_MEMBERS gates it; the ban/removal
+     *  list is a moderation surface, not a member-facing roster. */
     @GetMapping("/bans")
-    public List<MemberResponse> bans() {
-        return memberService.banned();
+    public List<MemberResponse> bans(@AuthenticationPrincipal UserDetails principal) {
+        return memberService.banned(principal.getUsername());
     }
 
     @PutMapping("/{userId}/roles")

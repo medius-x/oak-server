@@ -39,6 +39,8 @@ class VoiceControlHandlerTest {
     @Mock
     private JanusVoiceAccessService voiceAccess;
     @Mock
+    private VoiceAccessEnforcer voiceEnforcer;
+    @Mock
     private SimpMessagingTemplate messagingTemplate;
 
     @InjectMocks
@@ -86,7 +88,42 @@ class VoiceControlHandlerTest {
         verifyNoInteractions(tracker, voiceAccess, auth);
     }
 
+    @Test
+    void moderatorDeafenIsAFullForcedExit() {
+        // M8 (security round 7), user decision: a moderator deafen has no partial forced form
+        // (moderate gates outgoing m-lines only) — the mark is written first, then the member
+        // is force-left whole. The mark survives the kick and re-seeds on their rejoin.
+        stagedModerator("alice", "bob");
+
+        handler.deafen(command(7L, "bob", null, true), principal("alice"));
+
+        verify(tracker).setDeafened(7L, "bob", true);
+        verify(voiceEnforcer).forceLeave(7L, "bob", "alice");
+        // the kick IS the forced layer — a moderateAudio under it would be dead weight
+        verify(voiceAccess, never()).moderateAudio(anyLong(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void moderatorUndeafenKeepsTheUnionRecipe() {
+        stagedModerator("alice", "bob");
+        when(tracker.isMuted(7L, "bob")).thenReturn(false); // the forced layer follows the union
+
+        handler.deafen(command(7L, "bob", null, false), principal("alice"));
+
+        verify(tracker).setDeafened(7L, "bob", false);
+        verify(voiceEnforcer, never()).forceLeave(anyLong(), anyString(), anyString());
+        verify(voiceAccess).moderateAudio(7L, "bob", false);
+    }
+
     // --- fixtures ---
+
+    /** Stubs the permission/hierarchy pair for a moderator acting on another member. */
+    private void stagedModerator(String actorName, String targetName) {
+        when(auth.findUser(actorName)).thenReturn(Optional.of(user(1L, actorName)));
+        when(auth.findUser(targetName)).thenReturn(Optional.of(user(2L, targetName)));
+        when(auth.hasServer(any(), any())).thenReturn(true);
+        when(auth.canActOn(any(), any())).thenReturn(true);
+    }
 
     private static VoiceControlCommand command(Long channelId, String target, Boolean muted, Boolean deafened) {
         return new VoiceControlCommand(channelId, target, muted, deafened);

@@ -27,10 +27,10 @@ import java.util.Optional;
  * (the gateway stops relaying the target's audio), kick maps to plugin-level {@code kick} (media torn
  * down instantly) plus token revocation (blocks re-entry until a fresh /room). Both are fire-and-forget
  * on a dedicated executor — this handler runs on the STOMP {@code clientInboundChannel} and must not
- * block. A deafen implies a mute of the same origin (see {@link VoiceMembershipTracker}), so the MUTE
- * half of a deafen is forced through {@code moderate} like any mute; the "cannot hear" half has no
- * forced counterpart ({@code moderate} only gates the target's OUTGOING m-lines) and stays
- * cooperative (documented).
+ * block. A deafen implies a mute of the same origin (see {@link VoiceMembershipTracker}); since
+ * {@code moderate} only gates the target's OUTGOING m-lines, a moderator deafen has no partial forced
+ * form at all — it is a FULL forced exit instead (M8, user decision; the mark survives the kick and
+ * re-seeds on the target's rejoin, see {@link #deafen}).
  *
  * <p>Must be {@code @Controller} (Spring scans {@code @MessageMapping} only on {@code @Controller} beans —
  * see {@code CallSignalingHandler}). Permission + hierarchy checks go through {@link AuthorizationService},
@@ -84,11 +84,21 @@ public class VoiceControlHandler {
         if (!canControl(command, actor, Permission.DEAFEN_MEMBERS)) {
             return;
         }
-        // The deafen implies a moderator mute (the tracker writes both) — the forced layer now has
-        // something to enforce: a deafened member's mic goes dark at the gateway, not just in their
-        // client. The "cannot hear" half stays cooperative (see the class javadoc).
         tracker.setDeafened(command.channelId(), command.targetUsername(),
                 Boolean.TRUE.equals(command.deafened()));
+        if (Boolean.TRUE.equals(command.deafened())) {
+            // M8 (security round 7), user decision: a moderator deafen is a FULL forced exit — the
+            // "cannot hear" half had no forced counterpart (moderate gates outgoing m-lines only),
+            // so a rogue simply ignored it. The MARK is written first and deliberately SURVIVES the
+            // kick (moderator state outlives a leave by design): a re-entering member is re-seeded
+            // with it on the next join (the tracker's whole-room state re-publish) and the honest
+            // client re-deafens itself. The documented cycle: a rogue re-joining sits deafened only
+            // cooperatively until a moderator acts again — re-kicking on every join would lock the
+            // member out of voice entirely, which is what kicks are for, not deafens.
+            voiceEnforcer.forceLeave(command.channelId(), command.targetUsername(), actor.getName());
+            return;
+        }
+        // Undeafen: the implied mute lifts with the mark; the gateway follows the union as usual.
         voiceAccess.moderateAudio(command.channelId(), command.targetUsername(),
                 tracker.isMuted(command.channelId(), command.targetUsername()));
     }

@@ -64,9 +64,12 @@ public class MemberService {
     }
 
     /** The moderation audit list: banned accounts (unban-able) and removed ones (permanent) —
-     *  {@link MemberResponse#removed()} tells the two apart. */
+     *  {@link MemberResponse#removed()} tells the two apart. L1 (security round 7): BAN_MEMBERS
+     *  gates the read; like every mutation here, the gate is enforced in the service. */
     @Transactional(readOnly = true)
-    public List<MemberResponse> banned() {
+    public List<MemberResponse> banned(String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.BAN_MEMBERS);
         return userRepository.findAllByOrderByIdAsc().stream()
                 .filter(user -> user.isBanned() || user.isRemoved())
                 .map(user -> MemberResponse.from(user, signer, auth.isOwner(user), auth.dmRestricted(user)))

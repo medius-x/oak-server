@@ -72,7 +72,12 @@ public class SecurityConfig {
         config.setAllowedOriginPatterns(List.of("*"));
         config.setAllowedMethods(List.of("*"));
         config.setAllowedHeaders(List.of("*"));
-        config.setAllowCredentials(true);
+        // L3 (security round 7): auth rides the Authorization header (stateless JWT, no cookie
+        // session anywhere), so cross-origin requests never need credentials — and with them off,
+        // the reflected-origin credential dance collapses the CSRF surface to zero. The wildcard
+        // ORIGIN stays deliberately: the Electron renderer runs on a file:// origin (Origin: null)
+        // and cannot be enumerated.
+        config.setAllowCredentials(false);
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/**", config);
         return source;

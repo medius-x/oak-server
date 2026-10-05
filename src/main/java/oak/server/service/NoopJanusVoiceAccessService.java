@@ -62,4 +62,9 @@ public class NoopJanusVoiceAccessService implements JanusVoiceAccessService {
     public void kickUnknownPublishers(long channelId, java.util.Set<String> knownUsernames) {
         // No-op.
     }
+
+    @Override
+    public void kickVideoPublishers(long channelId, java.util.Set<String> knownUsernames) {
+        // No-op.
+    }
 }

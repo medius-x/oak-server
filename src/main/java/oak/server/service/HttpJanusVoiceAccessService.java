@@ -254,14 +254,8 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
     @Override
     public void forceKick(long channelId, String username) {
         submitAction(() -> withRoomPublishers(channelId, (publishers, control) -> {
-            String secret = roomSecret(channelId);
             for (JsonNode publisher : matchingPublishers(publishers, username)) {
-                Map<String, Object> kick = new HashMap<>();
-                kick.put("request", "kick");
-                kick.put("room", channelId);
-                kick.put("id", publisher.path("id").asLong());
-                kick.put("secret", secret);
-                JsonNode response = client.message(control.sessionId(), control.handleId(), kick, control.token());
+                JsonNode response = kickPublisher(control, channelId, publisher.path("id").asLong());
                 logResult("force-kick " + username + " from room " + channelId, response);
             }
         }));
@@ -324,21 +318,41 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
      */
     void kickUnknownPublishersNow(long channelId, java.util.Set<String> knownUsernames) {
         withRoomPublishers(channelId, (publishers, control) -> {
-            String secret = roomSecret(channelId);
             for (JsonNode publisher : publishers) {
                 String display = publisher.path("display").asText(null);
                 if (display == null || display.equals(CONTROL_DISPLAY)
                         || knownUsernames.contains(display)) {
                     continue;
                 }
-                Map<String, Object> kick = new HashMap<>();
-                kick.put("request", "kick");
-                kick.put("room", channelId);
-                kick.put("id", publisher.path("id").asLong());
-                kick.put("secret", secret);
-                JsonNode response = client.message(control.sessionId(), control.handleId(), kick, control.token());
+                JsonNode response = kickPublisher(control, channelId, publisher.path("id").asLong());
                 logResult("ghost-publisher kick '" + display + "' (id "
                         + publisher.path("id").asLong() + ") from room " + channelId, response);
+            }
+        });
+    }
+
+    @Override
+    public void kickVideoPublishers(long channelId, java.util.Set<String> knownUsernames) {
+        submitAction(() -> kickVideoPublishersNow(channelId, knownUsernames));
+    }
+
+    /**
+     * M8, the AFK video ban's forced layer (security round 7): every KNOWN publisher of the
+     * room with a live video stream is kicked whole — the plugin has no per-stream forced
+     * video mute, so the full publisher teardown is the only forced form (the honest client
+     * stops its own share cooperatively; ghosts stay with the ghost sweeper). Synchronous
+     * core — package-private for the unit test.
+     */
+    void kickVideoPublishersNow(long channelId, java.util.Set<String> knownUsernames) {
+        withRoomPublishers(channelId, (publishers, control) -> {
+            for (JsonNode publisher : publishers) {
+                String display = publisher.path("display").asText(null);
+                if (display == null || display.equals(CONTROL_DISPLAY)
+                        || !knownUsernames.contains(display) || videoMidOf(publisher) == null) {
+                    continue;
+                }
+                JsonNode response = kickPublisher(control, channelId, publisher.path("id").asLong());
+                logResult("afk-video kick " + display + " from room " + channelId, response);
             }
         });
     }
@@ -361,6 +375,16 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
     }
 
     // --- control-session plumbing ---
+
+    /** Sends the admin-secret plugin kick for one publisher id (id-based — no display match). */
+    private JsonNode kickPublisher(ControlSession control, long channelId, long publisherId) {
+        Map<String, Object> kick = new HashMap<>();
+        kick.put("request", "kick");
+        kick.put("room", channelId);
+        kick.put("id", publisherId);
+        kick.put("secret", roomSecret(channelId));
+        return client.message(control.sessionId(), control.handleId(), kick, control.token());
+    }
 
     /** An attached-but-not-joined videoroom handle plus the throwaway token that opened it. */
     private record ControlSession(long sessionId, long handleId, String token) {}
@@ -489,6 +513,17 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
     static String audioMidOf(JsonNode publisher) {
         for (JsonNode stream : publisher.path("streams")) {
             if ("audio".equals(stream.path("type").asText())) {
+                String mid = stream.path("mid").asText(null);
+                return (mid == null || mid.isBlank()) ? null : mid;
+            }
+        }
+        return null;
+    }
+
+    /** Mid of the publisher's first video stream — the AFK video ban's probe; null when none. */
+    static String videoMidOf(JsonNode publisher) {
+        for (JsonNode stream : publisher.path("streams")) {
+            if ("video".equals(stream.path("type").asText())) {
                 String mid = stream.path("mid").asText(null);
                 return (mid == null || mid.isBlank()) ? null : mid;
             }

@@ -5,6 +5,7 @@ import oak.server.entity.RefreshToken;
 import oak.server.entity.User;
 import oak.server.repository.RefreshTokenRepository;
 import oak.server.repository.UserRepository;
+import oak.server.service.LoginRateLimiter;
 import oak.server.service.RefreshTokenCleanup;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -318,6 +319,91 @@ class AuthFlowIntegrationTest {
                         .content(changePasswordBody("supersecret", "short")))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.status").value(400));
+    }
+
+    @Test
+    void logout_revokesOnlyThePresentedRefresh() throws Exception {
+        register("alice", "supersecret");
+        String loggingOutRefresh = loginRefresh("alice", "supersecret");
+        String otherDeviceRefresh = loginRefresh("alice", "supersecret"); // a DIFFERENT family
+
+        mockMvc.perform(post("/api/auth/logout").contentType(JSON)
+                        .content(refreshBody(loggingOutRefresh)))
+                .andExpect(status().isNoContent());
+
+        // the logged-out token no longer refreshes...
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON)
+                        .content(refreshBody(loggingOutRefresh)))
+                .andExpect(status().isUnauthorized());
+        // ...but the other device's family is untouched — a logout is NOT reuse-detection
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON)
+                        .content(refreshBody(otherDeviceRefresh)))
+                .andExpect(status().isOk());
+
+        // idempotent: the dead token again, and a never-issued one — both still 204
+        mockMvc.perform(post("/api/auth/logout").contentType(JSON)
+                        .content(refreshBody(loggingOutRefresh)))
+                .andExpect(status().isNoContent());
+        mockMvc.perform(post("/api/auth/logout").contentType(JSON)
+                        .content(refreshBody("never-existed")))
+                .andExpect(status().isNoContent());
+    }
+
+    @Test
+    void logoutAll_revokesEveryFamilyOfThePrincipal() throws Exception {
+        register("alice", "supersecret");
+        String access = login("alice", "supersecret");
+        String familyOne = loginRefresh("alice", "supersecret");
+        String familyTwo = loginRefresh("alice", "supersecret");
+
+        mockMvc.perform(post("/api/auth/logout-all")
+                        .header("Authorization", "Bearer " + access))
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON)
+                        .content(refreshBody(familyOne)))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/auth/refresh").contentType(JSON)
+                        .content(refreshBody(familyTwo)))
+                .andExpect(status().isUnauthorized());
+
+        // without a principal there is nothing to revoke — 401, not a silent 204
+        mockMvc.perform(post("/api/auth/logout-all"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void login_bruteForce_hits429() throws Exception {
+        register("bruteforce-target", "supersecret");
+        // The limiter is a context-wide singleton whose windows do NOT roll back with the
+        // test transaction — this test runs from a DEDICATED remote address so the shared
+        // MockMvc address never inherits its failures (the whole suite logs in from it).
+        for (int attempt = 0; attempt < LoginRateLimiter.ACCOUNT_FAILURE_CAP; attempt++) {
+            mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                            .with(request -> {
+                                request.setRemoteAddr("10.99.0.7");
+                                return request;
+                            })
+                            .content(loginBody("bruteforce-target", "wrong-password-" + attempt)))
+                    .andExpect(status().isUnauthorized());
+        }
+        // the account cap is hit — even the RIGHT password answers 429 now
+        mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .with(request -> {
+                            request.setRemoteAddr("10.99.0.7");
+                            return request;
+                        })
+                        .content(loginBody("bruteforce-target", "supersecret")))
+                .andExpect(status().isTooManyRequests());
+        // an untouched account from an untouched address sees the ORDINARY uniform 401, not 429
+        // (a second registration here would need an invite — an unknown user serves the same proof)
+        mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .with(request -> {
+                            request.setRemoteAddr("10.99.0.8");
+                            return request;
+                        })
+                        .content(loginBody("unrelated-target", "whatever-password")))
+                .andExpect(status().isUnauthorized());
     }
 
     // --- helpers ---

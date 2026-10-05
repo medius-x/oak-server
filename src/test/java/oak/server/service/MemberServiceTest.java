@@ -3,6 +3,7 @@ package oak.server.service;
 import oak.server.controller.UserController;
 import oak.server.dto.MemberEvent;
 import oak.server.dto.UserSummary;
+import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
@@ -12,13 +13,18 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -113,6 +119,21 @@ class MemberServiceTest {
 
         assertThat(victim.isBanned()).isTrue();
         verify(voiceEnforcer).evictEverywhere("victim", "admin");
+    }
+
+    @Test
+    void theBanAuditRequiresBanMembers() {
+        // L1 (security round 7): the banned/removed audit list is a moderation surface —
+        // BAN_MEMBERS gates the read, and a refused gate never reaches the repository.
+        User actor = user(1L, "pleb");
+        when(auth.requireUser("pleb")).thenReturn(actor);
+        doThrow(new ResponseStatusException(HttpStatus.FORBIDDEN))
+                .when(auth).requireServer(actor, Permission.BAN_MEMBERS);
+
+        assertThatThrownBy(() -> memberService.banned("pleb"))
+                .isInstanceOf(ResponseStatusException.class);
+
+        verify(userRepository, never()).findAllByOrderByIdAsc();
     }
 
     private static User user(Long id, String username) {

@@ -66,4 +66,14 @@ public interface JanusVoiceAccessService {
      * victim. Fire-and-forget like the other forced actions.
      */
     void kickUnknownPublishers(long channelId, java.util.Set<String> knownUsernames);
+
+    /**
+     * Kicks every KNOWN publisher of the room that has a live video stream — the AFK room's
+     * video ban, forced (M8, security round 7). The honest client stops its own share
+     * cooperatively; this tears down the rogue's whole publisher (the videoroom plugin offers
+     * no per-stream forced video mute, so a full kick is the only forced form). Ghosts are
+     * skipped — they are the ghost sweeper's business, not the AFK policy's. Fire-and-forget
+     * like the other forced actions.
+     */
+    void kickVideoPublishers(long channelId, java.util.Set<String> knownUsernames);
 }

@@ -1039,12 +1039,14 @@ public class MessageService {
     /** Does any message reference this attachment key? Backs the fresh-link re-mint endpoint:
      *  an unknown key 404s there instead of handing out a signature for arbitrary input. The
      *  attachments column is JSON text and keys embed a random UUID, so the LIKE in the repo
-     *  only ever matches a real reference. */
+     *  only ever matches a real reference — and since the key is CALLER-supplied, it goes
+     *  through {@link #likePattern} (L2, security round 7): {@code %}/{@code _} in it must
+     *  match literally, never act as wildcards. */
     public boolean attachmentExists(String key) {
         if (key == null || key.isBlank()) {
             return false;
         }
-        return messageRepository.countByAttachmentsTextLike("%" + key + "%") > 0;
+        return messageRepository.countByAttachmentsTextLike(likePattern(key)) > 0;
     }
 
     /** Appends the reply ping (Discord-style): replying to someone's message mentions them

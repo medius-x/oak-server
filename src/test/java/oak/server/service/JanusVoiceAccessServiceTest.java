@@ -174,6 +174,15 @@ class JanusVoiceAccessServiceTest {
         assertNull(HttpJanusVoiceAccessService.audioMidOf(json("{\"id\":1}")));
     }
 
+    @Test
+    void videoMidOfPicksTheFirstVideoStream() {
+        assertEquals("0", HttpJanusVoiceAccessService.videoMidOf(json(
+                "{\"id\":1,\"streams\":[{\"type\":\"video\",\"mid\":\"0\"},{\"type\":\"audio\",\"mid\":\"1\"}]}")));
+        assertNull(HttpJanusVoiceAccessService.videoMidOf(json(
+                "{\"id\":1,\"streams\":[{\"type\":\"audio\",\"mid\":\"1\"}]}")));
+        assertNull(HttpJanusVoiceAccessService.videoMidOf(json("{\"id\":1}")));
+    }
+
     // --- control-session core ---
 
     @Test
@@ -257,6 +266,34 @@ class JanusVoiceAccessServiceTest {
                         "kick".equals(body.get("request")) && Long.valueOf(222L).equals(body.get("id"))),
                 anyString());
         verify(client, never()).message(anyLong(), anyLong(), argThat(body ->
+                        "kick".equals(body.get("request")) && Long.valueOf(111L).equals(body.get("id"))),
+                anyString());
+    }
+
+    @Test
+    void kickVideoPublishersWholeKicksOnlyKnownVideoPublishers() {
+        // M8, the AFK video ban's forced layer: a KNOWN member with a live video stream is
+        // whole-kicked; an audio-only sitter, a ghost (the ghost sweeper's business) and our
+        // own control display stay.
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(success());
+        when(client.poll(anyLong(), anyString())).thenReturn(List.of(json("""
+                {"plugindata":{"data":{"videoroom":"joined","publishers":[
+                  {"id": 111, "display": "alice", "streams": [{"type": "video", "mid": "1"}]},
+                  {"id": 222, "display": "bob",   "streams": [{"type": "audio", "mid": "0"}]},
+                  {"id": 333, "display": "ghost-video", "streams": [{"type": "video", "mid": "1"}]},
+                  {"id": 444, "display": "oak-control", "streams": [{"type": "video", "mid": "1"}]}
+                ]}}}
+                """)));
+
+        service.kickVideoPublishersNow(7L, java.util.Set.of("alice", "bob"));
+
+        // exactly ONE kick leaves this sweep, and it is alice's publisher
+        verify(client, times(1)).message(anyLong(), anyLong(), argThat(body ->
+                        "kick".equals(body.get("request"))), anyString());
+        verify(client).message(eq(1L), eq(2L), argThat(body ->
                         "kick".equals(body.get("request")) && Long.valueOf(111L).equals(body.get("id"))),
                 anyString());
     }

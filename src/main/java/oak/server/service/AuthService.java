@@ -62,6 +62,7 @@ public class AuthService {
     private final ReadStateService readStateService;
     private final InviteRepository inviteRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final LoginRateLimiter loginRateLimiter;
 
     /**
      * Registration. A FRESH instance (no users yet) bootstraps its OWNER with no secret —
@@ -142,19 +143,33 @@ public class AuthService {
 
     @Transactional
     public AuthResponse login(LoginRequest request) {
+        // M6: the brute-force gate runs BEFORE the (BCrypt-costly) credential check. The key is
+        // the raw username as typed — lookups are exact, so that is what a targeted attack
+        // repeats; case-variants of one target still pile onto the per-IP window.
+        String accountKey = request.username() == null ? "" : request.username();
+        String address = remoteAddress();
+        if (loginRateLimiter.isBlocked(accountKey, address)) {
+            throw tooManyRequests("Too many failed login attempts. Try again later");
+        }
         try {
             var authentication = authenticationManager.authenticate(
                     new UsernamePasswordAuthenticationToken(request.username(), request.password()));
             User user = userRepository.findByUsername(authentication.getName())
                     .orElseThrow(() -> unauthorized("Invalid username or password"));
             if (user.isRemoved()) {
+                // The password was RIGHT (authenticate passed) — the failure bookkeeping is only
+                // about stopping the hammering; a blocked banned/removed account answers 429 too.
+                loginRateLimiter.onFailure(accountKey, address);
                 throw forbidden("This account was removed from the server");
             }
             if (user.isBanned()) {
+                loginRateLimiter.onFailure(accountKey, address);
                 throw forbidden("This account is banned");
             }
+            loginRateLimiter.onSuccess(accountKey);
             return issueTokens(user, newFamilyId());
         } catch (BadCredentialsException e) {
+            loginRateLimiter.onFailure(accountKey, address);
             throw unauthorized("Invalid username or password");
         }
     }
@@ -233,6 +248,44 @@ public class AuthService {
                 Duration.between(stored.getCreatedAt(), Instant.now()),
                 fingerprint(rawRefreshToken), remoteAddress());
         return response;
+    }
+
+    /**
+     * M7 logout: revokes the PRESENTED refresh token — the calling device's next refresh dies
+     * and it falls back to the login screen. Deliberately NOT the reuse-detection path: a token
+     * presented here that was already rotated away is simply dead, not evidence of theft, and
+     * spreading the revoke to its family would log out the user's OTHER devices on a
+     * single-device logout. Idempotent by construction — an unknown or already-revoked token
+     * is a no-op, the endpoint answers 204 regardless.
+     */
+    @Transactional
+    public void logout(String rawRefreshToken) {
+        refreshTokenRepository.findByTokenHash(hashToken(rawRefreshToken))
+                .ifPresent(token -> {
+                    token.setRevoked(true);
+                    log.info("[auth-logout] revoked presented refresh id={} fp={} from {}",
+                            token.getId(), fingerprint(rawRefreshToken), remoteAddress());
+                });
+    }
+
+    /**
+     * M7 logout-all: revokes EVERY refresh token of the principal's account — all families, all
+     * devices (the changePassword stance, without the re-issue). The still-valid access JWTs are
+     * stateless and die at their own 8h expiry; every refresh attempt from any device 401s at
+     * once. An unknown username is a silent no-op — the endpoint stays idempotent.
+     */
+    @Transactional
+    public void logoutAll(String username) {
+        userRepository.findByUsername(username).ifPresent(user -> {
+            int revoked = 0;
+            for (RefreshToken token : refreshTokenRepository.findByUser(user)) {
+                if (!token.isRevoked()) {
+                    token.setRevoked(true);
+                    revoked++;
+                }
+            }
+            log.info("[auth-logout] logout-all for {}: {} token(s) revoked", username, revoked);
+        });
     }
 
     /**
@@ -333,6 +386,10 @@ public class AuthService {
 
     private static ResponseStatusException unauthorized(String reason) {
         return new ResponseStatusException(HttpStatus.UNAUTHORIZED, reason);
+    }
+
+    private static ResponseStatusException tooManyRequests(String reason) {
+        return new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, reason);
     }
 
     private static ResponseStatusException forbidden(String reason) {
