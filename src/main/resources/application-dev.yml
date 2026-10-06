@@ -50,7 +50,16 @@ spring:
       hibernate:
         dialect: org.hibernate.dialect.PostgreSQLDialect
         format_sql: true
-    show-sql: true
+    # SQL logging is OFF (logging round follow-up, 2026-10-06): show-sql prints every
+    # statement WITHOUT bind parameters or timings, which diagnoses almost nothing —
+    # while dominating the log volume and crowding the useful [api]/[auth-refresh]/
+    # [storage-gc] lines out of the now-bounded 24h retention window. Slow queries
+    # have a proper home: postgres log_min_duration_statement (env/docker-compose.yml,
+    # carried into the logs download as containers/postgres.log). Flip this to true
+    # ONLY for a targeted N+1 hunt, never as a steady state. NEVER enable
+    # org.hibernate.orm.jdbc.bind: TRACE instead — it prints the bound VALUES, and
+    # the DB holds plaintext invite secrets and refresh-token hashes.
+    show-sql: false
 
   # WebSocket (signaling + text chat). In-memory user registry, no broker needed.
   # JWT auth is enforced by Spring Security on the WS handshake (see oak-server/CLAUDE.md).

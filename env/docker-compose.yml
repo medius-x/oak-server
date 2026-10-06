@@ -30,6 +30,17 @@ services:
     image: postgres:16-alpine
     container_name: oak-postgres
     restart: unless-stopped
+    # Slow-query logging (logging round follow-up, 2026-10-06): statements slower
+    # than 200 ms land in the container log — WITH their duration, which is the DB
+    # diagnostics Hibernate's show-sql never had. They ride `docker logs`, so the
+    # server logs download (containers/postgres.log) carries them. The second flag
+    # DISABLES bind-parameter values in those records: the SQL shape ($1, $2 …) is
+    # diagnostic, but the VALUES are message texts and invite secrets (verified
+    # against the PG16 docs: 0 = bind parameters are not logged for non-error
+    # statement logs; JDBC talks the extended protocol, so its parameters are
+    # exactly what this silences). The SQL form for an N+1 hunt stays a
+    # point-in-time tool: flip spring.jpa.show-sql for the hunt, never steady-state.
+    command: ["postgres", "-c", "log_min_duration_statement=200ms", "-c", "log_parameter_max_length=0"]
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

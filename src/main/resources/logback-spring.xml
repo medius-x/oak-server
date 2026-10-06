@@ -2,21 +2,32 @@
 <!--
   Server logging. Reuses Spring Boot's default console appender (colored, same pattern/levels as
   before — the `logging.level.*` overrides in application-dev.yml are still applied by Spring Boot on
-  top of this config) and adds a single FILE appender for reading startup failures / stack traces
-  that are too large for the terminal.
+  top of this config) and adds a ROLLING file appender so an incident is diagnosable from disk
+  across restarts (user decision 2026-10-06, the logging round).
 
-  The server is the only instance (no PID suffix, no per-run disambiguation), so the file is a fixed
-  path with append=false: every fresh start OVERWRITES the previous file — the newest run's log is all
-  we ever read. Scoped out of the `test` profile so `mvn test` does not clobber the real run's log.
+  Retention ≈ 24 hours: hourly rollover × maxHistory 24, plus a 50 MB per-file size cap (a burst
+  of DEBUG traffic rotates mid-hour as .%i) and a 1 GB totalSizeCap backstop. Rotated files are
+  gzipped next to the active one; cleanHistoryOnStart prunes the overflow on boot. append=true —
+  a restart must NOT erase the previous run anymore (the old overwrite-on-start behavior was the
+  point of this round). The active file path is unchanged (~/.oak-server/oak-server.log) and is
+  downloadable via GET /api/server/logs (LogsController) together with the container tails.
+
+  Scoped out of the `test` profile so `mvn test` neither writes nor prunes the dev log.
 -->
 <configuration>
     <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
     <include resource="org/springframework/boot/logging/logback/console-appender.xml"/>
 
     <springProfile name="!test">
-        <appender name="FILE" class="ch.qos.logback.core.FileAppender">
+        <appender name="FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
             <file>${user.home}/.oak-server/oak-server.log</file>
-            <append>false</append>
+            <rollingPolicy class="ch.qos.logback.core.rolling.SizeAndTimeBasedRollingPolicy">
+                <fileNamePattern>${user.home}/.oak-server/oak-server.%d{yyyy-MM-dd-HH}.%i.log.gz</fileNamePattern>
+                <maxFileSize>50MB</maxFileSize>
+                <maxHistory>24</maxHistory>
+                <totalSizeCap>1GB</totalSizeCap>
+                <cleanHistoryOnStart>true</cleanHistoryOnStart>
+            </rollingPolicy>
             <encoder>
                 <pattern>${FILE_LOG_PATTERN}</pattern>
             </encoder>
