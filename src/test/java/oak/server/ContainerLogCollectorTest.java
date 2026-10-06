@@ -90,4 +90,16 @@ class ContainerLogCollectorTest {
         // A name embedded in the middle must NOT match — only the exact name or a <-name-N> suffix.
         assertNull(ContainerLogCollector.resolveContainer("some-postgres-extra-2\nplain-1", "postgres"));
     }
+
+    @Test
+    void resolveContainerMatchesPinnedDevNames() {
+        // The dev compose pins container_name: oak-postgres/oak-minio/oak-janus/oak-coturn —
+        // neither the exact name nor the compose <-name-N> suffix. The plain <-name> suffix
+        // closes that gap (healthcheck round 2026-10-07; the log tails silently missed them before).
+        assertEquals("oak-postgres", ContainerLogCollector.resolveContainer("oak-postgres\nx-1", "postgres"));
+        assertEquals("oak-janus", ContainerLogCollector.resolveContainer("oak-janus\nx-1", "janus"));
+        // An embedded name still must not match, and the suffix never truncates a longer tail.
+        assertNull(ContainerLogCollector.resolveContainer("some-postgres-extra\nx-1", "postgres"));
+        assertNull(ContainerLogCollector.resolveContainer("postgres-extra\nx-1", "postgres"));
+    }
 }

@@ -23,7 +23,8 @@ import java.util.regex.Pattern;
  *
  * Every failure degrades to a text note ("unavailable: …") inside the archive instead of
  * failing the download: a host without Docker still gets its server logs. Resolution accepts
- * both a plain container name and compose-style names ({@code env-postgres-1}).
+ * a plain container name, compose-style names ({@code env-postgres-1}) and pinned dev names
+ * ({@code oak-postgres}) — see {@link #resolveContainer}.
  */
 @Service
 public class ContainerLogCollector {
@@ -82,7 +83,12 @@ public class ContainerLogCollector {
         }
     }
 
-    /** Exact name or a compose-style {@code <project>-<name>-<index>} suffix match. */
+    /**
+     * Exact name, a compose-style {@code <project>-<name>-<index>} suffix, or a plain
+     * {@code <prefix>-<name>} suffix — the dev compose pins explicit names like
+     * {@code oak-postgres} (healthcheck round 2026-10-07: the two legacy rules silently
+     * missed them, so container log tails degraded to "unavailable" on this very host).
+     */
     public static String resolveContainer(String psOutput, String name) {
         for (String rawLine : psOutput.split("\n")) {
             String candidate = rawLine.trim();
@@ -90,7 +96,8 @@ public class ContainerLogCollector {
                 continue;
             }
             if (candidate.equals(name)
-                    || candidate.matches(".*-" + Pattern.quote(name) + "-\\d+$")) {
+                    || candidate.matches(".*-" + Pattern.quote(name) + "-\\d+$")
+                    || candidate.matches(".*-" + Pattern.quote(name) + "$")) {
                 return candidate;
             }
         }
