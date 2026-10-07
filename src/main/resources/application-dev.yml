@@ -4,11 +4,14 @@
 # share ONE source of truth for secrets; real environment variables still
 # win over .env values (standard Spring precedence).
 
-# Verbose WebSocket/STOMP logging in dev — shows handshakes, CONNECT, SUBSCRIBE, MESSAGE routing.
+# WS/STOMP framework logging stays at INFO: the connection ping indicator keeps a
+# STOMP frame flowing every 10 s per client, and at DEBUG these packages log EVERY
+# frame — the live log grew megabytes of pure ping noise (2026-10-07). Raise to
+# DEBUG temporarily when you need handshakes/CONNECT/SUBSCRIBE/SEND routing visible.
 logging:
   level:
-    org.springframework.web.socket: DEBUG
-    org.springframework.messaging.simp: DEBUG
+    org.springframework.web.socket: INFO
+    org.springframework.messaging.simp: INFO
 
 spring:
   # env/.env is git-ignored (per-machine secrets since the security round
