@@ -193,21 +193,29 @@ public class InviteController {
     }
 
     /**
-     * Assembles the copyable link. The host/port come from the ADVERTISED connection info
-     * (what members type into "Add server" — the administering client may sit on localhost
-     * while the link must carry the LAN address); with nothing advertised, the request's
-     * Host header is the best guess. The scheme is always {@code http}: the profile stores
-     * no scheme, and TLS arrives with future provisioning. The secret rides the hash
-     * fragment — clients parse it locally and submit it in the register body.
+     * Assembles the copyable link. The scheme/host/port come from the ADVERTISED connection
+     * info (what members type into "Add server" — the administering client may sit on
+     * localhost while the link must carry the LAN address); with nothing advertised, the
+     * request's Host header is the best guess. The scheme is the profile's
+     * {@code connectionScheme} ({@code https} on a TLS deployment behind the Caddy entry
+     * point; null defaults to {@code http}). The port prints only when advertised AND
+     * non-default for the scheme (80/443 are omitted); the Host-header fallback already
+     * carries its own port. The secret rides the hash fragment — clients parse it locally
+     * and submit it in the register body.
      */
     static String buildLink(ServerProfile profile, String hostHeader, String secret) {
+        String scheme = profile.getConnectionScheme() != null ? profile.getConnectionScheme() : "http";
         String host = profile.getConnectionHost() != null && !profile.getConnectionHost().isBlank()
                 ? profile.getConnectionHost()
                 : hostHeader != null && !hostHeader.isBlank() ? hostHeader : "localhost";
-        String port = profile.getConnectionHost() != null && profile.getConnectionPort() != null
-                ? ":" + profile.getConnectionPort()
-                : ""; // the Host header already carries its port, if any
-        return "http://" + host + port + "/#invite=" + secret;
+        String port = "";
+        if (profile.getConnectionHost() != null && profile.getConnectionPort() != null) {
+            int defaultPort = "https".equals(scheme) ? 443 : 80;
+            if (profile.getConnectionPort() != defaultPort) {
+                port = ":" + profile.getConnectionPort();
+            }
+        }
+        return scheme + "://" + host + port + "/#invite=" + secret;
     }
 
     private static String mintSecret() {

@@ -55,6 +55,12 @@ public class ServerProfile {
     @Column(name = "connection_port")
     private Integer connectionPort;
 
+    /** Scheme of the advertised address ({@code http} | {@code https}; null = the historical
+     *  default http). Set by a TLS deployment (the Caddy entry point): invite links carry it,
+     *  and default ports (80/443) are omitted from the assembled URL. */
+    @Column(name = "connection_scheme", length = 8)
+    private String connectionScheme;
+
     // --- Storage-GC policy (the "Server" settings screen; nulls on rows predating the
     //     columns resolve to the code defaults — see StorageGcService) ---
 

@@ -60,7 +60,8 @@ class ServerProfileIntegrationTest {
                 .andExpect(jsonPath("$.avatarKey").isEmpty())   // no icon set
                 .andExpect(jsonPath("$.avatarUrl").isEmpty())   // noop signer
                 .andExpect(jsonPath("$.connectionHost").value("localhost"))
-                .andExpect(jsonPath("$.connectionPort").value(8080));
+                .andExpect(jsonPath("$.connectionPort").value(8080))
+                .andExpect(jsonPath("$.connectionScheme").isEmpty());  // null = the default http
     }
 
     @Test
@@ -94,6 +95,17 @@ class ServerProfileIntegrationTest {
                 .andExpect(status().isBadRequest());
         mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
                         .contentType(JSON).content("{\"connectionPort\":70000}"))
+                .andExpect(status().isBadRequest());
+
+        // the scheme rides the same PATCH: https echoes and persists (the TLS-entry-point
+        // deployment writes it), anything beyond http|https is bean-validation rejected
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"connectionScheme\":\"https\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.connectionScheme").value("https"));
+        assertEquals("https", serverProfileRepository.singleton().getConnectionScheme());
+        mockMvc.perform(patch("/api/server/connection").header("Authorization", "Bearer " + token)
+                        .contentType(JSON).content("{\"connectionScheme\":\"ftp\"}"))
                 .andExpect(status().isBadRequest());
     }
 

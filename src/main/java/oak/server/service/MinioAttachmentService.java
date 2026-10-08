@@ -10,9 +10,9 @@ import io.minio.Result;
 import io.minio.messages.Item;
 import io.minio.http.Method;
 import jakarta.annotation.PostConstruct;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import oak.server.config.MinioProperties;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
@@ -24,28 +24,46 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * MinIO-backed signer. Builds presigned PUT (upload) and GET (download) URLs against the
- * {@code publicEndpoint}, and creates the bucket at startup if missing. Active only when
- * {@code oak.minio.enabled=true}.
+ * MinIO-backed signer. Presigned PUT/GET URLs are signed by the PUBLIC-address client
+ * ({@code minioPresignClient}); every server-side operation (bucket check at startup,
+ * deletes, orphan listings) runs on the INTERNAL-address client — behind the Caddy entry
+ * point these are different hosts. Active only when {@code oak.minio.enabled=true}.
+ *
+ * <p>The constructor injects TWO beans of the same type and states the presign one
+ * with an EXPLICIT {@code @Qualifier}: parameter-name-based matching did NOT survive
+ * to the compiled jar (live smoke 2026-10-08 — every presigned URL left on the
+ * internal {@code http://minio:9000} address because the {@code @Primary} operations
+ * client won BOTH constructor slots), and a qualifier does not depend on compiler
+ * flags at all.
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 @ConditionalOnProperty(prefix = "oak.minio", name = "enabled", havingValue = "true")
 public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentObjectStore {
 
     private static final Duration PUT_EXPIRY = Duration.ofMinutes(5);
     private static final Duration GET_EXPIRY = Duration.ofHours(1);
 
-    private final MinioClient minioClient;
+    private final MinioClient minioOperationsClient;
+    private final MinioClient minioPresignClient;
     private final MinioProperties properties;
+
+    /** Written by hand (not @RequiredArgsConstructor) for the explicit @Qualifier —
+     *  see the class javadoc for the matching failure this prevents. */
+    public MinioAttachmentService(MinioClient minioOperationsClient,
+                                  @Qualifier("minioPresignClient") MinioClient minioPresignClient,
+                                  MinioProperties properties) {
+        this.minioOperationsClient = minioOperationsClient;
+        this.minioPresignClient = minioPresignClient;
+        this.properties = properties;
+    }
 
     @PostConstruct
     void ensureBucket() {
         String bucket = properties.bucket();
         try {
-            if (!minioClient.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())) {
-                minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
+            if (!minioOperationsClient.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())) {
+                minioOperationsClient.makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
                 log.info("[MinIO] Created bucket '{}'", bucket);
             }
         } catch (Exception minioError) {
@@ -101,7 +119,7 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
     @Override
     public void delete(String key) {
         try {
-            minioClient.removeObject(RemoveObjectArgs.builder()
+            minioOperationsClient.removeObject(RemoveObjectArgs.builder()
                     .bucket(properties.bucket())
                     .object(key)
                     .build());
@@ -133,7 +151,7 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
 
     private List<StoredObject> listByPrefix(String prefix) {
         List<StoredObject> objects = new ArrayList<>();
-        Iterable<Result<Item>> listing = minioClient.listObjects(ListObjectsArgs.builder()
+        Iterable<Result<Item>> listing = minioOperationsClient.listObjects(ListObjectsArgs.builder()
                 .bucket(properties.bucket())
                 .prefix(prefix)
                 .recursive(true)
@@ -152,7 +170,7 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
 
     private String sign(Method method, String key, Duration expiry) {
         try {
-            return minioClient.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
+            return minioPresignClient.getPresignedObjectUrl(GetPresignedObjectUrlArgs.builder()
                             .method(method)
                             .bucket(properties.bucket())
                             .object(key)

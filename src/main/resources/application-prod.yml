@@ -1,0 +1,31 @@
+# OAK server — containerized deployment profile (the "full" compose profile in
+# env/docker-compose.yml): the app runs in a container BEHIND the Caddy TLS entry
+# point, with the peripheral services on the same compose network.
+#
+# Only two things differ from the base config, on purpose:
+#   1. SECRETS LOSE THEIR DEV FALLBACKS — a prod boot with a default JWT secret
+#      or a change-me MinIO/Janus/TURN password refuses to start (Spring's
+#      unresolved-placeholder failure names the missing variable).
+#   2. FORWARD HEADERS — Caddy sets X-Forwarded-For/Proto/Host; Tomcat's
+#      RemoteIpValve (the "native" strategy) rewrites request.getRemoteAddr()
+#      back to the real client, which the per-IP login rate limiter and the
+#      [auth-refresh] log line rely on. The valve trusts RFC1918 proxies by
+#      default — the compose network (172.16/12) qualifies; a directly exposed
+#      8080 (outside the network) would be untrusted and keep its socket IP.
+server:
+  forward-headers-strategy: native
+
+spring:
+  datasource:
+    password: ${POSTGRES_PASSWORD}
+
+oak:
+  security:
+    jwt:
+      secret: ${JWT_SECRET}
+  minio:
+    secret-key: ${MINIO_APP_PASSWORD}
+  janus:
+    admin-secret: ${JANUS_ADMIN_SECRET}
+  turn:
+    static-auth-secret: ${TURN_STATIC_AUTH_SECRET}

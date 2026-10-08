@@ -8,18 +8,20 @@
 #
 # Usage:
 #   cd oak-server/env
-#   docker compose up -d
+#   docker compose up -d                          # peripheral only (dev: oak on the host)
+#   docker compose --profile full up -d --build   # + oak container + Caddy TLS entry point
 #   docker compose logs -f janus
 #   docker compose down            # stop, keep data
 #   docker compose down -v         # stop and WIPE all volumes
 #
-# oak-server (Spring Boot) runs on the host, not in this compose file.
-# It connects to these services via localhost + the mapped ports below.
-# JavaFX clients on the same host reach Janus/Coturn the same way.
-#
-# NOTE: this is a dev setup — everything is plain HTTP/WS (no TLS).
-# For production put a reverse proxy (TLS termination) in front and
-# set a real public IP / hostname for Coturn (external-ip) and Janus.
+# The DEFAULT topology is dev: oak-server (Spring Boot) runs on the host and
+# connects to these services via localhost + the mapped ports below; space/oak
+# clients on the same host reach Janus/Coturn the same way. The "full" profile
+# adds the containerized oak-server (env/Dockerfile.server — see its header for
+# the jar one-liner) and the Caddy reverse proxy (env/caddy/) that terminates
+# TLS and is the ONLY public HTTP surface: https://<host> → oak + /janus* →
+# janus, https://<host>:9443 → MinIO. In that topology the peripheral ports
+# below (5432/9000/9001/8088/8188/7088) must be firewalled off from outside.
 #
 # Variables are read from the .env file next to this compose file.
 
@@ -181,6 +183,89 @@ services:
       # 55000-55050 avoids Windows' excluded UDP ranges (49152-49451 etc.).
       - "${TURN_MIN_PORT:-55000}-${TURN_MAX_PORT:-55050}:${TURN_MIN_PORT:-55000}-${TURN_MAX_PORT:-55050}/udp"
 
+  # ──────────────────────── oak-server (profile full) ──────────────────
+  # The Spring Boot server itself, containerized. NEVER host-maps 8080: Caddy
+  # (below) is the only public HTTP surface; the REST/WS port stays inside the
+  # compose network. Runs the "prod" profile, which drops the dev fallbacks —
+  # the required secrets (JWT_SECRET, POSTGRES/MINIO/Janus/TURN) must be in
+  # .env or the container refuses to boot.
+  oak:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: oak-server:local
+    container_name: oak-server
+    restart: unless-stopped
+    profiles: ["full"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-oak}
+      POSTGRES_USER: ${POSTGRES_USER:-oak}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?generate one in env/.env}
+      JWT_SECRET: ${JWT_SECRET:?generate one (openssl rand -hex 32) in env/.env}
+      # MinIO: the server signs against the internal endpoint; presigned URLs
+      # handed to clients carry the PUBLIC one (through Caddy's own port).
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_PUBLIC_ENDPOINT: https://${OAK_PUBLIC_HOST:-localhost}:${OAK_MINIO_HTTPS_PORT:-9443}
+      MINIO_APP_USER: ${MINIO_APP_USER:-oak_app}
+      MINIO_APP_PASSWORD: ${MINIO_APP_PASSWORD:?set in env/.env}
+      # Janus: the server drives rooms over the internal REST; clients receive
+      # the PUBLIC https URL (RoomResponse) routed by Caddy.
+      JANUS_REST_URL: http://janus:8088/janus
+      JANUS_PUBLIC_REST_URL: https://${OAK_PUBLIC_HOST:-localhost}:${OAK_HTTPS_PORT:-443}/janus
+      JANUS_ADMIN_URL: http://janus:7088/admin
+      JANUS_ADMIN_SECRET: ${JANUS_ADMIN_SECRET:?set in env/.env}
+      # TURN rides plain UDP outside Caddy — the host ICE clients dial is the
+      # public one; the port must match coturn's mapping above.
+      TURN_HOST: ${OAK_PUBLIC_HOST:-localhost}
+      TURN_LISTEN_PORT: ${TURN_LISTEN_PORT:-34780}
+      TURN_STATIC_AUTH_SECRET: ${TURN_STATIC_AUTH_SECRET:?set in env/.env}
+      TURN_REALM: ${TURN_REALM:-oak.local}
+    volumes:
+      # The rolling file log (read by GET /api/server/logs) survives re-creates.
+      - oak-server-logs:/root/.oak-server
+
+  # ─────────────────────── Caddy TLS entry point (full) ────────────────
+  # Terminates TLS and routes: https://<host> → oak (REST + /ws) with /janus*
+  # → janus, and https://<host>:9443 → MinIO (own port — S3 signatures, see
+  # env/caddy/Caddyfile). Certificate: files from ./caddy/certs (self-signed
+  # for bare-IP hosts; gen-self-signed.sh); a domain deployment drops the tls
+  # lines for automatic Let's Encrypt.
+  caddy:
+    image: caddy:2
+    container_name: oak-caddy
+    restart: unless-stopped
+    profiles: ["full"]
+    depends_on:
+      - oak
+      - janus
+      - minio
+    environment:
+      OAK_SITE_ADDRESS: ${OAK_SITE_ADDRESS:-https://localhost}
+      OAK_MINIO_SITE_ADDRESS: ${OAK_MINIO_SITE_ADDRESS:-https://localhost:9443}
+      OAK_TLS_CERT: /certs/tls.crt
+      OAK_TLS_KEY: /certs/tls.key
+    ports:
+      - "${OAK_HTTPS_PORT:-443}:443"
+      - "${OAK_MINIO_HTTPS_PORT:-9443}:9443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/certs:/certs:ro
+      - oak-caddy-data:/data
+      - oak-caddy-config:/config
+
 volumes:
   oak-postgres-data:
   oak-minio-data:
+  oak-server-logs:
+  oak-caddy-data:
+  oak-caddy-config:

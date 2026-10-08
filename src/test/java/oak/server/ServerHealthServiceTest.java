@@ -43,9 +43,9 @@ class ServerHealthServiceTest {
     private static final MinioProperties MINIO_DISABLED =
             new MinioProperties("http://localhost:9000", "http://localhost:9000", "ak", "sk", "bucket", false);
     private static final JanusProperties JANUS_DISABLED = new JanusProperties(
-            "http://localhost:8088/janus", "ws://localhost:8188", "secret", "http://localhost:7088/admin", false);
+            "http://localhost:8088/janus", null, "ws://localhost:8188", "secret", "http://localhost:7088/admin", false);
     private static final JanusProperties JANUS_ENABLED = new JanusProperties(
-            "http://localhost:8088/janus", "ws://localhost:8188", "secret", "http://localhost:7088/admin", true);
+            "http://localhost:8088/janus", null, "ws://localhost:8188", "secret", "http://localhost:7088/admin", true);
 
     @Test
     void postgresProbeIsUpOnARealDataSource() {

@@ -45,7 +45,7 @@ public class RoomController {
         try {
             voiceAccess.ensureRoom(channel.getId());
             String token = voiceAccess.issueVoiceToken(principal.getUsername(), channel.getId());
-            return new RoomResponse(janusProperties.restUrl(), channel.getId(),
+            return new RoomResponse(janusProperties.clientRestUrl(), channel.getId(),
                     token, voiceAccess.roomPin(channel.getId()));
         } catch (JanusAdminException gatewayFailure) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "Voice gateway unavailable");

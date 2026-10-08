@@ -1,6 +1,112 @@
-# OAK server — base Spring Boot config.
-# Local development uses the "dev" profile by default.
-# Override per environment with SPRING_PROFILES_ACTIVE (e.g. prod).
+# OAK server — base Spring Boot config, shared by every profile.
+#
+# Everything integration-specific is an ENVIRONMENT PLACEHOLDER with a localhost
+# default (the dev topology: peripheral containers + the app on the host). The
+# dev profile only adds the env/.env import and log-level notes; the prod profile
+# (application-prod.yml) only tightens secrets and proxy headers — so a
+# containerized deployment sets plain env vars, no profile file drift.
+
 spring:
   profiles:
     active: dev
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:oak}
+    username: ${POSTGRES_USER:oak}
+    password: ${POSTGRES_PASSWORD:oakpass}
+    driver-class-name: org.postgresql.Driver
+    # Wait up to 60 s for the first pool connection instead of failing the boot instantly when
+    # Postgres is still coming up (docker compose). On Windows the Docker port proxy accepts TCP
+    # without a live container, so the driver gets a misleading EOFException in the SSL handshake
+    # instead of "connection refused". Only initial pool creation retries; runtime failures still
+    # fail fast.
+    hikari:
+      initialization-fail-timeout: 60000
+
+  # Flyway owns the schema. baseline-on-migrate: the pre-existing dev database
+  # (created by ddl-auto=update + the hand migrations) absorbs V1 WITHOUT executing
+  # it — only V2+ actually run; a fresh database executes V1 and gets the full schema.
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    baseline-version: 1
+    locations: classpath:db/migration
+
+  jpa:
+    # Flyway migrations (db/migration/V*.sql) are the ONLY way the schema changes.
+    # Hibernate no longer updates it — validate just cross-checks the entity
+    # mapping against the migrated schema (the drift alarm).
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+    # SQL logging is OFF (logging round follow-up, 2026-10-06): show-sql prints every
+    # statement WITHOUT bind parameters or timings, which diagnoses almost nothing —
+    # while dominating the log volume and crowding the useful [api]/[auth-refresh]/
+    # [storage-gc] lines out of the now-bounded 24h retention window. Slow queries
+    # have a proper home: postgres log_min_duration_statement (env/docker-compose.yml,
+    # carried into the logs download as containers/postgres.log). Flip this to true
+    # ONLY for a targeted N+1 hunt, never as a steady state. NEVER enable
+    # org.hibernate.orm.jdbc.bind: TRACE instead — it prints the bound VALUES, and
+    # the DB holds plaintext invite secrets and refresh-token hashes.
+    show-sql: false
+
+# OAK-specific service connections, grouped under the "oak" prefix.
+oak:
+  # JWT auth. The fallback secret below is DEV-ONLY — application-prod.yml drops
+  # it (a prod boot without JWT_SECRET refuses to start).
+  # Must be >= 256 bits (32+ bytes) for HS256.
+  security:
+    jwt:
+      secret: ${JWT_SECRET:dev-only-jwt-secret-change-me-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+      access-token-expiration: ${JWT_ACCESS_TOKEN_EXPIRATION:8h}  # parsed as Duration
+      refresh-token-expiration: ${JWT_REFRESH_TOKEN_EXPIRATION:720h}  # 30 days
+    # How often expired refresh tokens are purged (parsed as Duration).
+    refresh-cleanup-interval: ${OAK_REFRESH_CLEANUP_INTERVAL:PT6H}
+
+  # MinIO — S3-compatible object storage for media attachments.
+  # oak-server generates presigned URLs; clients upload/download directly.
+  # The credentials are the SCOPED APP USER (bucket-only policy, created by
+  # the one-shot minio-init compose service) — NOT the MinIO root: a leaked
+  # app key cannot list/delete outside oak-attachments. endpoint is where the
+  # SERVER talks to MinIO; public-endpoint is what gets baked into presigned
+  # URLs handed to clients (behind the Caddy TLS entry point in a full
+  # deployment it is https://<public-host>:<minio-port>).
+  minio:
+    enabled: ${MINIO_ENABLED:true}                           # false in tests (noop signer)
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}        # server -> MinIO (internal)
+    public-endpoint: ${MINIO_PUBLIC_ENDPOINT:http://localhost:9000}  # client -> MinIO
+    access-key: ${MINIO_APP_USER:oak_app}
+    secret-key: ${MINIO_APP_PASSWORD:oak_app_dev_secret_change_me}
+    bucket: ${MINIO_BUCKET:oak-attachments}  # created by oak-server at startup if missing
+
+  # Janus — SFU for 3+ participant voice/video rooms & screen sharing.
+  # rest-url is where the SERVER talks to Janus (inside the compose network in a
+  # full deployment); public-rest-url overrides only what the CLIENT receives in
+  # RoomResponse (the Caddy https entry point) — blank/absent falls back to
+  # rest-url (the dev topology, where both are the same address).
+  # admin-secret has NO safe fallback: it guards the Admin API AND derives every
+  # room pin/secret — it must come from env (unique per deployment). Without it
+  # Janus admin calls fail loudly (403), which is the point.
+  janus:
+    rest-url: ${JANUS_REST_URL:http://localhost:8088/janus}   # server -> Janus REST
+    public-rest-url: ${JANUS_PUBLIC_REST_URL:}                # client -> Janus REST (blank = rest-url)
+    ws-url: ${JANUS_WS_URL:ws://localhost:8188}               # client -> Janus WebSocket
+    admin-secret: ${JANUS_ADMIN_SECRET:change-me-janus-admin}
+    admin-url: ${JANUS_ADMIN_URL:http://localhost:7088/admin}  # Admin API (token bookkeeping)
+    admin-enabled: ${JANUS_ADMIN_ENABLED:true}                 # false in tests -> noop service
+
+  # Coturn — TURN server for P2P fallback (1-on-1 calls behind NAT).
+  # static-auth-secret backs coturn's --use-auth-secret mode: each
+  # /api/call/config call mints a short-lived per-member ticket
+  # (TurnCredentialIssuer); the wire (username/credential fields) is unchanged.
+  # host is what CLIENTS receive in ICE URLs (the public address in a full
+  # deployment) — not where the server itself connects.
+  turn:
+    host: ${TURN_HOST:localhost}
+    # 34780 mirrors env/.env: Docker Desktop leaked UDP 3478 on the host.
+    port: ${TURN_LISTEN_PORT:34780}
+    static-auth-secret: ${TURN_STATIC_AUTH_SECRET:change-me-turn-static-auth}
+    credential-ttl: ${TURN_CREDENTIAL_TTL:1h}  # parsed as Duration
+    realm: ${TURN_REALM:oak.local}

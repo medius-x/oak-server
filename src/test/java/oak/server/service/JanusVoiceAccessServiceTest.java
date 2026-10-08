@@ -47,7 +47,7 @@ class JanusVoiceAccessServiceTest {
     @BeforeEach
     void setUp() {
         JanusProperties properties = new JanusProperties(
-                "http://localhost:8088/janus", "ws://localhost:8188", "unit-secret",
+                "http://localhost:8088/janus", null, "ws://localhost:8188", "unit-secret",
                 "http://localhost:7088/admin", true);
         service = new HttpJanusVoiceAccessService(client, properties);
     }

@@ -93,6 +93,9 @@ public class ServerProfileController {
         if (request.connectionPort() != null) {
             profile.setConnectionPort(request.connectionPort());
         }
+        if (request.connectionScheme() != null) {
+            profile.setConnectionScheme(request.connectionScheme());
+        }
         serverProfileRepository.save(profile);
         return publish(profile);
     }
