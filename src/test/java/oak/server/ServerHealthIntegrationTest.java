@@ -13,6 +13,7 @@ import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -22,8 +23,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * The health endpoint (healthcheck round 2026-10-07): MANAGE_STORAGE gates it like the rest of
  * the "Server" tab. The test profile points the probes at what it actually has — H2 (postgres
  * UP), no MinIO, no Janus admin — and disables the docker facet: the developer machine HAS a
- * live Docker, and the test must not read it. The coturn TCP probe is machine-dependent (the
- * dev host may or may not listen on the port) — only its presence is asserted.
+ * live Docker, and the test must not read it (a disabled facet sends no container side at
+ * all). The coturn TCP probe is machine-dependent (the dev host may or may not listen on the
+ * port) — only its presence is asserted.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -57,7 +59,7 @@ class ServerHealthIntegrationTest {
     @Test
     void ownerSeesTheFourServices() throws Exception {
         String ownerToken = registerAndLogin("health-archivist");
-        mockMvc.perform(get("/api/server/health").header("Authorization", "Bearer " + ownerToken))
+        MvcResult result = mockMvc.perform(get("/api/server/health").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.checkedAt").exists())
                 .andExpect(jsonPath("$.services.length()").value(4))
@@ -65,10 +67,12 @@ class ServerHealthIntegrationTest {
                 .andExpect(jsonPath("$.services[?(@.name == 'postgres')].service.status", hasItem("UP")))
                 .andExpect(jsonPath("$.services[?(@.name == 'minio')].service.status", hasItem("DISABLED")))
                 .andExpect(jsonPath("$.services[?(@.name == 'janus')].service.status", hasItem("DISABLED")))
-                // the docker facet is switched off above — every row degrades to UNKNOWN
-                .andExpect(jsonPath("$.services[?(@.name == 'postgres')].container.status", hasItem("UNKNOWN")))
                 // machine-dependent (the dev host may listen on the TURN port) — present, not valued
-                .andExpect(jsonPath("$.services[?(@.name == 'coturn')].service.status").exists());
+                .andExpect(jsonPath("$.services[?(@.name == 'coturn')].service.status").exists())
+                .andReturn();
+        // the docker facet is switched off above — the rows carry NO container side at all
+        // (jsonPath treats an explicit null as missing — read the value, then assert null)
+        assertNull(JsonPath.read(result.getResponse().getContentAsString(), "$.services[0].container"));
     }
 
     private String registerAndLogin(String username) throws Exception {

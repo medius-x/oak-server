@@ -12,6 +12,9 @@ import java.util.List;
  */
 public record ServerHealthResponse(Instant checkedAt, List<Entry> services) {
 
+    /** {@code container} is NULL when the docker facet is off entirely (the prod profile:
+     *  oak itself runs in a container without the host's docker socket — there is no
+     *  honest container state to report, and no row side for the client to render). */
     public record Entry(String name, ServiceCheck service, ContainerCheck container) {}
 
     /**

@@ -25,6 +25,7 @@ import java.util.NoSuchElementException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -59,15 +60,17 @@ class ServerHealthServiceTest {
     }
 
     @Test
-    void disabledIntegrationsReportDisabledAndDockerStaysUnknown() {
+    void disabledIntegrationsReportDisabledAndOmitTheContainerSide() {
         ServerHealthResponse health = service(h2DataSource(), providerOf(null), MINIO_DISABLED,
                 providerOf(null), JANUS_DISABLED, turnProps(1), false, mustNotRunDocker()).collect();
 
         assertEquals("DISABLED", entryOf(health, "minio").service().status());
         assertEquals("disabled by configuration", entryOf(health, "minio").service().detail());
         assertEquals("DISABLED", entryOf(health, "janus").service().status());
-        // docker checks are off in this collect() — the runner above would have thrown otherwise
-        assertEquals("UNKNOWN", entryOf(health, "postgres").container().status());
+        // docker checks are off in this collect() — the runner above would have thrown otherwise;
+        // a disabled facet sends NO container side (null), not an UNKNOWN "disabled" row
+        assertNull(entryOf(health, "postgres").container());
+        assertNull(entryOf(health, "coturn").container());
     }
 
     @Test

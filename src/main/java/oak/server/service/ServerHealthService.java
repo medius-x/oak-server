@@ -49,7 +49,8 @@ import java.util.function.Supplier;
  *       TIMEOUT instead of stalling the endpoint past the client's request timeout.</li>
  *   <li><b>Container facet</b> — one {@code docker ps -a} snapshot (stopped containers are
  *       the headline diagnosis), name resolution shared with {@link ContainerLogCollector}.
- *       Docker missing/hung degrades every row to UNKNOWN, never fails the response.</li>
+ *       Docker missing/hung degrades every row to UNKNOWN, never fails the response; a
+ *       DISABLED facet (the prod profile) omits the container side entirely (null).</li>
  * </ul>
  * The probes deliberately use the server's OWN configured clients/addresses (datasource,
  * MinIO SDK, Janus admin client, TURN host/port) — the health of what oak-server actually
@@ -133,10 +134,10 @@ public class ServerHealthService {
     public ServerHealthResponse collect() {
         Map<String, ContainerCheck> containers = containerSnapshot();
         List<Entry> services = List.of(
-                new Entry("postgres", bounded(this::probePostgres), containers.getOrDefault("postgres", notConfigured())),
-                new Entry("minio", bounded(this::probeMinio), containers.getOrDefault("minio", notConfigured())),
-                new Entry("janus", bounded(this::probeJanus), containers.getOrDefault("janus", notConfigured())),
-                new Entry("coturn", bounded(this::probeCoturn), containers.getOrDefault("coturn", notConfigured())));
+                new Entry("postgres", bounded(this::probePostgres), containerOf(containers, "postgres")),
+                new Entry("minio", bounded(this::probeMinio), containerOf(containers, "minio")),
+                new Entry("janus", bounded(this::probeJanus), containerOf(containers, "janus")),
+                new Entry("coturn", bounded(this::probeCoturn), containerOf(containers, "coturn")));
         for (Entry entry : services) {
             String status = entry.service().status();
             if (DOWN.equals(status) || TIMEOUT.equals(status)) {
@@ -233,15 +234,27 @@ public class ServerHealthService {
 
     private record PsLine(List<String> names, String state, String statusText) {}
 
+    /**
+     * A row's container facet, or NULL when the facet is off entirely: a disabled
+     * docker facet (the prod profile — oak itself runs in a container, the host's
+     * docker socket is deliberately not mounted) sends no container side at all; a
+     * null on the wire reads as "this deployment cannot answer that" instead of an
+     * UNKNOWN row whose "docker checks disabled" detail looked like a warning the
+     * user could act on (live report 2026-10-13).
+     */
+    private ContainerCheck containerOf(Map<String, ContainerCheck> containers, String name) {
+        if (!dockerEnabled) {
+            return null;
+        }
+        return containers.getOrDefault(name, notConfigured());
+    }
+
     /** Configured container name → its state; docker problems degrade to UNKNOWN rows. */
     private Map<String, ContainerCheck> containerSnapshot() {
-        Map<String, ContainerCheck> out = new LinkedHashMap<>();
         if (!dockerEnabled) {
-            for (String name : containerNames) {
-                out.put(name, new ContainerCheck(UNKNOWN, null, "docker checks disabled"));
-            }
-            return out;
+            return Map.of(); // the facet is off — every row's containerOf is null
         }
+        Map<String, ContainerCheck> out = new LinkedHashMap<>();
         List<PsLine> lines;
         try {
             lines = parseDockerPs(runner.run(dockerTimeout, "docker", "ps", "-a",

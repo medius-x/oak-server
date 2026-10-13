@@ -12,6 +12,14 @@
 #      [auth-refresh] log line rely on. The valve trusts RFC1918 proxies by
 #      default — the compose network (172.16/12) qualifies; a directly exposed
 #      8080 (outside the network) would be untrusted and keep its socket IP.
+#   3. DOCKER FACETS OFF — the app itself runs in a container without the docker
+#      CLI and (deliberately) without the host's docker socket mounted: access
+#      to /var/run/docker.sock is root on the host, far beyond what a Spring
+#      app should hold. The health check's container rows and the docker tails
+#      in the log bundle would otherwise degrade to "docker unavailable: Cannot
+#      run program docker…" on every provisioned server (live VPS 2026-10-13).
+#      The SERVICE probes (JDBC / MinIO bucketExists / Janus admin / TURN TCP)
+#      keep working — they are what the deployment can honestly answer.
 server:
   forward-headers-strategy: native
 
@@ -29,3 +37,9 @@ oak:
     admin-secret: ${JANUS_ADMIN_SECRET}
   turn:
     static-auth-secret: ${TURN_STATIC_AUTH_SECRET}
+  health:
+    docker:
+      enabled: false
+  logging:
+    container-logs:
+      enabled: false

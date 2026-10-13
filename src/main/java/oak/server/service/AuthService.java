@@ -3,10 +3,13 @@ package oak.server.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import oak.server.controller.InviteController;
+import oak.server.controller.UserController;
 import oak.server.dto.AuthResponse;
 import oak.server.dto.LoginRequest;
+import oak.server.dto.MemberEvent;
 import oak.server.dto.RegisterRequest;
 import oak.server.dto.UserResponse;
+import oak.server.dto.UserSummary;
 import oak.server.entity.Invite;
 import oak.server.entity.RefreshToken;
 import oak.server.entity.Role;
@@ -27,6 +30,8 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.server.ResponseStatusException;
@@ -132,7 +137,38 @@ public class AuthService {
         // Seed read-state so the pre-existing archive is not "unread" on day one (Discord-faithful):
         // every existing channel's pointer starts at its current latest message.
         readStateService.seedInitialReadStates(saved);
+        publishUserAfterCommit(saved);
         return UserResponse.from(saved);
+    }
+
+    /** Announces the new member on BOTH live-roster channels. Without the pushes every
+     *  ALREADY-CONNECTED client keeps its login-time snapshots and the newcomer is
+     *  invisible until a refetch (live VPS 2026-10-13: a fresh invitee never showed up
+     *  in the owner's member pane): {@code /topic/users} feeds the display-name/avatar
+     *  roster ({@code GET /api/users}), {@code /topic/members} the member pane
+     *  ({@code GET /api/members} — clients treat the event as a contentless refetch
+     *  ping). AFTER COMMIT — the invites-ping lesson: an in-tx push lets subscribers
+     *  refetch before the INSERT is visible. A fresh user has no avatar, so the
+     *  signer-less {@code UserSummary.from} is exact. */
+    private void publishUserAfterCommit(User user) {
+        afterCommit(() -> {
+            messagingTemplate.convertAndSend(UserController.USERS_TOPIC, UserSummary.from(user));
+            messagingTemplate.convertAndSend(MemberService.MEMBERS_TOPIC, new MemberEvent("joined", user.getId()));
+        });
+    }
+
+    /** Runs the push after the surrounding tx commits (immediately without one). */
+    private void afterCommit(Runnable push) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            push.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                push.run();
+            }
+        });
     }
 
     /** Assigns the OWNER role to the first member (writes the user_roles join row). */

@@ -1060,3 +1060,54 @@ oak.server
   **Смоук-фикс 1 (живой старт, 2026-10-07): `MinioConfig` строил ОДИН клиент на `publicEndpoint`** — в контейнере это `https://localhost:9443`, изнутри сети ведущий в никуда: bucket-create в `@PostConstruct` валил контекст рестарт-циклом (`Failed to connect to localhost/[::1]:9443`). Правка: **ДВА клиента** — `minioOperationsClient` (@Primary, на `endpoint`: bucket/deletes/listings; @Primary ради `ObjectProvider<MinioClient>` в ServerHealthService — провайдер при двух бинах резолвит primary) + `minioPresignClient` (на `publicEndpoint`: SDK подписывает presigned URL по endpoint клиента, потому подпись обязана жить отдельным инстансом); `MinioAttachmentService` разведён по ним. **Смоук-фикс 2 (та же машина): Windows Hyper-V excluded UDP-диапазоны** (`netsh interface ipv4 show excludedportrange protocol=udp`) плавают после перезагрузок и накрыли relay 55000–55050 (порт 55031) — `bind: An attempt was made to access a socket…`; в env/.env диапазон сдвинут на 55100–55200 (окно 55051–58344 свободно). Если после перезагрузки снова упадёт — посмотреть excluded-таблицу и сдвинуть TURN_MIN_PORT/TURN_MAX_PORT (compose/флаги coturn едут из одних переменных). Попутно `gen-self-signed.sh`: MSYS_NO_PATHCONV=1 (Git Bash превращал `-subj /CN=oak` в виндовый путь) + дедуп SAN-аргументов против дефолтных.
   **Смоук-фикс 3 (живой репорт 2026-10-08: видео/аудио «link expired», presigned-URL несли ВНУТРЕННИЙ адрес `http://minio:9000`).** Корень: `MinioAttachmentService` инжектил ДВА MinioClient-бина, но резолв по ИМЕНИ параметра конструктора не дошёл до рантайма (имена параметров не сохранены в байткоде) — при неоднозначности Spring отдал ОБАМ слотам `@Primary` operations-клиент → ВСЕ пресайны подписывались на внутренний endpoint; фото/аватарки это маскировал дисковый кэш клиента (0 сетевых fetch в [media]-activity), видео/аудио — единственные, кто ходит по сети. Лекарь: явный конструктор с `@Qualifier("minioPresignClient")` (заместо @RequiredArgsConstructor) — не зависит от compiler-флагов вообще. ГРАБЛЯ-ПРАВИЛО: два бина одного типа + @Primary = by-name-матчинг НЕ гарантирован без `-parameters`; квалификатор обязателен. Диагностика в пути: [video]/[playback]-логи исходного URL + fresh-ссылки при фейлах (VideoModal, playback.ts recover).
   **Смоук-фикс 4 (живой репорт 2026-10-08: «после перезапуска клиент требует логин заново»).** Симптом-цепочка: клиентский авresume падал «Internal server error» — сервер отдавал **500 на /api/server и /api/users**: `MinioAttachmentService.sign: Failed to connect to localhost/[::1]:9443`. Корень: MinIO SDK при ПЕРВОЙ подписи без заданного региона делает СЕТЕВОЙ зонд региона к endpoint'у — в деве (publicEndpoint http://localhost:9000 с хоста) он незаметно проходил; в контейнере presign-клиент смотрит на публичный https://localhost:9443, недостижимый ИЗНУТРИ compose-сети → каждая подпись с аватаркой = IllegalStateException → 500 → авresume не может пройти → форма логина. Лекарь: `.region("us-east-1")` обоим клиентам в MinioConfig (регион и так светится в старых подписях X-Amz-Credential …/us-east-1/… — это дефолт MinIO); с регионом подпись = чисто локальный HMAC, сети нет вовсе. — Сервер 530/530; деплой: package → cp → up --build oak.
+
+**Синхронизация с провижинингом (раунд C, 2026-10-12):** клиент space-client разворачивает
+сервер из своих embedded-шаблонов `space-client/electron/provisioning/files/` — janus/*
+(Dockerfile, janus.jcfg, janus.transport.http.jcfg) и Dockerfile.server суть ДОСЛОВНЫЕ
+копии `env/`-файлов, docker-compose.yml и caddy/Caddyfile — производные (без profiles и
+host-маппингов периферии; tls-строки помечены маркером `provisioning:tls-file`, который
+клиент вырезает для доменных ACME-деплоев). **ЛЮБАЯ правка env/* обязана зеркалиться в
+space-client/electron/provisioning/files/** (и наоборот) — иначе свежепоставленные серверы
+расходятся с dev-топологией. Полумеханизировать синхронизацию (генерация из одного
+источника) не стали: файлы расходятся сознательно, различия малочисленны и задокументированы
+в их шапках.
+
+**Смоук-фиксы раунда C (2026-10-13, два живых репорта с провиженого VPS; деплой сервер-only,
+wire не менялся — клиентская половина уже умела).** (1) **Новый участник не появлялся в
+ростере подключённых клиентов** (юзер зарегал второго юзера по инвайту — у овнера его нет
+до перезахода): register не публиковал ничего в `/topic/users` — ростер у каждого клиента
+это снапшот login-времени (`GET /api/users`) + live-обновления того топика (аватары/ники), и
+новичок выпадал из обоих путей. Фикс: `AuthService.register` → `publishUserAfterCommit`
+(`UserSummary.from(saved)` — без сигнера, у свежего юзера аватара нет; AFTER COMMIT —
+invites-грабля: in-tx пуш даёт подписчикам рефеч докоммитного состояния) — клиентский
+`RosterStore.updateUser` уже аппендит незнакомый id. Тесты: НОВЫЙ `AuthServiceRegisterBroadcastTest`
+(3: invite-ветка пушила юзера с ником; owner-bootstrap — тот же единый путь; inside-a-tx пуш
+ждёт afterCommit — синхронизация гоняется руками, @Transactional-интеграция коммита не даёт).
+(2) **Health-check Server Settings показывал «docker unavailable: Cannot run program docker»
+на каждой строке**: docker-фасет (`ServerHealthService.containerSnapshot`) и докер-хвосты
+выгрузки логов (`ContainerLogCollector`) зовут CLI хоста — в провиженом деплое oak сам крутится
+в контейнере (eclipse-temurin) без docker binary; монтировать `/var/run/docker.sock` в
+Spring-контейнер отвергнуто сознательно (доступ к сокету = рут на хосте — недопустимое
+расширение поверхности). Фикс: `application-prod.yml` выключает обе фичи
+(`oak.health.docker.enabled: false`, `oak.logging.container-logs.enabled: false`) — контейнерные
+строки читаются UNKNOWN «docker checks disabled», service-пробы (JDBC/MinIO bucketExists/
+Janus admin/TURN TCP) остаются рабочими: они и есть честный ответ контейнерного деплоя.
+— **533 теста (было 530)**; mvn test зелёный.
+  **Итерация 2 (живой репорт 2026-10-13, тот же VPS; ДЕПЛОЙ ПАРНЫЙ — клиентским зеркалом
+  обновлены types.ts/describeHealthEntry).** (а) **Ростер-фикс был неполным**: пуш
+  `/topic/users` кормит только display-name-ростер (`GET /api/users`), а ПАНЕЛЬ ЧЛЕНОВ
+  (MembersPane) живёт на `memberStore` (`GET /api/members` + contentless-рефеч `/topic/members`)
+  — новичок по-прежнему не появлялся у подключённых до их рефеча. Register теперь анонсирует
+  юзера в ОБОИХ каналах: `MemberEvent("joined", userId)` на `/topic/members` рядом с
+  UserSummary на `/topic/users` (одна after-commit-синхронизация; хелпер `afterCommit(Runnable)`;
+  тип "joined" — append-only в union'е клиента, обработчик contentless — клиентской логики
+  ноль). (б) **«docker checks disabled» убрана с провода**: юзер-вердикт — надпись нулевой
+  информативности, читалась как предупреждение. При выключенном docker-фасете сервер шлёт
+  `container: null` (DTO-поле nullable, ранний выход containerSnapshot без холостого
+  docker-вызова), клиент рендерит строку пробы без контейнерного хвоста — на проде «up · 1 ms»,
+  на dev-машине (oak на хосте) контейнерная грань прежняя (running · healthy). Wire: null в
+  существующем поле — старый клиент упал бы на `.container.status` — деплой строго
+  сервер→клиент (клиентская половина тем же коммитом). Тесты: broadcast-тест переименован в
+  BothLiveRosters (verify обоих пушей), ServerHealthServiceTest.disabled…OmitTheContainerSide
+  (null-ассерты), ServerHealthIntegrationTest — JsonPath-read + assertNull (грабля явного
+  null). — 533 теста; jar пересобран и засинкан в space-client.
