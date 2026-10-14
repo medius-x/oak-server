@@ -13,11 +13,22 @@
 
     <groupId>org.example</groupId>
     <artifactId>oak-server</artifactId>
-    <version>1.0-SNAPSHOT</version>
+    <!-- Release version, kept in lockstep with space-client's package.json (round D):
+         the client bundles this jar, and the release gate asserts tag == pom version ==
+         client version, so "client vX deploys server vX" holds by construction. 0.x
+         until launch; 1.0.0 is the release. -->
+    <version>0.1.0</version>
     <packaging>jar</packaging>
 
     <name>oak-server</name>
     <description>OAK — self-hosted Discord-like backend (Spring Boot)</description>
+
+    <licenses>
+        <license>
+            <name>GNU Affero General Public License v3.0 only</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.txt</url>
+        </license>
+    </licenses>
 
     <properties>
         <java.version>17</java.version>
@@ -136,6 +147,10 @@
     </dependencies>
 
     <build>
+        <!-- Fixed artifact name: env/Dockerfile.server, the client's provisioning
+             pipeline and the release workflow all address the jar as oak-server.jar —
+             no version suffix to chase on every bump. -->
+        <finalName>oak-server</finalName>
         <plugins>
             <!-- Repackage as executable jar + enable `mvn spring-boot:run` -->
             <plugin>

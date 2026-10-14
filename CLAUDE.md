@@ -1111,3 +1111,38 @@ Janus admin/TURN TCP) остаются рабочими: они и есть че
   BothLiveRosters (verify обоих пушей), ServerHealthServiceTest.disabled…OmitTheContainerSide
   (null-ассерты), ServerHealthIntegrationTest — JsonPath-read + assertNull (грабля явного
   null). — 533 теста; jar пересобран и засинкан в space-client.
+
+- [x] **Launch-раунд D: CI + релизы + версионная связка с клиентом (2026-10-13, код готов;
+  срабатывание workflows — после переезда на GitHub в D1).** **Версии:** pom 1.0-SNAPSHOT →
+  **0.1.0** — синхронно package.json space-client (0.x до запуска; 1.0.0 = релиз); РЕЛИЗНЫЙ
+  ГЕЙТ: тег vX обязан совпадать с pom-версией И с версией клиента — «клиент vX разворачивает
+  сервер vX» by construction (клиент вшивает jar релиза той же версии в установщик).
+  **finalName=oak-server** (target/oak-server.jar): фикс-имя артефакта, которое ждут
+  env/Dockerfile.server, провижининг клиента и release-workflow — версия больше не ездит
+  в имени файла (jar:sync-кандидат обновлён; инструкция в шапке Dockerfile упрощена).
+  **Workflows (`.github/workflows/`):** `ci.yml` — push master + PR: temurin 17 + maven-cache
+  → `mvn -B -ntp test` (тот же гейт, что локально; H2, без Docker); `release.yml` — push тега
+  v*: гейт версии (тег == pom через help:evaluate) → `mvn -B -ntp package` (тесты ВКЛЮЧЕНЫ —
+  артефакт релизится, он обязан быть зелёным) → `gh release create <tag> target/oak-server.jar
+  --generate-notes --verify-tag` (rerun-tolerant: create || upload --clobber). Релиз сервера
+  несёт ТОЛЬКО jar; docker-образы (~530 МБ) к нему докидывает space-client скриптом
+  images:publish (клиентский release-workflow качает jar+образы релиза ТОЙ ЖЕ версии —
+  полный комплект в установщике). **РЕЛИЗНЫЙ ПРОЦЕСС (порядок):** (1) bump pom.xml сервера +
+  package.json клиента на одну версию, коммиты обоих репо; (2) тег v* в oak-server, пуш → CI
+  jar в релиз; (3) на dev-машине `npm run images:sync && npm run images:publish -- v*` в
+  space-client (gh CLI; либо ручной upload архивов в релиз через web-UI); (4) тег v* в
+  space-client, пуш → установщик в релиз клиента. Отсутствие asset'а = понятный фейл
+  клиентского workflow. Security: workflows без секретов (встроенный github.token,
+  permissions contents:write только в release; форк-PR получают read-only токен — write-ветка
+  недостижима для чужих контрибуций); тег пушит только владелец. Гейты раунда: mvn package
+  зелёный (533 теста), артефакт target/oak-server.jar.
+
+- [x] **Лицензионная атрибуция редистрибьюции образов (2026-10-14, синхронно space-client).**
+  Релизы ЭТОГО репо раздают docker-архивы (images:publish) — в корень добавлен
+  `THIRD-PARTY-NOTICES.md` (та же таблица: образ/digest/лицензия/тексты/upstream; тексты
+  лицензий лежат в space-client/licenses и едут в его установщик). Source-offer копилефт-
+  компонентов (janus GPLv3, minio AGPLv3, temurin GPLv2+CE) = upstream-репо + digest-пин
+  манифеста. Релизы jar: собственный код + пермиссивные Maven-зависимости (Apache-2.0/
+  EPL-2.0/BSD) — notices внутри JAR-ов.
+
+- [x] **Лицензия репо: AGPL-3.0-only (2026-10-14, юзер-решение; синхронно space-client).** LICENSE в корне (полный текст gnu.org + copyright «OAK project»), <licenses>-блок в pom.xml. Зависимости пермиссивные — выбор свободен; GPL-образы в релизах — агрегация, не встраивание (копилефт на наш код не переходит, см. THIRD-PARTY-NOTICES.md).
