@@ -21,7 +21,7 @@
     <packaging>jar</packaging>
 
     <name>oak-server</name>
-    <description>OAK — self-hosted Discord-like backend (Spring Boot)</description>
+    <description>OAK — self-hosted voice, video and chat server (Spring Boot)</description>
 
     <licenses>
         <license>
