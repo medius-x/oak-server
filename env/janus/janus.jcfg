@@ -319,6 +319,14 @@ nat: {
 	# external users.
 	#nat_1_1_mapping = "1.2.3.4"
 	#keep_private_host = true
+	# Docker deployments publish the RTP range 1:1 to the host (compose maps
+	# 2000-4000/udp): without this rewrite the advertised host candidate carries
+	# the container-internal 172.x address, unroutable for off-host clients —
+	# every ICE check dies ("ICE failed for component 1", live 2026-10-14 on a
+	# provisioned VPS). The image entrypoint substitutes the public IP here
+	# (compose passes TURN_EXTERNAL_IP as NAT_1_1_IP); the line is DELETED when
+	# the env is empty (bare `docker run` keeps the stock behaviour).
+	nat_1_1_mapping = "@NAT_1_1_IP@"
 
 	# You can configure a TURN server in two different ways: specifying a
 	# statically configured TURN server, and thus provide the address of the

@@ -128,6 +128,12 @@ services:
     restart: unless-stopped
     environment:
       JANUS_ADMIN_SECRET: ${JANUS_ADMIN_SECRET}
+      # Rewrites Janus host candidates to the machine's address (see
+      # nat_1_1_mapping in janus/janus.jcfg): the RTP range is published 1:1,
+      # so the address is the only wrong part of the container's own candidate.
+      # On dev TURN_EXTERNAL_IP is the LAN IP (env/.env) — reachable from the
+      # host through Docker's UDP port-proxy, like coturn's relay candidates.
+      NAT_1_1_IP: ${TURN_EXTERNAL_IP}
     ports:
       - "${JANUS_REST_PORT:-8088}:8088"     # REST API  (oak-server -> Janus)
       - "${JANUS_WS_PORT:-8188}:8188"       # WebSocket (JavaFX -> Janus)
