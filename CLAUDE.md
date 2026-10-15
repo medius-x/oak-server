@@ -1156,3 +1156,18 @@ Janus admin/TURN TCP) остаются рабочими: они и есть че
   EPL-2.0/BSD) — notices внутри JAR-ов.
 
 - [x] **Лицензия репо: AGPL-3.0-only (2026-10-14, юзер-решение; синхронно space-client).** LICENSE в корне (полный текст gnu.org + copyright «OAK project»), <licenses>-блок в pom.xml. Зависимости пермиссивные — выбор свободен; GPL-образы в релизах — агрегация, не встраивание (копилефт на наш код не переходит, см. THIRD-PARTY-NOTICES.md).
+
+- [x] **Capability-скелет: version + capabilities в GET /api/server (2026-10-15, код готов, смоук
+  pending; ДЕПЛОЙ ПАРНЫЙ со space-client — wire: `ServerProfileResponse` += 8-е `version` (String,
+  "dev" при отсутствии build-info — IDE-ран) + 9-е `capabilities` (List<String>, доктрина — см.
+  ServerCapabilities); миграций нет).** Цель (юзер-решение по итогам обсуждения): клиент
+  ДЕГРАДИРУЕТСЯ ГРАЦИОЗНО против старого сервера — гейтит UI пост-релизных фич по флагам; в
+  версию-таблицы НЕ играем (backport/форк/частичный деплой её бы врали). **Доктрина
+  (ServerCapabilities javadoc):** флаг добавляется ТОЛЬКО для фич после 0.1.0 — всё, что в 0.1.0,
+  = безусловная БАЗА; отсутствие поля у старого сервера = база (никогда НЕ бэкфорить флаги
+  базовых фич — форк без них спрятал бы рабочий UI); флаг однажды добавленный не удаляется и не
+  переименовывается. Сейчас FEATURES = List.of(). **Версия**: pom += build-info execution →
+  BuildProperties-бин (ObjectProvider в ServerProfileController — отсутствует при распакованном
+  IDE-ране → "dev"); тестам безразлично (assert isNotEmpty). Тест: ServerProfileIntegrationTest
+  getReturnsSeededDefault += version/capabilities-ассерты. — 533 теста (число не изменилось,
+  ассерты расширены). Смоук: Diagnostics клиента показывает «Server version: 0.1.0».

@@ -6,6 +6,7 @@ import oak.server.dto.AttachmentUploadRequest;
 import oak.server.dto.AttachmentUploadResponse;
 import oak.server.dto.AvatarKeysRequest;
 import oak.server.dto.AvatarOriginalResponse;
+import oak.server.dto.ServerCapabilities;
 import oak.server.dto.ServerProfileResponse;
 import oak.server.dto.UpdateConnectionInfoRequest;
 import oak.server.dto.UpdateServerNameRequest;
@@ -16,6 +17,8 @@ import oak.server.repository.ServerProfileRepository;
 import oak.server.service.AttachmentSlotRegistry;
 import oak.server.service.AttachmentUrlSigner;
 import oak.server.service.AuthorizationService;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.info.BuildProperties;
 import org.springframework.http.HttpStatus;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -52,11 +55,19 @@ public class ServerProfileController {
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
     private final AttachmentSlotRegistry slotRegistry;
+    /** Absent when the app runs unpackaged without build-info (an IDE run) — "dev" then. */
+    private final ObjectProvider<BuildProperties> buildProperties;
+
+    /** The pom version of this build (see {@link ServerProfileResponse#version}). */
+    private String serverVersion() {
+        BuildProperties properties = buildProperties.getIfAvailable();
+        return properties != null ? properties.getVersion() : "dev";
+    }
 
     /** The instance name + icon. Open to any authenticated member. */
     @GetMapping
     public ServerProfileResponse get() {
-        return ServerProfileResponse.from(profile(), attachmentUrlSigner);
+        return ServerProfileResponse.from(profile(), attachmentUrlSigner, serverVersion(), ServerCapabilities.FEATURES);
     }
 
     /** Renames the instance ({@code MANAGE_SERVER}); pushes the new profile to {@value #SERVER_TOPIC}. */
@@ -198,7 +209,8 @@ public class ServerProfileController {
 
     /** Broadcasts the profile so connected clients repaint the sidebar icon + name live. */
     private ServerProfileResponse publish(ServerProfile profile) {
-        ServerProfileResponse response = ServerProfileResponse.from(profile, attachmentUrlSigner);
+        ServerProfileResponse response = ServerProfileResponse.from(profile, attachmentUrlSigner,
+                serverVersion(), ServerCapabilities.FEATURES);
         messagingTemplate.convertAndSend(SERVER_TOPIC, response);
         return response;
     }

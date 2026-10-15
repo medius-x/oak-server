@@ -61,7 +61,13 @@ class ServerProfileIntegrationTest {
                 .andExpect(jsonPath("$.avatarUrl").isEmpty())   // noop signer
                 .andExpect(jsonPath("$.connectionHost").value("localhost"))
                 .andExpect(jsonPath("$.connectionPort").value(8080))
-                .andExpect(jsonPath("$.connectionScheme").isEmpty());  // null = the default http
+                .andExpect(jsonPath("$.connectionScheme").isEmpty())  // null = the default http
+                // The compatibility skeleton: a version string is ALWAYS present
+                // ("dev" when build-info is absent — the unpackaged test classpath),
+                // and the capabilities catalogue rides along (empty = 0.1.0 base).
+                .andExpect(jsonPath("$.version").isNotEmpty())
+                .andExpect(jsonPath("$.capabilities").isArray())
+                .andExpect(jsonPath("$.capabilities.length()").value(0));
     }
 
     @Test
