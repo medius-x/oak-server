@@ -212,6 +212,11 @@ services:
         condition: service_completed_successfully
     environment:
       SPRING_PROFILES_ACTIVE: prod
+      # A 2 GB VPS OOM-killed the stack on start (live 2026-10-12): without a
+      # limit the JVM sizes itself off the HOST's memory and the parallel
+      # container start tips the box over. 512 MB heap + 200 MB metaspace is
+      # ample for this single-tenant server.
+      JAVA_TOOL_OPTIONS: "-Xmx512m -XX:MaxMetaspaceSize=200m -Xss512k"
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-oak}
