@@ -1178,3 +1178,55 @@ Janus admin/TURN TCP) остаются рабочими: они и есть че
   IDE-ране → "dev"); тестам безразлично (assert isNotEmpty). Тест: ServerProfileIntegrationTest
   getReturnsSeededDefault += version/capabilities-ассерты. — 533 теста (число не изменилось,
   ассерты расширены). Смоук: Diagnostics клиента показывает «Server version: 0.1.0».
+
+## Проработка фич (2026-10-19 — выкладки сохранены, НИЧЕГО не реализовано)
+
+Три серверные фичи проработаны по юзер-запросу (полные выкладки с фазами и граблями —
+`../space-client/CLAUDE.md`, раздел «Проработка фич (2026-10-19)»; здесь — серверные
+детали для старта раунда). Оценки: A — M (2 серверные фазы), B — M (2-3), C — серверной
+логики почти нет (shell-скрипт + provisioning-шаг в space-client).
+
+- **A. Второй режим очистки диска (аттачменты без сноса сообщений):** новый шаг
+  `StorageGcService.runOnce` МЕЖДУ `sweepOrphans` и `purgeBelowLowWatermark` —
+  detachAttachments: помечать аттачи старейших сообщений `purgedAt` (AttachmentRef +=
+  append-only поле в JSON `messages.attachments`; миграций НЕТ — AttachmentListCodec
+  lenient читает старые строки с null) → после коммита посмертный `attachmentExists`
+  (форвард, ссылающийся на ключ, держит объект — механика purgeBatch реюзом) →
+  `objectStore.delete`. Гнать до low watermark; иммунные исчерпаны → прежний purge
+  сообщений. ВАЖНО: `attachmentExists`/`likePattern` при пометке обязан перестать
+  матчить ключ ИНАЧЕ orphan-свип следующего прогона удалит объект повторно (безвредно,
+  но счётчики соврут) — при реализации выбрать: помеченный реф выпадает из
+  exists-паттерна (рекомендация — в LIKE-паттерн ключа добавляется маркер, которого в
+  помеченном JSON нет) либо отдельный счётчик. Иммунитет: режим count (аттачи последних
+  N сообщений с аттачами по id desc) | age (моложе X часов) — колонки ServerProfile
+  рядом с watermark'ами + расширение PUT /api/server/storage (валидация как high/low);
+  `StorageGcReport` += detachedAttachments/detachedBytes. Тесты: расширение
+  StoragePurgeFlowTest (detach-флоу на H2: пометка+удаление объекта, иммунитет,
+  переход к purge при исчерпании, форвард держит объект) + StorageGcServiceTest-юниты
+  через существующий seam runOnce(trigger, DoubleSupplier). Клиентская половина
+  (tombstone-рендер purgedAt) обязательна — см. space-client.
+- **B. Bot API:** миграция `users += bot boolean + bot_owner_id` + таблица
+  `bot_tokens` (SHA-256-хеш — RefreshToken-калька; created_at/revoked_at; identity-
+  блок V4-рецепта). Авторизация: тот же `Authorization: Bearer` — в
+  JwtAuthenticationFilter ПОСЛЕ провалки JWT lookup по хешу (in-memory кэш хешей,
+  инвалидация на revoke); бан/removed-гейты фильтра работают as-is. `POST /api/bots
+  {username, nickname}` гейт MANAGE_MEMBERS (или OWNER-only — развилка раунда) →
+  201 {UserResponse, token-один-раз}; DELETE /api/bots/{id} (revoke + member-remove
+  механика); перевыпуск токена PUT. Права бота — ШТАТНЫЕ роли через assignRoles
+  (отдельная система прав не нужна; DM-запреты/канальные оверрайды достаются даром).
+  Rate limit пер-бот на POST messages: LoginRateLimiter-калька (~30/10 мин → 429).
+  STOMP-события as-is: AuthChannelInterceptor резолвит бота тем же хедером;
+  ChannelSubscriptionInterceptor гейтит по READ_MESSAGE_HISTORY как всем. Wire:
+  `UserSummary`/`MemberResponse` += `bot` (append-only, парный деплой — клиентский
+  бейдж BOT). Дока: docs/BOT-API.md + echo-бот на node без зависимостей.
+- **C. Бэкап/restore:** серверной Java-логики почти нет — весь механизм = shell-скрипт
+  `/opt/oak/scripts/backup.sh` (pg_dump -Fc через docker exec postgres + tar volumes
+  oak-postgres-data/oak-minio-data/oak-caddy-{data,config} + конфиг /opt/oak без
+  логов; v1 = stop-stack ради консистентности) + cron/systemd-timer, ставимые
+  provisioning-шагом space-client. Restore: volume-импорты ДО первого compose up,
+  pg_restore после старта postgres до старта oak (START_ORDER уже даёт окно), Flyway
+  дотащит схему дампа старой версии (миграции append-only, checksum стабильны —
+  restore между версиями безопасен). `PATCH /api/server/connection` на новый
+  адрес уже существует (register-шаг провижининга его зовет). ОГРАНИЧЕНИЕ: реставрация
+  только на ПУСТУЮ базу (restore идёт до первого старта oak, существующих строк нет);
+  `.env` из бэкапа обязателен (JWT/MinIO/Janus/TURN секреты).
