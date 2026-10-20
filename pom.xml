@@ -17,7 +17,7 @@
          the client bundles this jar, and the release gate asserts tag == pom version ==
          client version, so "client vX deploys server vX" holds by construction. 0.x
          until launch; 1.0.0 is the release. -->
-    <version>0.1.0</version>
+    <version>0.2.0</version>
     <packaging>jar</packaging>
 
     <name>oak-server</name>
