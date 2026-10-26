@@ -71,7 +71,7 @@ public class VoiceAfkSweeper {
             }
             for (String username : room.usernames()) {
                 if (isIdle(registry, username, deadline)) {
-                    moveToAfk(room.channelId(), target.get(), username);
+                    moveToAfk(room.channelId(), target.get(), username, timeoutMinutes);
                 }
             }
         }
@@ -82,10 +82,19 @@ public class VoiceAfkSweeper {
         return registry.lastActive(username).isBefore(deadline);
     }
 
-    private void moveToAfk(Long fromChannelId, Channel afkChannel, String username) {
+    private void moveToAfk(Long fromChannelId, Channel afkChannel, String username, int timeoutMinutes) {
+        // The WHY of the ejection, spelled out for the log (live reports 2026-10: present
+        // members swept with no visible cause — "idle for Nm" next to the configured
+        // timeout and the last heartbeat timestamp names the guilty side immediately:
+        // a healthy client heartbeats every 30 s, so a lastActive minutes old means the
+        // heartbeats stopped arriving, not that the sweep fired early).
+        Duration idleFor = Duration.between(registry.lastActive(username), Instant.now());
+        String reason = "idle %dm %ds of the %dm timeout; last active %s"
+                .formatted(idleFor.toMinutes(), idleFor.toSecondsPart(), timeoutMinutes, registry.lastActive(username));
         Optional<User> member = auth.findUser(username);
         if (member.isEmpty() || !auth.hasInChannel(member.get(), afkChannel, Permission.CONNECT)) {
             // Cannot sit in the AFK room → out of voice entirely (the enforcer's stance).
+            log.info("[afk] leaving {} from channel {} ({})", username, fromChannelId, reason);
             enforcer.forceLeave(fromChannelId, username, "afk");
             return;
         }
@@ -99,6 +108,6 @@ public class VoiceAfkSweeper {
         // order): the client's re-join resets ITS OWN marks, and the mod-mute state push
         // arriving AFTER that reset is what survives it.
         afkVoicePolicy.applyOnEnter(username, afkChannel.getId());
-        log.info("[afk] moved {} from channel {} to {} (idle)", username, fromChannelId, afkChannel.getId());
+        log.info("[afk] moved {} from channel {} to {} ({})", username, fromChannelId, afkChannel.getId(), reason);
     }
 }

@@ -1164,6 +1164,16 @@ Janus admin/TURN TCP) остаются рабочими: они и есть че
 
 - [x] **Лицензия репо: AGPL-3.0-only (2026-10-14, юзер-решение; синхронно space-client).** LICENSE в корне (полный текст gnu.org + copyright «OAK project»), <licenses>-блок в pom.xml. Зависимости пермиссивные — выбор свободен; GPL-образы в релизах — агрегация, не встраивание (копилефт на наш код не переходит, см. THIRD-PARTY-NOTICES.md).
 
+- [x] **AFK-диагностика свипа (2026-10-27, смоук-фикс раунда 7 багов space-client; wire/миграций нет).**
+  Живые репорты: присутствующих юзеров дважды выбрасывало в AFK без видимой причины (не
+  шарили; корреляции между инцидентами нет). `VoiceAfkSweeper.moveToAfk` теперь логирует
+  ПРИЧИНУ каждым словом: `[afk] moved X from #A to #B (idle Nm Ns of the Mm timeout;
+  last active <ISO>)` — «last active» минуты/часы назад при живом клиенте = heartbeat'ы
+  перестали ДОХОДИТЬ (клиентский таймер/STOMP), «last active» = 1970 (EPOCH) = клиент
+  НИКОГДА не репортил. forceLeave-ветка (нет CONNECT на AFK-канал) тоже логируется —
+  прежде была полностью невидимой. Клиентская половина (main-owned тик + лог каждого
+  heartbeat) — space-client/CLAUDE.md.
+
 - [x] **Capability-скелет: version + capabilities в GET /api/server (2026-10-15, код готов, смоук
   pending; ДЕПЛОЙ ПАРНЫЙ со space-client — wire: `ServerProfileResponse` += 8-е `version` (String,
   "dev" при отсутствии build-info — IDE-ран) + 9-е `capabilities` (List<String>, доктрина — см.
