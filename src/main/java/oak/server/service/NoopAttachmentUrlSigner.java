@@ -80,4 +80,19 @@ public class NoopAttachmentUrlSigner implements AttachmentUrlSigner, AttachmentO
     public java.util.List<StoredObject> listStickerObjects() {
         return java.util.List.of();
     }
+
+    @Override
+    public java.util.List<StoredObject> listAllObjects() {
+        return java.util.List.of(); // nothing is stored — the backup object section is empty
+    }
+
+    @Override
+    public java.io.InputStream openObject(String key) throws java.io.IOException {
+        throw new java.io.IOException("The object store is disabled (noop stand-in)");
+    }
+
+    @Override
+    public void putObject(String key, java.io.InputStream body, long sizeBytes) throws java.io.IOException {
+        throw new java.io.IOException("The object store is disabled (noop stand-in)");
+    }
 }

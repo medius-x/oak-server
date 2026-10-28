@@ -1189,6 +1189,67 @@ Janus admin/TURN TCP) остаются рабочими: они и есть че
   getReturnsSeededDefault += version/capabilities-ассерты. — 533 теста (число не изменилось,
   ассерты расширены). Смоук: Diagnostics клиента показывает «Server version: 0.1.0».
 
+- [x] **Бэкап сервера + restore при провижининге + Migrate — серверная половина (2026-10-28, код
+  готов, смоук pending; ДЕПЛОЙ ПАРНЫЙ со space-client — аддитивные эндпоинты + RestoreRunner;
+  миграций БД НЕТ).** Юзер-решения и полная механика — `../space-client/CLAUDE.md` (фича C
+  проработки + запись раунда). Здесь: **(1) `BackupDumpSql`** — чистый SQL-генератор дампа
+  (INSERT-экранирование по runtime-классу: числа/булевы bare, строки/времена в кавычках с
+  удвоением, byte[] = громкий отказ — blob-колонок в схеме нет) + ПОТОКОВЫЙ сплиттер скрипта
+  (`splitSqlStatements`: посимвольный автомат — ';' и \n ВНУТРИ литералов не режут, `''`
+  эскейп, line-comments глотаются целиком; гигабайтные дампы не в памяти). **(2)
+  `BackupService`**: одна REPEATABLE READ-сессия на все таблицы (консистентный снапшот),
+  18 таблиц (без flyway_schema_history — схема создаёт Flyway цели; без refresh_tokens —
+  миграция = честный ре-логин, JWT-секрет нового .env), setval `<table>_id_seq` (join-таблица
+  user_roles без id — скип), объекты MinIO STORED (уровень 0 — медиа уже сжато; data.sql.gz
+  несёт свой gzip; обёртка GZIPOutputStream с close()=finish() — НЕ закрывает zip-стрим;
+  объект-фейл = WARN + счётчик failedObjects, не смерть архива), manifest.json (flywayVersion по
+  installed_rank DESC — строковый max врёт «9»>«17»; BuildProperties → appVersion, "dev" в
+  IDE-ране), single-slot `oak-backup.zip` (tmp + ATOMIC_MOVE; `oak.backup.dir`, дефолт
+  tmpdir/oak-backup — сервер НИЧЕГО не хранит по юзер-решению: расписание клиентское).
+  ГРАБЛЯ in-memory: GZIP-обёртка над ZipOutputStream закрывает underlying при close() —
+  переопределение close() → finish(). **(3) REST `BackupController`** (`/api/server/backup`:
+  POST /run 202 + daemon-нить/409, GET /status поллинг, GET /estimate — pg_relation_size по
+  pg_class public (H2 без pg_catalog → try/catch → 0), GET /file — СТРИМ FileSystemResource
+  с contentLength (НЕ byte[]-паттерн логов с капом 48 МБ); имя download-файла серверное,
+  штамп-суффикс). **Гейт — НОВЫЙ `AuthorizationService.requireAdministrator`**: бит
+  ADMINISTRATOR (овнер через OWNER→ALL), НАМЕРЕННО строже requireServer(MANAGE_SERVER) — архив
+  несёт ВСЕ переписки (юзер-решение 2026-10-28; интеграционный тест: MANAGE_SERVER-держатель
+  403). **(4) Кросс-лок с GC** — НОВЫЙ `StorageMaintenanceLock` (ReentrantLock-компонент):
+  runOnce обеих служб tryAcquire → ISE при занятости (контроллеры переводят в 409), release в
+  finally — GC не сносит сообщения/объекты посреди дампа (юзер-требование «одно время»);
+  `StorageGcService.scheduledTick`: окно догона × CATCHUP_TICKS(6) тиков, день латчится ПОСЛЕ
+  успешного старта — бэкап в настроенную минуту ДЕФЕРРИТ ночную чистку, а не съедает её (прежде
+  одно-тиковое окно молча пропускало день); `StorageController.runNow` → новый
+  `startManualRun()` (синхронные предчеки running+лока → чистый 409; гонка предчек/нить — WARN).
+  **(5) `RestoreRunner`** (ApplicationRunner @Order(-100), ДО сидеров — их идемпотентные
+  ремонты проходят поверх восстановленных строк): env `oak.restore.file/public-host/public-port/
+  public-scheme`; ZipFile (random-access по имени — порядок entries в архиве нерелевантен);
+  manifest-гейт: flywayVersion манифеста ОБЯЗАНА равняться текущей (SELECT … ORDER BY
+  installed_rank DESC LIMIT 1; null-версия = отказ) — грабля V16 (Permission.java:22: бэкап до
+  V16 требует повторной чистки битов) делает «только та же версия» честным ограничением v1;
+  data.sql.gz → потоковый сплиттер → Statement.execute по-статементно в ОДНОЙ транзакции
+  (rollback — база остаётся как после сидеров); objects/* → `putObject` (НОВЫЙ метод
+  AttachmentObjectStore; MinioAttachmentService putObject через minioOperationsClient; Noop —
+  throw — объект-стор выключен = не ресторим) прощающе (битый объект = WARN+скип, зеркало
+  backup-стороны); адресный патч server_profile из env ПОСЛЕ накатки (провижининг знает адрес
+  новой машины — REST-токена в этот момент не существует); rename архива `.done` (повторный
+  старт не реплеит); ЛОГ-МАРКЕРЫ `[restore] RESTORE COMPLETED — N statement(s), M object(s)` /
+  `[restore] RESTORE FAILED: …` (упавший контекст за Caddy выглядит вечным 502 — провижининг-шаг
+  клиента грепает именно их по docker logs). **(6) compose**: oak-сервис += bind-маунт
+  `./restore:/restore` + env OAK_RESTORE_{FILE,PUBLIC_HOST,PUBLIC_PORT,PUBLIC_SCHEME} (пустые
+  по умолчанию = обычный старт; СИНХРОННО зеркалится в space-client/provisioning-шаблон —
+  Existing правило двусторонней синхронизации). **(7) AttachmentObjectStore** += listAllObjects
+  (пустой prefix = весь бакет — все 6 префиксов) + openObject/getObject. Тесты: NEW
+  `BackupDumpSqlTest` (3: sqlValue-классы/стейтменты/сплиттер-литералы-комментарии) + NEW
+  `BackupIntegrationTest` (2: гейт-лестница — плебей 403 ×4, MANAGE_SERVER-роль 403, без токена
+  401, овнер 200; полный прогон на H2 — поллинг до finished, totalRows ≥ 3 от сидер-строк,
+  скачивание → PK-magic → zip с manifest.json + data.sql.gz → gunzip содержит TRUNCATE/INSERT/
+  replica-preamble; нить бэкапа ВНЕ тест-транзакции — видит только закоммиченные сидер-строки,
+  ассерт под это написан; oak.backup.dir=target/oak-test-backup изоляция) — **538 тестов (было
+  533)**. Смоук: полный цикл backup живого сервера → restore на свежий Docker-стек → сверка →
+  Migrate end-to-end (сценарий — space-client/CLAUDE.md). Серверный рестарт обязателен (новые
+  эндпоинты + раннер); compose-стек пересборки не требует (маунт ./restore создаётся на лету).
+
 ## Проработка фич (2026-10-19 — выкладки сохранены, НИЧЕГО не реализовано)
 
 Три серверные фичи проработаны по юзер-запросу (полные выкладки с фазами и граблями —

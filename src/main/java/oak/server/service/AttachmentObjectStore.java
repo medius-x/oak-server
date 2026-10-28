@@ -1,13 +1,16 @@
 package oak.server.service;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.time.Instant;
 import java.util.List;
 
 /**
  * Read/delete access to the raw object store — the storage GC needs to LIST what actually sits in
- * the bucket (orphans have no DB row to ask about) and to delete by key. Kept apart from
- * {@link AttachmentUrlSigner} (whose job is minting keys and signatures): implemented by the same
- * MinIO bean and by the noop test stand-in (empty listing — nothing is stored under it).
+ * the bucket (orphans have no DB row to ask about) and to delete by key; the backup service lists
+ * and reads EVERYTHING. Kept apart from {@link AttachmentUrlSigner} (whose job is minting keys
+ * and signatures): implemented by the same MinIO bean and by the noop test stand-in (empty
+ * listing — nothing is stored under it).
  */
 public interface AttachmentObjectStore {
 
@@ -28,6 +31,19 @@ public interface AttachmentObjectStore {
      *  -slot reclaim story as {@link #listCustomEmojiObjects()} against the sticker table.
      *  Empty when the object store is disabled. */
     List<StoredObject> listStickerObjects();
+
+    /** EVERY object of the bucket, all prefixes (attachments, avatars, avatars/originals,
+     *  server-avatars, custom-emojis, stickers) — the backup's full listing. Metadata only,
+     *  no bytes are read. Empty when the object store is disabled. */
+    List<StoredObject> listAllObjects();
+
+    /** Opens one object for reading (the backup streams it into the archive). The caller
+     *  owns closing the stream. */
+    InputStream openObject(String key) throws IOException;
+
+    /** Uploads one object (the restore leg of the backup). The stream is consumed by the
+     *  implementation; {@code sizeBytes} must be the exact remaining length of {@code body}. */
+    void putObject(String key, InputStream body, long sizeBytes) throws IOException;
 
     /** Removes one object; failures are the implementor's to log (a dead object is not fatal). */
     void delete(String key);

@@ -58,6 +58,11 @@ public class StorageGcService {
 
     private static final int PURGE_BATCH_SIZE = 500;
     private static final int NO_PROGRESS_BATCHES = 3;
+    /** How many ticks the scheduled run keeps retrying inside its window when the maintenance
+     *  lock is held by a backup (backup round, 2026-10-28): the day is latched only AFTER a
+     *  successful start, so a backup overlapping the configured minute defers the GC instead
+     *  of silently skipping it for the whole day. */
+    private static final int CATCHUP_TICKS = 6;
 
     private final ServerProfileRepository profileRepository;
     private final MessageRepository messageRepository;
@@ -69,6 +74,7 @@ public class StorageGcService {
     private final AttachmentListCodec attachmentListCodec;
     private final TransactionTemplate transactionTemplate;
     private final DataSource dataSource;
+    private final StorageMaintenanceLock maintenanceLock;
     private final File measurePath;
     private final boolean vacuumFull;
     private final long minKeepMessages;
@@ -89,6 +95,7 @@ public class StorageGcService {
                             AttachmentListCodec attachmentListCodec,
                             TransactionTemplate transactionTemplate,
                             DataSource dataSource,
+                            StorageMaintenanceLock maintenanceLock,
                             @Value("${oak.storage.path:.}") String measurePath,
                             @Value("${oak.storage.vacuum-full:true}") boolean vacuumFull,
                             @Value("${oak.storage.min-keep-messages:1000}") long minKeepMessages,
@@ -104,6 +111,7 @@ public class StorageGcService {
         this.attachmentListCodec = attachmentListCodec;
         this.transactionTemplate = transactionTemplate;
         this.dataSource = dataSource;
+        this.maintenanceLock = maintenanceLock;
         this.measurePath = new File(measurePath);
         this.vacuumFull = vacuumFull;
         this.minKeepMessages = minKeepMessages;
@@ -162,13 +170,19 @@ public class StorageGcService {
     /**
      * One full pass. Production measures the real filesystem; tests inject the percent through
      * the package-private seam. Returns the report (also latched as {@link #lastReport()}).
+     * Throws {@link IllegalStateException} when the maintenance lock is held by a backup —
+     * {@link StorageMaintenanceLock} keeps the two from racing over the same rows/objects.
      */
     public StorageGcReport runOnce(String trigger) {
         return runOnce(trigger, this::measureUsedPercent);
     }
 
     StorageGcReport runOnce(String trigger, DoubleSupplier diskPercent) {
+        if (!maintenanceLock.tryAcquire()) {
+            throw new IllegalStateException("a backup is running — retry when it finishes");
+        }
         if (!running.compareAndSet(false, true)) {
+            maintenanceLock.release();
             throw new IllegalStateException("storage GC is already running");
         }
         StorageGcReport report = new StorageGcReport(trigger);
@@ -199,8 +213,31 @@ public class StorageGcService {
         } finally {
             running.set(false);
             lastReport = report;
+            maintenanceLock.release();
         }
         return report;
+    }
+
+    /** Pre-checks (synchronous, so the controller answers a clean 409 instead of a thread
+     *  dying silently) and runs one pass on a daemon thread — the 202 pattern shared with the
+     *  backup run-now. */
+    public void startManualRun() {
+        if (running.get()) {
+            throw new IllegalStateException("a cleanup is already running");
+        }
+        if (maintenanceLock.isLocked()) {
+            throw new IllegalStateException("a backup is running — retry when it finishes");
+        }
+        Thread runner = new Thread(() -> {
+            try {
+                runOnce("manual");
+            } catch (IllegalStateException raced) {
+                // Lost the lock/CAS race between the pre-check and the thread start — rare, logged.
+                log.warn("[storage-gc] run lost the race and did not start: {}", raced.getMessage());
+            }
+        }, "oak-storage-gc");
+        runner.setDaemon(true);
+        runner.start();
     }
 
     /** MinIO objects under attachments/ referenced by NO message — aborted uploads, objects of
@@ -350,9 +387,11 @@ public class StorageGcService {
 
     /**
      * The nightly trigger. A fixed tick compares "now" against the configured minute-of-day: the
-     * run fires on the first tick AT-OR-AFTER the configured time (a tick landing inside the
-     * matching window only once — {@code lastScheduledRunDate} latches the day), which keeps the
-     * time live-editable from the settings screen without rescheduling anything.
+     * run fires on the first tick AT-OR-AFTER the configured time inside a CATCH-UP window of
+     * several ticks ({@code lastScheduledRunDate} latches the day AFTER a successful start),
+     * which keeps the time live-editable from the settings screen without rescheduling anything
+     * — and lets a backup that holds the maintenance lock at the exact minute simply DEFER the
+     * nightly pass instead of silently skipping it for the whole day.
      */
     @Scheduled(fixedDelayString = "${oak.storage.gc-tick-interval:PT10M}")
     public void scheduledTick() {
@@ -362,12 +401,16 @@ public class StorageGcService {
                 return; // automatic cleanup is off — only a manual "run now" may purge
             }
             int nowMinute = LocalTime.now().getHour() * 60 + LocalTime.now().getMinute();
-            long windowMinutes = Math.max(1, tickInterval.toMinutes());
+            long windowMinutes = Math.max(1, tickInterval.toMinutes()) * CATCHUP_TICKS;
             boolean dueMinute = nowMinute >= policy.gcMinuteOfDay()
                     && nowMinute - policy.gcMinuteOfDay() < windowMinutes;
             if (dueMinute && !LocalDate.now().equals(lastScheduledRunDate)) {
-                lastScheduledRunDate = LocalDate.now();
-                runOnce("scheduled " + LocalDate.now());
+                try {
+                    runOnce("scheduled " + LocalDate.now());
+                    lastScheduledRunDate = LocalDate.now();
+                } catch (IllegalStateException deferred) {
+                    log.info("[storage-gc] scheduled run deferred: {}", deferred.getMessage());
+                }
             }
         } catch (RuntimeException error) {
             log.warn("[storage-gc] tick failed: {}", error.getMessage());

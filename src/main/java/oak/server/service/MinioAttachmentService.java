@@ -1,6 +1,7 @@
 package oak.server.service;
 
 import io.minio.BucketExistsArgs;
+import io.minio.GetObjectArgs;
 import io.minio.GetPresignedObjectUrlArgs;
 import io.minio.ListObjectsArgs;
 import io.minio.MakeBucketArgs;
@@ -16,6 +17,8 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.time.Instant;
@@ -147,6 +150,38 @@ public class MinioAttachmentService implements AttachmentUrlSigner, AttachmentOb
     public List<StoredObject> listStickerObjects() {
         // The sticker catalog's listing — the same abandoned-slot reclaim story as emojis.
         return listByPrefix("stickers/");
+    }
+
+    @Override
+    public List<StoredObject> listAllObjects() {
+        // The backup's full listing — an empty prefix lists the whole bucket (every prefix:
+        // attachments, avatars, avatars/originals, server-avatars, custom-emojis, stickers).
+        return listByPrefix("");
+    }
+
+    @Override
+    public InputStream openObject(String key) throws IOException {
+        try {
+            return minioOperationsClient.getObject(GetObjectArgs.builder()
+                    .bucket(properties.bucket())
+                    .object(key)
+                    .build());
+        } catch (Exception minioError) {
+            throw new IOException("Could not read object '" + key + "': " + minioError.getMessage(), minioError);
+        }
+    }
+
+    @Override
+    public void putObject(String key, InputStream body, long sizeBytes) throws IOException {
+        try {
+            minioOperationsClient.putObject(io.minio.PutObjectArgs.builder()
+                    .bucket(properties.bucket())
+                    .object(key)
+                    .stream(body, sizeBytes, -1)
+                    .build());
+        } catch (Exception minioError) {
+            throw new IOException("Could not store object '" + key + "': " + minioError.getMessage(), minioError);
+        }
     }
 
     private List<StoredObject> listByPrefix(String prefix) {

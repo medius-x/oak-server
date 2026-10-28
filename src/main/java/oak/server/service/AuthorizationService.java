@@ -338,6 +338,19 @@ public class AuthorizationService {
         }
     }
 
+    /**
+     * The full-content gate (backup + migration, user decision 2026-10-28): the OWNER role or
+     * the {@code ADMINISTRATOR} bit — deliberately NOT a narrow {@code MANAGE_SERVER}. A
+     * backup archive carries EVERY conversation and every stored object of the instance, so
+     * "who may download one" is "who may administer everything", not "who may edit the server
+     * profile". The owner passes through the OWNER→ALL short-circuit of {@link #hasServer}.
+     */
+    public void requireAdministrator(User user) {
+        if (!hasServer(user, Permission.ADMINISTRATOR)) {
+            throw forbidden("Missing permission: ADMINISTRATOR");
+        }
+    }
+
     public void requireInChannel(User user, Channel channel, Permission permission) {
         if (!hasInChannel(user, channel, permission)) {
             throw forbidden("Missing permission in this channel: " + permission.name());

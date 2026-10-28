@@ -64,18 +64,17 @@ public class StorageController {
         return status(principal);
     }
 
-    /** Fires one GC pass NOW (202; the run itself is background — poll GET for the report). */
+    /** Fires one GC pass NOW (202; the run itself is background — poll GET for the report).
+     *  409 when a pass is already running or a backup holds the maintenance lock. */
     @PostMapping("/run")
     @ResponseStatus(HttpStatus.ACCEPTED)
     public StorageGcRunResponse runNow(@AuthenticationPrincipal UserDetails principal) {
         requireManageStorage(principal);
-        if (storageGcService.isRunning()) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "A cleanup is already running");
+        try {
+            storageGcService.startManualRun();
+        } catch (IllegalStateException busy) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, busy.getMessage());
         }
-        Thread runner = new Thread(() -> storageGcService.runOnce("manual"),
-                "oak-storage-gc");
-        runner.setDaemon(true);
-        runner.start();
         return StorageGcRunResponse.started();
     }
 

@@ -81,6 +81,7 @@ class StorageGcServiceTest {
         service = new StorageGcService(profileRepository, messageRepository, reactionRepository,
                 messageService, objectStore, emojiRepository, stickerRepository, realCodec(), template,
                 null /* DataSource unused: vacuum is skipped — H2/not reached in unit tests */,
+                new StorageMaintenanceLock(),
                 ".", true, 1000, 7, Duration.ofMinutes(10));
     }
 
