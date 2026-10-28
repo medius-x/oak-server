@@ -64,10 +64,12 @@ class ServerProfileIntegrationTest {
                 .andExpect(jsonPath("$.connectionScheme").isEmpty())  // null = the default http
                 // The compatibility skeleton: a version string is ALWAYS present
                 // ("dev" when build-info is absent — the unpackaged test classpath),
-                // and the capabilities catalogue rides along (empty = 0.1.0 base).
+                // and the capabilities catalogue rides along — "backups" is its first
+                // real flag (backup round 2026-10-28; the client hides that block without it).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(0));
+                .andExpect(jsonPath("$.capabilities.length()").value(1))
+                .andExpect(jsonPath("$.capabilities[0]").value("backups"));
     }
 
     @Test

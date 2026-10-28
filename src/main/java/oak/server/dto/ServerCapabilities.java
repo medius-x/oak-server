@@ -15,8 +15,12 @@ import java.util.List;
  */
 public final class ServerCapabilities {
 
-    /** kebab-case string ids; empty while every shipped feature belongs to the 0.1.0 base. */
-    public static final List<String> FEATURES = List.of();
+    /** kebab-case string ids; empty while every shipped feature belongs to the 0.1.0 base.
+     *  {@code backups} — the full-instance backup block (build/estimate/status/download/
+     *  discard + the restore runner + migration), backup round 2026-10-28: the FIRST real
+     *  use of the skeleton (user call — a client connected to a 0.2.0 server must not show
+     *  the block: every endpoint 404s there). */
+    public static final List<String> FEATURES = List.of("backups");
 
     private ServerCapabilities() {
     }

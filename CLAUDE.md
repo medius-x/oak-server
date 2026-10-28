@@ -1249,6 +1249,46 @@ Janus admin/TURN TCP) остаются рабочими: они и есть че
   533)**. Смоук: полный цикл backup живого сервера → restore на свежий Docker-стек → сверка →
   Migrate end-to-end (сценарий — space-client/CLAUDE.md). Серверный рестарт обязателен (новые
   эндпоинты + раннер); compose-стек пересборки не требует (маунт ./restore создаётся на лету).
+  **Дополнение 2026-10-28, итерация 2 (юзер: «сервер не должен хранить сборку — удаляться после
+  СКАЧИВАНИЯ, а не перед следующим бэкапом» + space-гейт):** (а) **DELIVER-AND-DELETE** — слот
+  архива = буфер отдачи между «собрано» и «скачано», НИКОГДА не хранилище: `BackupService.
+  openArchiveForDelivery()` оборачивает FileInputStream счётчиком — `close()` при полном
+  прочтении (remaining ≤ 0) делает Files.deleteIfExists + INFO-лог «delivered in full — the
+  server copy is deleted»; ОБОРВАННАЯ отдача (remaining > 0) файл ОСТАВЛЯЕТ — Download latest
+  может повторить; `removeStaleArchiveOnStartup` (@EventListener ApplicationReadyEvent, ПОСЛЕ
+  RestoreRunner — он эту директорию не трогает) подметает мусор обрывов/крашей при старте:
+  между запусками сервер не хранит НИЧЕГО. Контроллер /file переведён с FileSystemResource на
+  InputStreamResource (размер читается ДО открытия потока; нет файла → 404 «No backup archive
+  is waiting for download»). Wire (append-only, парный деплой): `BackupStatusResponse` += 3-е
+  `fileAvailable` (клиент гасит Download latest после доставки), `BackupEstimateResponse` += 4-е
+  `availableBytes` (free-место ФС архива; -1 = стор нечитаем — клиент не блокирует).
+  (б) **SPACE-ГЕЙТ** (юзер-сценарий: диск у high-watermark — сборка падает ENOSPC): estimate
+  несёт `usableSpaceBytes()` (getFileStore(backupDir); read-only, директория не создаётся);
+  клиентская ConfirmModal блокирует старт при availableBytes < objectBytes+approxDatabaseBytes
+  (верхняя граница архива) с сообщением «сначала освободите место» (клиентская половина —
+  space-client/CLAUDE.md). Тест: manualRunBuildsADownloadableArchive += регрессия — после
+  полного скачивания fileAvailable=false, повторный /file 404, файла на диске НЕТ;
+  estimate-ассерт availableBytes. — **538/538; wire-поле → деплой парный (сервер первым).**
+  **Итерация 3 (юзер: обратная совместимость + кнопка очистки):** (в) **CAPABILITY-ФЛАГ
+  `"backups"`** — ПЕРВОЕ реальное использование скелета 2026-10-15: `ServerCapabilities.
+  FEATURES = List.of("backups")` — клиент (0.2.0-сервер поля не знает → блок бэкапов Целиком
+  скрыт, вкл. Migrate). Флаг навсегда (доктрина: не удаляется/не переименовывается).
+  ServerProfileIntegrationTest: capabilities = ["backups"]. (г) **DELETE /api/server/backup/
+  file** (`BackupService.discardArchive()` — Files.deleteIfExists + INFO; контроллер —
+  идемпотентный 204, гейт requireAdministrator) — «очистить необучённый архив без
+  скачивания» (аномалия оборванного скачивания; клиентская половина — space-client).
+  Тест: undeliveredArchiveCanBeDiscardedWithoutDownloading (run→poll→fileAvailable=true→
+  плебей-DELETE 403→owner-204→файла нет→status false→повторный 204). — **539 тестов.**
+  **Смоук-фикс (живый прогон того же дня): 202-ответ /run ГОНЯЛ взлёт daemon-нити** — тело
+  собиралось ДО compareAndSet(running) → клиент видел running=false+lastRun=null в самом 202
+  и мгновенно сдавался («the server reported no backup run»), а прогон шёл и завершался.
+  Фикс: claim (running.compareAndSet) перенесён В ПОТОК ЗАПРОСА — startRun синхронно
+  берёт слот (предчек лока → CAS), 202 ВСЕГДА running=true (регрессионный ассерт jsonPath
+  $.running=true в ОБОИХ тестах с POST /run); нить берёт РЕЕНТРАБЕЛЬНЫЙ лок на себе
+  (owner-bound!) и зовёт новое приватное runPass() (тело прогона + latch lastReport в
+  finally); tryAcquire-провал внутри нити = WARN + возврат claim (прежние defer-семантики);
+  публичный runOnce() (прямые вызовы/тесты) сохранял контракт — сам берёт лок и claim.
+  Клиентский ремень — 10-с grace в waitForBuiltBackup (space-client). — **539/539.**
 
 ## Проработка фич (2026-10-19 — выкладки сохранены, НИЧЕГО не реализовано)
 

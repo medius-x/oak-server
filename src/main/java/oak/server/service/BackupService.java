@@ -10,10 +10,13 @@ import tools.jackson.databind.ObjectMapper;
 
 import javax.sql.DataSource;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -21,6 +24,7 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
 import java.sql.ResultSet;
@@ -56,8 +60,12 @@ import java.util.zip.ZipOutputStream;
  * {@code failedObjects}, warned) — an archive missing one attachment beats no archive.
  *
  * <p><b>Single slot:</b> the finished zip replaces {@code oak-backup.zip} atomically (write to
- * {@code .tmp}, move) in {@code oak.backup.dir} (default: a temp directory — the server stores
- * nothing beyond the latest archive, per the no-retention decision).
+ * {@code .tmp}, move) in {@code oak.backup.dir} (default: a temp directory). The slot is a
+ * TRANSFER BUFFER, not storage: the file must live somewhere between "built" and
+ * "downloaded" — and it is DELETED the moment a delivery reads it to the end
+ * ({@link #openArchiveForDelivery()}; user decision 2026-10-28). A truncated download keeps
+ * it for a retry; {@link #removeStaleArchiveOnStartup()} sweeps whatever a crash or an
+ * abandoned run left behind. Nothing survives between server runs.
  */
 @Slf4j
 @Service
@@ -103,6 +111,26 @@ public class BackupService {
                 : new File(backupDirSetting);
     }
 
+    /** The archive slot is a TRANSFER BUFFER, not storage (the no-retention decision): the
+     *  served file must live somewhere between "built" and "downloaded", but a restart wipes
+     *  {@code lastReport} (in-memory), so the file a previous run left behind is unreachable
+     *  garbage. Delete it on startup — nothing survives between server runs.
+     *  org.springframework.boot.context.event.ApplicationReadyEvent runs after the restore
+     *  runner, which never touches this directory. */
+    @org.springframework.context.event.EventListener(
+            org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public void removeStaleArchiveOnStartup() {
+        for (String name : new String[]{"oak-backup.zip", "oak-backup.zip.tmp"}) {
+            try {
+                if (Files.deleteIfExists(new File(backupDir, name).toPath())) {
+                    log.info("[backup] stale {} from a previous run removed — the server keeps no archives", name);
+                }
+            } catch (IOException cleanupError) {
+                log.warn("[backup] could not remove stale {}: {}", name, cleanupError.getMessage());
+            }
+        }
+    }
+
     /** The finished (or in-progress-target) archive file; may not exist yet. */
     public File backupFile() {
         return new File(backupDir, "oak-backup.zip");
@@ -119,7 +147,10 @@ public class BackupService {
     /** Quick size preview for the "Back up now?" confirmation dialog: the exact sum of the
      *  bucket listing (metadata only — no bytes read) plus an UPPER estimate of the SQL dump
      *  from {@code pg_relation_size} of every public table (indexes excluded, gzip will
-     *  shrink it further). */
+     *  shrink it further), plus the FREE space of the archive directory's file system. The
+     *  client compares the two and refuses to start a pass the disk cannot hold (user
+     *  request 2026-10-28: a nearly-full disk just below the cleanup watermark would
+     *  otherwise die mid-build with ENOSPC). */
     public BackupEstimate estimate() {
         long objectBytes = 0;
         long objectCount = 0;
@@ -127,24 +158,117 @@ public class BackupService {
             objectBytes += object.sizeBytes();
             objectCount += 1;
         }
-        return new BackupEstimate(objectBytes, objectCount, databaseSizeBytes());
+        return new BackupEstimate(objectBytes, objectCount, databaseSizeBytes(), usableSpaceBytes());
+    }
+
+    /** Whether the transfer buffer exists — "Download latest" works only while it does
+     *  (the file is deleted after a full delivery; a broken download keeps it for a retry). */
+    public boolean fileAvailable() {
+        return backupFile().isFile();
+    }
+
+    /** Deletes the undelivered buffer without downloading it (the "abandoned archive"
+     *  cleanup button — an interrupted download leaves the file, and the owner may just
+     *  want it gone). Idempotent: returns whether a file was actually removed. */
+    public boolean discardArchive() {
+        try {
+            boolean removed = Files.deleteIfExists(backupFile().toPath());
+            if (removed) {
+                log.info("[backup] undelivered archive discarded by the owner");
+            }
+            return removed;
+        } catch (IOException deleteError) {
+            log.warn("[backup] could not discard the archive: {}", deleteError.getMessage());
+            return false;
+        }
+    }
+
+    /** The archive opened for DELIVERY: the server copy is deleted once the stream has been
+     *  read TO THE END (user decision 2026-10-28 — the server never keeps a built archive;
+     *  the slot is a transfer buffer between "built" and "downloaded"). A truncated read
+     *  (client dropped mid-download) leaves the file in place for a retry. */
+    public InputStream openArchiveForDelivery() throws IOException {
+        File archive = backupFile();
+        long size = archive.length();
+        InputStream raw = new BufferedInputStream(new FileInputStream(archive));
+        return new FilterInputStream(raw) {
+            private long remaining = size;
+
+            @Override
+            public int read() throws IOException {
+                int single = super.read();
+                if (single >= 0) {
+                    remaining -= 1;
+                }
+                return single;
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) throws IOException {
+                int chunk = super.read(buffer, offset, length);
+                if (chunk > 0) {
+                    remaining -= chunk;
+                }
+                return chunk;
+            }
+
+            @Override
+            public void close() throws IOException {
+                super.close();
+                if (remaining > 0) {
+                    return; // truncated delivery — keep the file for a retry
+                }
+                try {
+                    if (Files.deleteIfExists(backupFile().toPath())) {
+                        log.info("[backup] archive delivered in full — the server copy is deleted");
+                    }
+                } catch (IOException deleteError) {
+                    log.warn("[backup] could not delete the delivered archive: {}", deleteError.getMessage());
+                }
+            }
+        };
+    }
+
+    /** Free bytes of the archive directory's store; -1 when the store cannot be probed
+     *  (the client then skips the space check). Read-only — no directory is created. */
+    private long usableSpaceBytes() {
+        try {
+            Path directory = backupDir.toPath();
+            Path probe = Files.isDirectory(directory) ? directory : directory.toAbsolutePath().getParent();
+            return Files.getFileStore(probe).getUsableSpace();
+        } catch (IOException unavailable) {
+            return -1;
+        }
     }
 
     /** Pre-checks (synchronous, so the controller can answer a clean 409) and starts the pass
-     *  on a daemon thread — the 202 pattern of the GC run-now. */
+     *  on a daemon thread — the 202 pattern of the GC run-now. The running-claim is taken
+     *  HERE, in the caller's thread: the 202 response is assembled AFTER the claim, so a
+     *  client polling straight from the 202 can never observe "not running, no last run"
+     *  while the pass is still taking off (live smoke 2026-10-28: the daemon thread had not
+     *  reached its compareAndSet yet, the client read running=false + lastRun=null in the
+     *  202 body and gave up instantly — "the server reported no backup run").
+     */
     public void startRun() {
-        if (running.get()) {
-            throw new IllegalStateException("a backup is already running");
-        }
         if (maintenanceLock.isLocked()) {
             throw new IllegalStateException("a storage cleanup is running — retry when it finishes");
         }
+        if (!running.compareAndSet(false, true)) {
+            throw new IllegalStateException("a backup is already running");
+        }
         Thread runner = new Thread(() -> {
+            // The lock is taken on THIS thread (ReentrantLock is owner-bound): a GC run that
+            // grabbed it inside the pre-check gap aborts the pass — the old defer semantics.
+            if (!maintenanceLock.tryAcquire()) {
+                running.set(false);
+                log.warn("[backup] run deferred: a storage cleanup took the lock between the pre-check and the start");
+                return;
+            }
             try {
-                runOnce();
-            } catch (IllegalStateException raced) {
-                // Lost the lock/CAS race between the pre-check and the thread start — rare, logged.
-                log.warn("[backup] run lost the race and did not start: {}", raced.getMessage());
+                runPass();
+            } finally {
+                running.set(false);
+                maintenanceLock.release();
             }
         }, "oak-backup");
         runner.setDaemon(true);
@@ -152,9 +276,11 @@ public class BackupService {
     }
 
     /**
-     * One full backup pass. Returns the report (also latched as {@link #lastReport()}). Throws
-     * {@link IllegalStateException} when the maintenance lock is held by the GC (the caller
-     * decides: 409 for a manual run, defer-and-retry for a schedule).
+     * One full backup pass, for DIRECT invocations (tests, future callers): claims the
+     * maintenance lock and the running slot itself. Returns the report (also latched as
+     * {@link #lastReport()}). Throws {@link IllegalStateException} when the maintenance lock
+     * is held by the GC (the caller decides: 409 for a manual run, defer-and-retry for a
+     * schedule) or another pass is running.
      */
     public BackupReport runOnce() {
         if (!maintenanceLock.tryAcquire()) {
@@ -164,6 +290,17 @@ public class BackupService {
             maintenanceLock.release();
             throw new IllegalStateException("a backup is already running");
         }
+        try {
+            return runPass();
+        } finally {
+            running.set(false);
+            maintenanceLock.release();
+        }
+    }
+
+    /** The pass body; the maintenance lock AND the running-claim are already held by the
+     *  caller. Latches the report whatever happens — a failed pass must stay visible. */
+    private BackupReport runPass() {
         BackupReport report = new BackupReport();
         try {
             Files.createDirectories(backupDir.toPath());
@@ -209,9 +346,7 @@ public class BackupService {
             report.finishedAt = Instant.now();
             log.warn("[backup] failed: {}", error.getMessage(), error);
         } finally {
-            running.set(false);
             lastReport = report;
-            maintenanceLock.release();
         }
         return report;
     }
@@ -386,6 +521,8 @@ public class BackupService {
         }
     }
 
-    /** The estimate payload: exact object bytes/count plus the SQL upper bound. */
-    public record BackupEstimate(long objectBytes, long objectCount, long approxDatabaseBytes) {}
+    /** The estimate payload: exact object bytes/count, the SQL upper bound, and the free
+     *  space of the archive store (-1 = unknown). */
+    public record BackupEstimate(long objectBytes, long objectCount, long approxDatabaseBytes,
+                                 long availableBytes) {}
 }
