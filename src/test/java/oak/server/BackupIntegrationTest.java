@@ -21,6 +21,7 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -157,6 +158,191 @@ class BackupIntegrationTest {
                 .andExpect(status().isNotFound());
         assertFalse(new java.io.File("target/oak-test-backup/oak-backup.zip").isFile(),
                 "the delivered archive must be deleted from the server disk");
+    }
+
+    @Test
+    void rangedDeliveryServes206AndDeletesOnlyWhenTheTailIsDelivered() throws Exception {
+        String ownerToken = registerAndLogin("backup-ranger");
+
+        mockMvc.perform(post("/api/server/backup/run").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isAccepted());
+        long size = 0;
+        boolean finished = false;
+        for (int attempt = 0; attempt < 100 && !finished; attempt++) {
+            Thread.sleep(100);
+            MvcResult result = mockMvc.perform(get("/api/server/backup/status")
+                            .header("Authorization", "Bearer " + ownerToken))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String body = result.getResponse().getContentAsString();
+            finished = !Boolean.parseBoolean(JsonPath.read(body, "$.running").toString())
+                    && JsonPath.read(body, "$.lastRun") != null
+                    && JsonPath.read(body, "$.lastRun.finishedAt") != null;
+            if (finished) {
+                size = ((Number) JsonPath.read(body, "$.lastRun.sizeBytes")).longValue();
+            }
+        }
+        assertTrue(finished, "the backup run must finish");
+        assertTrue(size > 4, "the archive must be bigger than the zip magic itself");
+
+        // The first byte as a range: 206, the canonical Content-Range, exactly one byte,
+        // and the transfer buffer SURVIVES (a middle range is not a delivery).
+        MvcResult first = mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=0-0"))
+                .andExpect(status().isPartialContent())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Content-Range", "bytes 0-0/" + size))
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Accept-Ranges", "bytes"))
+                .andReturn();
+        byte[] firstByte = first.getResponse().getContentAsByteArray();
+        assertEquals(1, firstByte.length, "bytes=0-0 must answer exactly one byte");
+        assertEquals('P', firstByte[0], "the archive starts with the zip magic");
+
+        // A middle slice: two bytes, still not the tail — the file stays.
+        MvcResult middle = mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=2-3"))
+                .andExpect(status().isPartialContent())
+                .andReturn();
+        assertEquals(2, middle.getResponse().getContentAsByteArray().length,
+                "bytes=2-3 must answer exactly two bytes");
+        mockMvc.perform(get("/api/server/backup/status").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(jsonPath("$.fileAvailable").value(true));
+
+        // The suffix form covers the tail — THIS delivery deletes the buffer.
+        MvcResult tail = mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=-4"))
+                .andExpect(status().isPartialContent())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Content-Range", "bytes " + (size - 4) + "-" + (size - 1) + "/" + size))
+                .andReturn();
+        assertEquals(4, tail.getResponse().getContentAsByteArray().length,
+                "bytes=-4 must answer exactly four bytes");
+        assertFalse(new java.io.File("target/oak-test-backup/oak-backup.zip").isFile(),
+                "delivering the LAST byte must delete the server copy");
+    }
+
+    @Test
+    void unusableRangeHeadersAnswer416OrFallBackToTheFullBody() throws Exception {
+        String ownerToken = registerAndLogin("backup-ranger-edge");
+
+        mockMvc.perform(post("/api/server/backup/run").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isAccepted());
+        long size = 0;
+        boolean finished = false;
+        for (int attempt = 0; attempt < 100 && !finished; attempt++) {
+            Thread.sleep(100);
+            MvcResult result = mockMvc.perform(get("/api/server/backup/status")
+                            .header("Authorization", "Bearer " + ownerToken))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String body = result.getResponse().getContentAsString();
+            finished = !Boolean.parseBoolean(JsonPath.read(body, "$.running").toString())
+                    && JsonPath.read(body, "$.lastRun") != null
+                    && JsonPath.read(body, "$.lastRun.finishedAt") != null;
+            if (finished) {
+                size = ((Number) JsonPath.read(body, "$.lastRun.sizeBytes")).longValue();
+            }
+        }
+        assertTrue(finished, "the backup run must finish");
+
+        // Beyond the end: the canonical 416 with the total size — the answer curl -C -
+        // reads as "nothing left to resume".
+        mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=" + (size + 100) + "-"))
+                .andExpect(status().isRequestedRangeNotSatisfiable())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header()
+                        .string("Content-Range", "bytes */" + size));
+        // An empty suffix cannot be satisfied either.
+        mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=-0"))
+                .andExpect(status().isRequestedRangeNotSatisfiable());
+
+        // Multi-range is IGNORED per RFC 9110: a full 200 answers. The full fallback IS
+        // a tail delivery — it deletes the server copy, so the garbage-header case needs
+        // a fresh archive to prove its own full-200 fallback.
+        MvcResult multi = mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=0-1,5-9"))
+                .andExpect(status().isOk())
+                .andReturn();
+        assertEquals(size, multi.getResponse().getContentAsByteArray().length,
+                "a multi-range header must fall back to the full body");
+        assertFalse(new java.io.File("target/oak-test-backup/oak-backup.zip").isFile(),
+                "the full fallback delivery must delete the server copy");
+        mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=0-0"))
+                .andExpect(status().isNotFound());
+
+        mockMvc.perform(post("/api/server/backup/run").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isAccepted());
+        boolean rebuilt = false;
+        for (int attempt = 0; attempt < 100 && !rebuilt; attempt++) {
+            Thread.sleep(100);
+            MvcResult result = mockMvc.perform(get("/api/server/backup/status")
+                            .header("Authorization", "Bearer " + ownerToken))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String body = result.getResponse().getContentAsString();
+            rebuilt = !Boolean.parseBoolean(JsonPath.read(body, "$.running").toString())
+                    && JsonPath.read(body, "$.lastRun") != null
+                    && JsonPath.read(body, "$.lastRun.finishedAt") != null;
+            if (rebuilt) {
+                size = ((Number) JsonPath.read(body, "$.lastRun.sizeBytes")).longValue();
+            }
+        }
+        assertTrue(rebuilt, "the second backup run must finish");
+        MvcResult garbage = mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .header("Range", "bytes=abc-def"))
+                .andExpect(status().isOk())
+                .andReturn();
+        assertEquals(size, garbage.getResponse().getContentAsByteArray().length,
+                "a garbage header must fall back to the full body");
+    }
+
+    @Test
+    void theReportCarriesTheArchiveSha256() throws Exception {
+        String ownerToken = registerAndLogin("backup-hasher");
+
+        mockMvc.perform(post("/api/server/backup/run").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isAccepted());
+        String archiveSha256 = null;
+        boolean finished = false;
+        for (int attempt = 0; attempt < 100 && !finished; attempt++) {
+            Thread.sleep(100);
+            MvcResult result = mockMvc.perform(get("/api/server/backup/status")
+                            .header("Authorization", "Bearer " + ownerToken))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String body = result.getResponse().getContentAsString();
+            finished = !Boolean.parseBoolean(JsonPath.read(body, "$.running").toString())
+                    && JsonPath.read(body, "$.lastRun") != null
+                    && JsonPath.read(body, "$.lastRun.finishedAt") != null;
+            if (finished) {
+                archiveSha256 = (String) JsonPath.read(body, "$.lastRun.archiveSha256");
+            }
+        }
+        assertTrue(finished, "the backup run must finish");
+        assertNotNull(archiveSha256, "the report must carry the digest");
+        assertTrue(archiveSha256.matches("[0-9a-f]{64}"),
+                "a lowercase 64-hex SHA-256, got: " + archiveSha256);
+
+        // The digest matches the delivered bytes — the migration leg relies on this
+        // equality to verify a server-to-server transfer after it lands.
+        MvcResult download = mockMvc.perform(get("/api/server/backup/file")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andReturn();
+        java.security.MessageDigest sha256 = java.security.MessageDigest.getInstance("SHA-256");
+        String actual = java.util.HexFormat.of().formatHex(sha256.digest(download.getResponse().getContentAsByteArray()));
+        assertEquals(archiveSha256, actual, "the reported digest must match the delivered archive");
     }
 
     @Test

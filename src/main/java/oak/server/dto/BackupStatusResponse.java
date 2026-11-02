@@ -18,15 +18,18 @@ public record BackupStatusResponse(boolean running, BackupRunResponse lastRun, b
                 fileAvailable);
     }
 
-    /** The finished (or in-progress — fields fill in as it goes) pass. */
+    /** The finished (or in-progress — fields fill in as it goes) pass. {@code archiveSha256}
+     *  is computed on the write path — the migration leg hands it to the receiving server,
+     *  which verifies the transferred bytes after they land. */
     public record BackupRunResponse(Instant startedAt, Instant finishedAt, long sizeBytes,
                                     String flywayVersion, String appVersion, long totalRows,
                                     long objectCount, long objectBytes, long failedObjects,
-                                    String error) {
+                                    String error, String archiveSha256) {
         static BackupRunResponse from(BackupService.BackupReport report) {
             return new BackupRunResponse(report.startedAt, report.finishedAt, report.sizeBytes,
                     report.flywayVersion, report.appVersion, report.totalRows(),
-                    report.objectCount, report.objectBytes, report.failedObjects, report.error);
+                    report.objectCount, report.objectBytes, report.failedObjects, report.error,
+                    report.archiveSha256);
         }
     }
 }

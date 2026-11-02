@@ -19,8 +19,11 @@ public final class ServerCapabilities {
      *  {@code backups} — the full-instance backup block (build/estimate/status/download/
      *  discard + the restore runner + migration), backup round 2026-10-28: the FIRST real
      *  use of the skeleton (user call — a client connected to a 0.2.0 server must not show
-     *  the block: every endpoint 404s there). */
-    public static final List<String> FEATURES = List.of("backups");
+     *  the block: every endpoint 404s there).
+     *  {@code server-migration} — the direct server-to-server transfer leg (2026-11-02):
+     *  one-shot migration token + the token-gated transfer endpoints; without the flag the
+     *  client always routes the archive through the user's computer (the legacy route). */
+    public static final List<String> FEATURES = List.of("backups", "server-migration");
 
     private ServerCapabilities() {
     }

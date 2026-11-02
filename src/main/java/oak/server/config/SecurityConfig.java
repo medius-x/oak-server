@@ -46,6 +46,14 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/ws", "/ws/**").permitAll()
+                        // The server-to-server migration leg (2026-11-02): the NEW server
+                        // fetches the archive with curl carrying a one-shot migration token —
+                        // no JWT exists for a machine. The ENTIRE gate lives in the
+                        // controller: the X-Space-Migration-Token header must validate
+                        // against the in-memory single-slot token (hash + TTL), or the
+                        // answer is 401. Scope is exactly the two transfer endpoints —
+                        // never the Bearer-gated backup block itself.
+                        .requestMatchers("/api/server/backup/transfer/**").permitAll()
                         .requestMatchers("/error").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(eh -> eh.authenticationEntryPoint(

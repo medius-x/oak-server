@@ -26,12 +26,16 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -188,45 +192,87 @@ public class BackupService {
      *  the slot is a transfer buffer between "built" and "downloaded"). A truncated read
      *  (client dropped mid-download) leaves the file in place for a retry. */
     public InputStream openArchiveForDelivery() throws IOException {
+        return openArchiveForDelivery(0, backupFile().length());
+    }
+
+    /** The RANGE flavour of {@link #openArchiveForDelivery()} (the server-to-server
+     *  migration leg, 2026-11-02): {@code curl -C -} can only RESUME a transfer when the
+     *  server answers 206/Range — without it an interrupted multi-gigabyte transfer restarts
+     *  from zero every time. The deliver-and-delete rule follows the TAIL, not the call:
+     *  the server copy is deleted only when a delivery read the file's LAST byte AND drained
+     *  its own requested length — a truncated range (like a truncated full read) keeps the
+     *  file for a retry. Reads past the requested length report EOF, so a response body can
+     *  never exceed its Content-Length. */
+    public InputStream openArchiveForDelivery(long start, long length) throws IOException {
         File archive = backupFile();
         long size = archive.length();
+        if (start < 0 || length < 0 || start + length > size) {
+            throw new IllegalArgumentException(
+                    "range [bytes " + start + "+" + length + "] does not fit the archive of " + size + " byte(s)");
+        }
         InputStream raw = new BufferedInputStream(new FileInputStream(archive));
-        return new FilterInputStream(raw) {
-            private long remaining = size;
-
-            @Override
-            public int read() throws IOException {
-                int single = super.read();
-                if (single >= 0) {
-                    remaining -= 1;
-                }
-                return single;
+        long skipped = 0;
+        while (skipped < start) {
+            long step = raw.skip(start - skipped);
+            if (step <= 0) {
+                raw.close();
+                throw new IOException("could not seek the archive to byte " + start);
             }
+            skipped += step;
+        }
+        return new RangeDeliveryStream(raw, length, start + length >= size);
+    }
 
-            @Override
-            public int read(byte[] buffer, int offset, int length) throws IOException {
-                int chunk = super.read(buffer, offset, length);
-                if (chunk > 0) {
-                    remaining -= chunk;
-                }
-                return chunk;
-            }
+    /** One delivery stream (full or range): bounds the reads to the requested length and
+     *  owns the deliver-and-delete decision. */
+    private final class RangeDeliveryStream extends FilterInputStream {
+        private long remaining;
+        private final boolean coversTail;
 
-            @Override
-            public void close() throws IOException {
-                super.close();
-                if (remaining > 0) {
-                    return; // truncated delivery — keep the file for a retry
-                }
-                try {
-                    if (Files.deleteIfExists(backupFile().toPath())) {
-                        log.info("[backup] archive delivered in full — the server copy is deleted");
-                    }
-                } catch (IOException deleteError) {
-                    log.warn("[backup] could not delete the delivered archive: {}", deleteError.getMessage());
-                }
+        RangeDeliveryStream(InputStream raw, long length, boolean coversTail) {
+            super(raw);
+            this.remaining = length;
+            this.coversTail = coversTail;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (remaining <= 0) {
+                return -1;
             }
-        };
+            int single = super.read();
+            if (single >= 0) {
+                remaining -= 1;
+            }
+            return single;
+        }
+
+        @Override
+        public int read(byte[] buffer, int offset, int length) throws IOException {
+            if (remaining <= 0) {
+                return -1;
+            }
+            int chunk = super.read(buffer, offset, (int) Math.min(length, remaining));
+            if (chunk > 0) {
+                remaining -= chunk;
+            }
+            return chunk;
+        }
+
+        @Override
+        public void close() throws IOException {
+            super.close();
+            if (remaining > 0 || !coversTail) {
+                return; // truncated delivery, or a middle range — keep the file for a retry
+            }
+            try {
+                if (Files.deleteIfExists(backupFile().toPath())) {
+                    log.info("[backup] archive delivered in full — the server copy is deleted");
+                }
+            } catch (IOException deleteError) {
+                log.warn("[backup] could not delete the delivered archive: {}", deleteError.getMessage());
+            }
+        }
     }
 
     /** Free bytes of the archive directory's store; -1 when the store cannot be probed
@@ -309,7 +355,12 @@ public class BackupService {
             long objectCount;
             long objectBytes;
             long failedObjects;
-            try (ZipOutputStream zip = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(temp)))) {
+            // The digest rides the write path (free at build time): the migration leg
+            // hands the hash to the NEW server, which verifies the transfer AFTER it
+            // lands — transport integrity no longer leans on TLS alone.
+            MessageDigest sha256 = newSha256();
+            try (ZipOutputStream zip = new ZipOutputStream(
+                    new DigestOutputStream(new BufferedOutputStream(new FileOutputStream(temp)), sha256))) {
                 // STORED-equivalent: media payloads are already compressed, and data.sql.gz brings
                 // its own gzip layer — a deflate pass would only burn CPU for nothing.
                 zip.setLevel(Deflater.NO_COMPRESSION);
@@ -332,6 +383,7 @@ public class BackupService {
             Files.move(temp.toPath(), target.toPath(),
                     StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             report.sizeBytes = target.length();
+            report.archiveSha256 = HexFormat.of().formatHex(sha256.digest());
             report.objectCount = objectCount;
             report.objectBytes = objectBytes;
             report.failedObjects = failedObjects;
@@ -380,6 +432,14 @@ public class BackupService {
         } catch (IOException closeError) {
             // Nothing to salvage — the next putNextEntry would fail the whole archive; give up loudly.
             throw new IllegalStateException("backup zip became unwritable: " + closeError.getMessage(), closeError);
+        }
+    }
+
+    private static MessageDigest newSha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (NoSuchAlgorithmException unavailable) {
+            throw new IllegalStateException("SHA-256 is not available", unavailable);
         }
     }
 
@@ -509,6 +569,7 @@ public class BackupService {
         public final Map<String, Long> tableRows = new LinkedHashMap<>();
         public volatile Instant finishedAt;
         public volatile long sizeBytes;
+        public volatile String archiveSha256;
         public volatile long objectCount;
         public volatile long objectBytes;
         public volatile long failedObjects;
