@@ -159,6 +159,21 @@ public class VoiceAccessEnforcer {
     }
 
     /**
+     * {@link #forceLeave} MINUS the gateway kick — the ghost sweep's healing step for a room the
+     * gateway no longer has (live report 2026-10-30: a vanished room left stale registry members,
+     * and every forced action against it just re-failed with janus 426). No plugin join is
+     * attempted against a dead room; the token revoke is a gateway-ADMIN call and works fine. The
+     * {@code KICKED} push stays deliberately: a member whose client is actually ALIVE re-joins via
+     * {@code /room}, whose {@code ensureRoom} re-creates the room from scratch.
+     */
+    public void evictFromVanishedRoom(Long channelId, String username, String byUsername) {
+        tracker.kick(channelId, username);
+        voiceAccess.revokeTokens(channelId, username);
+        messagingTemplate.convertAndSendToUser(username, VOICE_CONTROL_QUEUE,
+                new VoiceControlEvent("KICKED", channelId, byUsername));
+    }
+
+    /**
      * The usernames currently holding at least one session in the channel — a copied snapshot, so
      * it is safe to iterate while {@link #forceLeave} mutates the registry underneath. Empty when
      * nobody is in voice.

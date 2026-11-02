@@ -17,6 +17,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -242,6 +243,65 @@ class JanusVoiceAccessServiceTest {
         assertNull(HttpJanusVoiceAccessService.pluginErrorCode(json(
                 "{\"plugindata\":{\"data\":{\"videoroom\":\"joined\"}}}")));
         assertNull(HttpJanusVoiceAccessService.pluginErrorCode(json("{\"janus\":\"success\"}")));
+    }
+
+    @Test
+    void controlJoinSurfacesAVanishedRoomFromTheAck() {
+        // Live report 2026-10-30: a room the gateway no longer has answers the control join
+        // with 426, which used to read as "no joined event" — indistinguishable from a
+        // transport hiccup, producing a WARN every sweep tick forever. The verdict must be
+        // the explicit VoiceRoomVanishedException instead.
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(json(
+                "{\"plugindata\":{\"data\":{\"videoroom\":\"error\",\"error_code\":426,\"error\":\"No such room\"}}}"));
+
+        assertThrows(VoiceRoomVanishedException.class,
+                () -> service.kickUnknownPublishersNow(6L, java.util.Set.of("alice")));
+    }
+
+    @Test
+    void controlJoinSurfacesAVanishedRoomFromThePoll() {
+        // The same 426 can ride an async event frame instead of the ack.
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(success());
+        when(client.poll(anyLong(), anyString())).thenReturn(List.of(json(
+                "{\"plugindata\":{\"data\":{\"videoroom\":\"error\",\"error_code\":426,\"error\":\"No such room\"}}}")));
+
+        assertThrows(VoiceRoomVanishedException.class,
+                () -> service.kickUnknownPublishersNow(6L, java.util.Set.of("alice")));
+    }
+
+    @Test
+    void probeRoomReportsExistsAndMissing() {
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(json(
+                "{\"plugindata\":{\"data\":{\"videoroom\":\"success\",\"exists\":true}}}"));
+        assertEquals(JanusVoiceAccessService.RoomProbe.EXISTS, service.probeRoom(5L));
+
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(json(
+                "{\"plugindata\":{\"data\":{\"videoroom\":\"success\",\"exists\":false}}}"));
+        assertEquals(JanusVoiceAccessService.RoomProbe.MISSING, service.probeRoom(5L));
+    }
+
+    @Test
+    void revokeTokensForUserRemovesEveryChannelPair() {
+        // The offline-TTL path: a dead client's tokens live under several channels — one
+        // user-wide revoke must clear them all and drop the holder from the registry.
+        when(client.addToken(anyString())).thenReturn(success());
+        String firstToken = service.issueVoiceToken("dead-client", 5L);
+        String secondToken = service.issueVoiceToken("dead-client", 9L);
+
+        service.revokeTokensForUserNow("dead-client");
+
+        verify(client).removeToken(firstToken);
+        verify(client).removeToken(secondToken);
+        assertTrue(service.tokenHoldersByChannel().values().stream().noneMatch(users -> users.contains("dead-client")));
     }
 
     @Test

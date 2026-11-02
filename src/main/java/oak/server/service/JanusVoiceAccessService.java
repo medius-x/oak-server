@@ -76,4 +76,31 @@ public interface JanusVoiceAccessService {
      * like the other forced actions.
      */
     void kickVideoPublishers(long channelId, java.util.Set<String> knownUsernames);
+
+    /** Verdict of {@link #probeRoom}. */
+    enum RoomProbe {
+        /** The room exists on the gateway (or the probe could not tell — the conservative read:
+         *  a transport hiccup must never trigger registry healing). */
+        EXISTS,
+        /** The gateway answered "no such room" — the registries still listing members in it are stale. */
+        MISSING,
+    }
+
+    /**
+     * One cheap synchronous {@code exists} round-trip against the gateway — the sweeps' probe
+     * BEFORE any control join: joining a room the gateway no longer has answers 426 "no such
+     * room", which the passive-join flow cannot distinguish from a silent transport failure
+     * (live report 2026-10-30: a vanished room produced "control join produced no joined
+     * event" WARNs every sweep tick for a whole day). Throws on transport failure — the
+     * caller treats that as {@link RoomProbe#EXISTS}.
+     */
+    RoomProbe probeRoom(long channelId);
+
+    /**
+     * Revokes EVERY gateway token the user still holds, across all channels — the offline-TTL
+     * path of the ghost sweep: a client that died without a leave (crash, kill) leaves its
+     * tokens in the registry forever (49 live tokens on a live server, same report), and no
+     * evict hook ever fires for it.
+     */
+    void revokeTokensForUser(String username);
 }

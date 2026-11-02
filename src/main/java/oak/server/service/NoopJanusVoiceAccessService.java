@@ -67,4 +67,15 @@ public class NoopJanusVoiceAccessService implements JanusVoiceAccessService {
     public void kickVideoPublishers(long channelId, java.util.Set<String> knownUsernames) {
         // No-op.
     }
+
+    @Override
+    public RoomProbe probeRoom(long channelId) {
+        // The test-profile world: rooms never vanish, the sweeps never heal anything.
+        return RoomProbe.EXISTS;
+    }
+
+    @Override
+    public void revokeTokensForUser(String username) {
+        // No-op.
+    }
 }

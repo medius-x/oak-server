@@ -62,6 +62,8 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
     private static final int TOKEN_HISTORY_CAP = 8;
     private static final String PIN_DOMAIN = "oak-voice-pin:";
     private static final String SECRET_DOMAIN = "oak-voice-secret:";
+    /** Videoroom plugin error code: the room id does not exist on the gateway. */
+    private static final int ERROR_NO_SUCH_ROOM = 426;
     private static final SecureRandom RANDOM = new SecureRandom();
 
     private final JanusAdminClient client;
@@ -252,6 +254,43 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
     }
 
     @Override
+    public void revokeTokensForUser(String username) {
+        submitAction(() -> revokeTokensForUserNow(username));
+    }
+
+    /** Synchronous core of {@link #revokeTokensForUser} — package-private for the unit test. */
+    void revokeTokensForUserNow(String username) {
+        List<String> doomed = new ArrayList<>();
+        synchronized (tokensByUserChannel) {
+            Map<Long, Deque<String>> byChannel = tokensByUserChannel.remove(username);
+            if (byChannel != null) {
+                for (Deque<String> tokens : byChannel.values()) {
+                    doomed.addAll(tokens);
+                }
+            }
+        }
+        for (String token : doomed) {
+            try {
+                client.removeToken(token);
+            } catch (RuntimeException failure) {
+                log.debug("Offline-TTL remove_token failed (ignored): {}", failure.getMessage());
+            }
+        }
+    }
+
+    @Override
+    public RoomProbe probeRoom(long channelId) {
+        return probeRoomOnGateway(channelId) ? RoomProbe.EXISTS : RoomProbe.MISSING;
+    }
+
+    /** The {@code exists} probe behind {@link #probeRoom} — one plugin round-trip, no join. */
+    private boolean probeRoomOnGateway(long channelId) {
+        boolean[] exists = {false};
+        withControlHandle(control -> exists[0] = roomExists(control, channelId));
+        return exists[0];
+    }
+
+    @Override
     public void forceKick(long channelId, String username) {
         submitAction(() -> withRoomPublishers(channelId, (publishers, control) -> {
             for (JsonNode publisher : matchingPublishers(publishers, username)) {
@@ -431,7 +470,8 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
     /**
      * Passive-joins the room (pin required — the server derives it), awaits the {@code joined} event
      * and hands its {@code publishers} array to the action. Never throws at the caller: exceptions
-     * bubble to {@link #submitAction}'s WARN.
+     * bubble to {@link #submitAction}'s WARN — except a 426, which surfaces as
+     * {@link VoiceRoomVanishedException} so the sweeps can heal their registries.
      */
     private void withRoomPublishers(long channelId, PublisherAction action) {
         withControlHandle(control -> {
@@ -445,7 +485,10 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
             if (isJanusError(joinAck)) {
                 throw new JanusAdminException("control join failed: " + errorText(joinAck));
             }
-            JsonNode joined = awaitJoined(control);
+            if (pluginErrorCode(joinAck) != null && pluginErrorCode(joinAck) == ERROR_NO_SUCH_ROOM) {
+                throw new VoiceRoomVanishedException(channelId);
+            }
+            JsonNode joined = awaitJoined(control, channelId);
             if (joined == null) {
                 throw new JanusAdminException("control join produced no joined event (room " + channelId + ")");
             }
@@ -453,10 +496,16 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
         });
     }
 
-    /** Polls for the {@code videoroom:"joined"} event (join is async — the answer arrives via long-poll). */
-    private JsonNode awaitJoined(ControlSession control) {
+    /** Polls for the {@code videoroom:"joined"} event (join is async — the answer arrives via long-poll).
+     *  A {@code 426} event frame means the room itself is gone — that verdict travels up as
+     *  {@link VoiceRoomVanishedException}, everything else keeps polling to the budget. */
+    private JsonNode awaitJoined(ControlSession control, long channelId) {
         for (int attempt = 0; attempt < 3; attempt++) {
             for (JsonNode event : client.poll(control.sessionId(), control.token())) {
+                Integer pluginError = pluginErrorCode(event);
+                if (pluginError != null && pluginError == ERROR_NO_SUCH_ROOM) {
+                    throw new VoiceRoomVanishedException(channelId);
+                }
                 JsonNode data = event.path("plugindata").path("data");
                 if ("joined".equals(data.path("videoroom").asText())) {
                     return data;
