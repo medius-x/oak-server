@@ -22,8 +22,11 @@ public final class ServerCapabilities {
      *  the block: every endpoint 404s there).
      *  {@code server-migration} — the direct server-to-server transfer leg (2026-11-02):
      *  one-shot migration token + the token-gated transfer endpoints; without the flag the
-     *  client always routes the archive through the user's computer (the legacy route). */
-    public static final List<String> FEATURES = List.of("backups", "server-migration");
+     *  client always routes the archive through the user's computer (the legacy route).
+     *  {@code afk-roster} — the yellow AFK presence dot (2026-11-04): /topic/voice.afk
+     *  flips + the GET /api/voice/afk snapshot; without the flag the client skips both —
+     *  no idle 404 probes against an older server, dots simply stay green/grey. */
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster");
 
     private ServerCapabilities() {
     }

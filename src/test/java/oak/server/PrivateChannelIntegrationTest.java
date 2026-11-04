@@ -16,6 +16,7 @@ import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.service.RoleSeeder;
+import oak.server.websocket.VoiceAfkStatusPublisher;
 import oak.server.websocket.VoiceMembershipTracker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -76,6 +77,8 @@ class PrivateChannelIntegrationTest {
     private RoleSeeder roleSeeder;
     @Autowired
     private VoiceMembershipTracker voiceTracker;
+    @Autowired
+    private VoiceAfkStatusPublisher afkPublisher;
 
     /** Sessions staged into the voice registry by {@link #stageInVoice} — the tracker is a singleton
      *  of the cached Spring context and NOT transactional, so without this cleanup a keeper's
@@ -344,6 +347,32 @@ class PrivateChannelIntegrationTest {
         mockMvc.perform(get("/api/voice/members").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.channelId==" + voiceId + ")]").isNotEmpty());
+    }
+
+    /** The AFK roster snapshot (2026-11-04) inherits the M3 VIEW filter: an away member of a
+     *  hidden voice room is absent from a plain member's pull, present for the owner. Bob is
+     *  staged straight into the tracker without ever heartbeating — his registry entry is
+     *  EPOCH, so ANY timeout counts him as away after one publisher tick. */
+    @Test
+    void afkRosterSnapshotIsViewFiltered() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        registerAndLogin("bob", "supersecret");
+        String carolToken = registerAndLogin("carol", "supersecret");
+        Long voiceId = createChannel(ownerToken, "hidden-voice", "VOICE");
+        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
+        Channel voiceChannel = channelRepository.findById(voiceId).orElseThrow();
+        channelRoleOverrideRepository.saveAndFlush(
+                new ChannelRoleOverride(voiceChannel, everyone, 0L, Permission.VIEW_CHANNEL.bit));
+        stageInVoice("bob", voiceId);
+
+        afkPublisher.publishAfkTransitions();
+
+        mockMvc.perform(get("/api/voice/afk").header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isEmpty());
+        mockMvc.perform(get("/api/voice/afk").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0]").value("bob"));
     }
 
     // --- helpers (the RbacIntegrationTest idiom) ---

@@ -7,6 +7,7 @@ import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.service.AuthorizationService;
+import oak.server.websocket.VoiceAfkStatusPublisher;
 import oak.server.websocket.VoiceMembershipTracker;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -16,6 +17,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Snapshot of every voice room's current members, VIEWER-FILTERED (security round 5, M3): a
@@ -34,6 +36,7 @@ public class VoiceMembershipController {
     private final VoiceMembershipTracker tracker;
     private final AuthorizationService auth;
     private final ChannelRepository channelRepository;
+    private final VoiceAfkStatusPublisher afkPublisher;
 
     @GetMapping("/members")
     public List<VoiceChannelMembersDto> members(@AuthenticationPrincipal UserDetails principal) {
@@ -45,6 +48,35 @@ public class VoiceMembershipController {
             if (channel != null && viewer != null
                     && auth.hasInChannel(viewer, channel, Permission.VIEW_CHANNEL)) {
                 visible.add(room);
+            }
+        }
+        return visible;
+    }
+
+    /**
+     * Snapshot of the AFK roster dimension (user request 2026-11-04): usernames whose
+     * voice-activity heartbeat is older than the AFK timeout, VIEW-filtered per room like
+     * {@link #members} — same M3 residual on the live side ({@code /topic/voice.afk} stays
+     * broadcast). Seeds the roster's yellow dots for a fresh connection; the flips afterwards
+     * ride the topic.
+     */
+    @GetMapping("/afk")
+    public List<String> afk(@AuthenticationPrincipal UserDetails principal) {
+        User viewer = auth.findUser(principal.getUsername()).orElse(null);
+        if (viewer == null) {
+            return List.of();
+        }
+        Set<String> away = afkPublisher.currentAfk();
+        List<String> visible = new ArrayList<>();
+        for (VoiceChannelMembersDto room : tracker.snapshot()) {
+            Channel channel = channelRepository.findById(room.channelId()).orElse(null);
+            if (channel == null || !auth.hasInChannel(viewer, channel, Permission.VIEW_CHANNEL)) {
+                continue;
+            }
+            for (String username : room.usernames()) {
+                if (away.contains(username)) {
+                    visible.add(username);
+                }
             }
         }
         return visible;
