@@ -16,7 +16,7 @@ import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.service.RoleSeeder;
-import oak.server.websocket.VoiceAfkStatusPublisher;
+import oak.server.websocket.RosterAfkTracker;
 import oak.server.websocket.VoiceMembershipTracker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -24,10 +24,17 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -78,17 +85,24 @@ class PrivateChannelIntegrationTest {
     @Autowired
     private VoiceMembershipTracker voiceTracker;
     @Autowired
-    private VoiceAfkStatusPublisher afkPublisher;
+    private RosterAfkTracker rosterAfkTracker;
 
     /** Sessions staged into the voice registry by {@link #stageInVoice} — the tracker is a singleton
      *  of the cached Spring context and NOT transactional, so without this cleanup a keeper's
      *  session would leak into every later test in the class. */
     private final List<String> stagedVoiceSessions = new ArrayList<>();
 
+    /** Sessions staged into the roster AFK tracker — same singleton non-transactional leak,
+     *  dropped through a real disconnect event (the only removal path). */
+    private final List<String> stagedAfkSessions = new ArrayList<>();
+
     @AfterEach
     void clearStagedVoiceSessions() {
         stagedVoiceSessions.forEach(voiceTracker::exit);
         stagedVoiceSessions.clear();
+        stagedAfkSessions.forEach(sessionId ->
+                rosterAfkTracker.onDisconnect(afkDisconnect(sessionId)));
+        stagedAfkSessions.clear();
     }
 
     /** A database seeded before the VIEW_CHANNEL bit existed would turn every channel invisible for
@@ -349,27 +363,26 @@ class PrivateChannelIntegrationTest {
                 .andExpect(jsonPath("$[?(@.channelId==" + voiceId + ")]").isNotEmpty());
     }
 
-    /** The AFK roster snapshot (2026-11-04) inherits the M3 VIEW filter: an away member of a
-     *  hidden voice room is absent from a plain member's pull, present for the owner. Bob is
-     *  staged straight into the tracker without ever heartbeating — his registry entry is
-     *  EPOCH, so ANY timeout counts him as away after one publisher tick. */
+    /** The AFK roster snapshot (2026-11-04, reworked the same day) is PRESENCE-scoped, not
+     *  voice-scoped: a member sitting in NO voice room still shows up when their client
+     *  reported them away, a plain member reads the same set as the owner (the dimension
+     *  carries no channel metadata — the old VIEW filter had nothing left to protect), and
+     *  the endpoint stays JWT-gated. The report is staged straight into the tracker — the
+     *  real client path is the STOMP handler (not exercisable via MockMvc). */
     @Test
-    void afkRosterSnapshotIsViewFiltered() throws Exception {
+    void afkRosterSnapshotIsPresenceScoped() throws Exception {
         String ownerToken = registerAndLogin("alice", "supersecret");
         registerAndLogin("bob", "supersecret");
         String carolToken = registerAndLogin("carol", "supersecret");
-        Long voiceId = createChannel(ownerToken, "hidden-voice", "VOICE");
-        Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
-        Channel voiceChannel = channelRepository.findById(voiceId).orElseThrow();
-        channelRoleOverrideRepository.saveAndFlush(
-                new ChannelRoleOverride(voiceChannel, everyone, 0L, Permission.VIEW_CHANNEL.bit));
-        stageInVoice("bob", voiceId);
 
-        afkPublisher.publishAfkTransitions();
+        rosterAfkTracker.setAway("test-session-bob", "bob", true);
+        stagedAfkSessions.add("test-session-bob");
 
+        mockMvc.perform(get("/api/voice/afk"))
+                .andExpect(status().isUnauthorized());
         mockMvc.perform(get("/api/voice/afk").header("Authorization", "Bearer " + carolToken))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$").isEmpty());
+                .andExpect(jsonPath("$[0]").value("bob"));
         mockMvc.perform(get("/api/voice/afk").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0]").value("bob"));
@@ -504,6 +517,16 @@ class PrivateChannelIntegrationTest {
         String sessionId = "test-session-" + username;
         voiceTracker.enter(sessionId, username, channelId);
         stagedVoiceSessions.add(sessionId);
+    }
+
+    /** A STOMP disconnect frame for the AFK-tracker cleanup (the PresenceTrackerTest idiom). */
+    private static SessionDisconnectEvent afkDisconnect(String sessionId) {
+        StompHeaderAccessor accessor = StompHeaderAccessor.create(StompCommand.DISCONNECT);
+        accessor.setLeaveMutable(true);
+        accessor.setSessionId(sessionId);
+        accessor.setUser(new UsernamePasswordAuthenticationToken("unused", null, List.of()));
+        Message<byte[]> message = MessageBuilder.createMessage(new byte[0], accessor.getMessageHeaders());
+        return new SessionDisconnectEvent(new Object(), message, sessionId, CloseStatus.NORMAL);
     }
 
     private List<String> voiceSnapshotUsernames(Long channelId) {
