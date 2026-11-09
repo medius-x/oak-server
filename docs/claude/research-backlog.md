@@ -1,0 +1,49 @@
+# Проработки фич — НЕ реализовано (oak-server)
+
+Выкладки для старта раунда. Оценки: A — M (2 серверные фазы), B — M (2–3).
+Полные выкладки с фазами и клиентскими половинами — `../../../space-client/docs/claude/research-backlog.md`.
+
+## A. Второй режим очистки диска (аттачменты без сноса сообщений)
+
+Новый шаг `StorageGcService.runOnce` МЕЖДУ `sweepOrphans` и `purgeBelowLowWatermark` —
+detachAttachments: помечать аттачи старейших сообщений `purgedAt` (`AttachmentRef` +=
+append-only поле в JSON `messages.attachments`; МИГРАЦИЙ НЕТ — `AttachmentListCodec`
+lenient читает старые строки с null) → после коммита посмертный `attachmentExists`
+(форвард, ссылающийся на ключ, держит объект — реюз механики purgeBatch) →
+`objectStore.delete`. Гнать до low watermark; иммунные исчерпаны → прежний purge сообщений.
+
+- **ВАЖНО:** `attachmentExists`/`likePattern` при пометке обязан перестать матчить ключ,
+  иначе orphan-свип следующего прогона удалит объект повторно (безвредно, но счётчики
+  соврут). Рекомендация: в LIKE-паттерн ключа добавляется маркер, которого в помеченном
+  JSON нет (либо отдельный счётчик).
+- Иммунитет: режим count (аттачи последних N сообщений с аттачами по id desc) | age
+  (моложе X часов) — колонки `ServerProfile` рядом с watermark'ами + расширение
+  `PUT /api/server/storage` (валидация как high/low); `StorageGcReport` +=
+  detachedAttachments/detachedBytes.
+- Тесты: расширение `StoragePurgeFlowTest` (detach-флоу на H2: пометка+удаление, иммунитет,
+  переход к purge при исчерпании, форвард держит объект) + юниты через существующий seam
+  `runOnce(trigger, DoubleSupplier)`.
+- Клиентская половина (tombstone-рендер purgedAt) обязательна — см. space-client.
+
+## B. Bot API
+
+- Модель: `users += bot boolean + bot_owner_id` + таблица `bot_tokens` (SHA-256-хеш —
+  `RefreshToken`-калька; created_at/revoked_at; identity-блок по рецепту миграций).
+- Авторизация: тот же `Authorization: Bearer` — в `JwtAuthenticationFilter` ПОСЛЕ провалки
+  JWT lookup по хешу (in-memory кэш хешей, инвалидация на revoke); бан/removed-гейты
+  фильтра работают as-is.
+- `POST /api/bots {username, nickname}` гейт MANAGE_MEMBERS (или OWNER-only — развилка
+  раунда) → 201 `{UserResponse, token-один-раз}`; `DELETE /api/bots/{id}` (revoke +
+  member-remove механика); перевыпуск токена PUT.
+- Права бота — ШТАТНЫЕ роли через assignRoles (отдельная система прав не нужна;
+  DM-запреты/канальные оверрайды достаются даром).
+- Rate limit пер-бот на POST messages: `LoginRateLimiter`-калька (~30/10 мин → 429).
+- STOMP as-is: `AuthChannelInterceptor` резолвит бота тем же хедером;
+  `ChannelSubscriptionInterceptor` гейтит по READ_MESSAGE_HISTORY как всем.
+- Wire: `UserSummary`/`MemberResponse` += `bot` (append-only, парный деплой — клиентский
+  бейдж BOT). Дока: docs/BOT-API.md + echo-бот на node без зависимостей.
+
+## C. Бэкап/restore — РЕАЛИЗОВАНО
+
+Проработка выполнена и закрыта раундом «Бэкап сервера + restore при провижининге +
+Migrate» — актуальные решения в `infra-releases.md`.
