@@ -41,8 +41,11 @@ public interface MessageRepository extends JpaRepository<Message, Long> {
     long countByChannelIdAndPinnedTrue(Long channelId);
 
     /** Unread count for a channel relative to a read floor (the user's {@code lastReadMessageId};
-     *  pass 0 to count everything when nothing has been read yet). */
-    long countByChannelIdAndIdGreaterThan(Long channelId, Long id);
+     *  pass 0 to count everything when nothing has been read yet), EXCLUDING the user's own
+     *  messages (Discord semantics: sending never marks the channel unread for the sender —
+     *  live report 2026-11-10: one's own last DM lit the Home badge red after every client
+     *  restart). {@code countMentionsOf} has always skipped own messages the same way. */
+    long countByChannelIdAndIdGreaterThanAndAuthor_IdNot(Long channelId, Long id, Long authorId);
 
     /** Total message count of a channel — the discussion reply count. */
     long countByChannelId(Long channelId);

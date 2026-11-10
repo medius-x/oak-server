@@ -1,6 +1,13 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import oak.server.entity.Channel;
+import oak.server.entity.ChannelParticipant;
+import oak.server.entity.ChannelType;
+import oak.server.entity.User;
+import oak.server.repository.ChannelParticipantRepository;
+import oak.server.repository.ChannelRepository;
+import oak.server.repository.UserRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -42,6 +49,15 @@ class ReadStateIntegrationTest {
     @Autowired
     private TestInvites testInvites;
 
+    @Autowired
+    private ChannelRepository channelRepository;
+
+    @Autowired
+    private ChannelParticipantRepository participantRepository;
+
+    @Autowired
+    private UserRepository userRepository;
+
     @Test
     void snapshotCountsUnreadAndAckResetsIt() throws Exception {
         String alice = register("alice");              // OWNER
@@ -69,6 +85,34 @@ class ReadStateIntegrationTest {
 
         assertEquals(1, snapshotField(bob, general, "unreadCount"));
         assertEquals(1, snapshotField(bob, general, "mentionCount"));
+    }
+
+    @Test
+    void ownMessagesNeverCountAsUnreadAfterRestart() throws Exception {
+        // The live report 2026-11-10: one's own LAST DM lit the Home badge red after every
+        // client restart — the snapshot counted own messages past the read floor.
+        String alice = register("alice");              // OWNER
+        register("bob");
+        long dmId = createDmChannel("alice", "bob");
+        long general = createChannel(alice, "general");
+
+        // alice's OWN messages in both a DM and a public channel: 0 unread for her.
+        send(alice, dmId, "my own dm line");
+        send(alice, general, "my own channel line");
+        assertEquals(0, snapshotField(alice, dmId, "unreadCount"));
+        assertEquals(0, snapshotField(alice, general, "unreadCount"));
+
+        // bob's OWN message follows in the DM: for ALICE it becomes 1 unread, and for BOB
+        // his own send adds NOTHING — he still sees exactly alice's unread line (a DM is
+        // never read-seeded at registration, so 1, not 0). (The DM-equals-mention rule is
+        // the CLIENT's live handling; the snapshot's mentionCount stays explicit-@ only,
+        // so a bare "answer" mentions nobody.)
+        String bob = login("bob");
+        assertEquals(1, snapshotField(bob, dmId, "unreadCount")); // alice's line, unread for bob
+        send(bob, dmId, "answer");
+        assertEquals(1, snapshotField(alice, dmId, "unreadCount"));
+        assertEquals(0, snapshotField(alice, dmId, "mentionCount"));
+        assertEquals(1, snapshotField(bob, dmId, "unreadCount")); // own send added nothing
     }
 
     @Test
@@ -150,6 +194,26 @@ class ReadStateIntegrationTest {
                 .andExpect(status().isOk())
                 .andReturn();
         return JsonPath.read(login.getResponse().getContentAsString(), "$.token");
+    }
+
+    private String login(String username) throws Exception {
+        MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(String.format("{\"username\":\"%s\",\"password\":\"supersecret\"}", username)))
+                .andExpect(status().isOk())
+                .andReturn();
+        return JsonPath.read(login.getResponse().getContentAsString(), "$.token");
+    }
+
+    /** The DmPlumbingIntegrationTest seeding recipe: a DM channel row with both participants. */
+    private long createDmChannel(String usernameA, String usernameB) {
+        User userA = userRepository.findByUsername(usernameA).orElseThrow();
+        User userB = userRepository.findByUsername(usernameB).orElseThrow();
+        Channel dm = new Channel("dm", ChannelType.DM);
+        dm.setDmKey(Math.min(userA.getId(), userB.getId()) + "_" + Math.max(userA.getId(), userB.getId()));
+        channelRepository.save(dm);
+        participantRepository.save(new ChannelParticipant(dm, userA));
+        participantRepository.save(new ChannelParticipant(dm, userB));
+        return dm.getId();
     }
 
     private static String jsonQuote(String value) {

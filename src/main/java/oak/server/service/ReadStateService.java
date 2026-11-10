@@ -99,7 +99,12 @@ public class ReadStateService {
             Long lastRead = readStateRepository.findByUserIdAndChannelId(user.getId(), channel.getId())
                     .map(ChannelReadState::getLastReadMessageId).orElse(null);
             long readFloor = lastRead == null ? 0L : lastRead;
-            long unreadCount = messageRepository.countByChannelIdAndIdGreaterThan(channel.getId(), readFloor);
+            // OWN messages never count as unread (Discord semantics — countMentionsOf has
+            // always skipped them): otherwise one's own last DM lights the Home badge after
+            // every restart (live report 2026-11-10). The read pointer itself stays put —
+            // an unread reply after one's own message still counts.
+            long unreadCount = messageRepository.countByChannelIdAndIdGreaterThanAndAuthor_IdNot(
+                    channel.getId(), readFloor, user.getId());
             Long lastMessageId = messageRepository.findTopByChannelIdOrderByIdDesc(channel.getId())
                     .map(Message::getId).orElse(null);
             long mentionCount = unreadCount == 0 ? 0
