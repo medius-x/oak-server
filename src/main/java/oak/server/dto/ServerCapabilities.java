@@ -29,8 +29,12 @@ public final class ServerCapabilities {
      *  {@code share-congestion} — the viewer→publisher congestion relay (2026-11-11):
      *  SEND /app/share.congestion + /user/queue/share.congestion delivery, feeding the
      *  publisher's adaptive share-bitrate ladder; without the flag the client never
-     *  sends the reports (the ladder still runs on PLI + RTT alone). */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion");
+     *  sends the reports (the ladder still runs on PLI + RTT alone).
+     *  {@code share-source-state} — the minimized-share relay (2026-11-11):
+     *  SEND /app/share.source-state → /topic/share.state, letting the viewers'
+     *  pop-out caption a frozen (minimized) share frame; without the flag the
+     *  client skips both the reports and the topic. */
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state");
 
     private ServerCapabilities() {
     }

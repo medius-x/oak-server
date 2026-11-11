@@ -68,16 +68,18 @@ class ServerProfileIntegrationTest {
                 // 2026-10-28), "server-migration" (the direct transfer leg, 2026-11-02;
                 // without it the client routes archives through the user's computer),
                 // "afk-roster" (the yellow presence dot, 2026-11-04),
-                // "presence-activity" (the roster activity lines, 2026-11-10) and
-                // "share-congestion" (the viewer→publisher loss relay, 2026-11-11).
+                // "presence-activity" (the roster activity lines, 2026-11-10),
+                // "share-congestion" (the viewer→publisher loss relay, 2026-11-11) and
+                // "share-source-state" (the minimized-share relay, 2026-11-11).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(5))
+                .andExpect(jsonPath("$.capabilities.length()").value(6))
                 .andExpect(jsonPath("$.capabilities[0]").value("backups"))
                 .andExpect(jsonPath("$.capabilities[1]").value("server-migration"))
                 .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"))
                 .andExpect(jsonPath("$.capabilities[3]").value("presence-activity"))
-                .andExpect(jsonPath("$.capabilities[4]").value("share-congestion"));
+                .andExpect(jsonPath("$.capabilities[4]").value("share-congestion"))
+                .andExpect(jsonPath("$.capabilities[5]").value("share-source-state"));
     }
 
     @Test

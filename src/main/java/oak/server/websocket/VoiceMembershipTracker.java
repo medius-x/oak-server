@@ -178,6 +178,20 @@ public class VoiceMembershipTracker {
         }
     }
 
+    /** True when the username sits in ANY live voice channel (the share
+     *  source-state relay's gate, 2026-11-11: a minimized-share flip is only
+     *  meaningful from someone actually sharing inside a room). */
+    public boolean isInVoice(String username) {
+        synchronized (lock) {
+            for (Map<String, Integer> users : channelUserCount.values()) {
+                if (users.getOrDefault(username, 0) > 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     public boolean isMuted(Long channelId, String username) {
         synchronized (lock) {
             return stateIn(selfMutedByChannel, channelId, username)
