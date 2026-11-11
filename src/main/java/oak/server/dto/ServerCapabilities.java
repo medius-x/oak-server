@@ -26,7 +26,7 @@ public final class ServerCapabilities {
      *  {@code afk-roster} — the yellow AFK presence dot (2026-11-04): /topic/voice.afk
      *  flips + the GET /api/voice/afk snapshot; without the flag the client skips both —
      *  no idle 404 probes against an older server, dots simply stay green/grey. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster");
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity");
 
     private ServerCapabilities() {
     }

@@ -1,6 +1,8 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import oak.server.dto.PresenceActivity;
+import oak.server.websocket.PresenceActivityTracker;
 import oak.server.dto.VoiceChannelMembersDto;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelRoleOverride;
@@ -86,6 +88,8 @@ class PrivateChannelIntegrationTest {
     private VoiceMembershipTracker voiceTracker;
     @Autowired
     private RosterAfkTracker rosterAfkTracker;
+    @Autowired
+    private PresenceActivityTracker presenceActivityTracker;
 
     /** Sessions staged into the voice registry by {@link #stageInVoice} — the tracker is a singleton
      *  of the cached Spring context and NOT transactional, so without this cleanup a keeper's
@@ -96,6 +100,9 @@ class PrivateChannelIntegrationTest {
      *  dropped through a real disconnect event (the only removal path). */
     private final List<String> stagedAfkSessions = new ArrayList<>();
 
+    /** Same leak guard for the presence-activity tracker. */
+    private final List<String> stagedActivitySessions = new ArrayList<>();
+
     @AfterEach
     void clearStagedVoiceSessions() {
         stagedVoiceSessions.forEach(voiceTracker::exit);
@@ -103,6 +110,9 @@ class PrivateChannelIntegrationTest {
         stagedAfkSessions.forEach(sessionId ->
                 rosterAfkTracker.onDisconnect(afkDisconnect(sessionId)));
         stagedAfkSessions.clear();
+        stagedActivitySessions.forEach(sessionId ->
+                presenceActivityTracker.onDisconnect(afkDisconnect(sessionId)));
+        stagedActivitySessions.clear();
     }
 
     /** A database seeded before the VIEW_CHANNEL bit existed would turn every channel invisible for
@@ -386,6 +396,24 @@ class PrivateChannelIntegrationTest {
         mockMvc.perform(get("/api/voice/afk").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0]").value("bob"));
+    }
+
+    @Test
+    void presenceActivitySnapshotIsAuthScoped() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        registerAndLogin("bob", "supersecret");
+
+        presenceActivityTracker.setActivity("test-session-bob", "bob",
+                new PresenceActivity("playing", "CS2"));
+        stagedActivitySessions.add("test-session-bob");
+
+        mockMvc.perform(get("/api/presence/activities"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/presence/activities").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].username").value("bob"))
+                .andExpect(jsonPath("$[0].activity.type").value("playing"))
+                .andExpect(jsonPath("$[0].activity.name").value("CS2"));
     }
 
     // --- helpers (the RbacIntegrationTest idiom) ---

@@ -66,14 +66,16 @@ class ServerProfileIntegrationTest {
                 // ("dev" when build-info is absent — the unpackaged test classpath),
                 // and the capabilities catalogue rides along — "backups" (backup round
                 // 2026-10-28), "server-migration" (the direct transfer leg, 2026-11-02;
-                // without it the client routes archives through the user's computer)
-                // and "afk-roster" (the yellow presence dot, 2026-11-04).
+                // without it the client routes archives through the user's computer),
+                // "afk-roster" (the yellow presence dot, 2026-11-04) and
+                // "presence-activity" (the roster activity lines, 2026-11-10).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(3))
+                .andExpect(jsonPath("$.capabilities.length()").value(4))
                 .andExpect(jsonPath("$.capabilities[0]").value("backups"))
                 .andExpect(jsonPath("$.capabilities[1]").value("server-migration"))
-                .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"));
+                .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"))
+                .andExpect(jsonPath("$.capabilities[3]").value("presence-activity"));
     }
 
     @Test

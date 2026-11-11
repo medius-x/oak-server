@@ -55,3 +55,17 @@
 ## Смоук-фикс: DISCUSSION в DM-списке
 
 `DmService.listMine` без фильтра типа (трекинг тредов — те же `channel_participants`) → треды в `GET /api/channels/dm` как «DM с самим собой»; фикс — гейт `type ∈ {DM, GROUP_DM}`.
+
+## Активности ростера («играет в …», 2026-11-10)
+
+Presence-класс (как жёлтая AFK-точка): клиент сам решает и шлёт ЯВНЫЕ переходы
+`/app/presence.activity` `{activity: {type, name} | null}` (principal штампует сервер;
+type ∈ {playing, listening, watching, streaming, competing}, name trim 1..64; мусор —
+тихий no-op). `PresenceActivityTracker` (RosterAfkTracker-идиома с Map-вердиктом вместо
+boolean): per-session отчёты, юзерский вердикт = ПЕРВАЯ непустая среди живых сессий
+(в порядке прихода — детерминизм); LIVE-карта (снапшот `GET /api/presence/activities`)
+и PUBLISHED-карта (дедуп переходов) РАЗДЕЛЕНЫ — dampening (1 с/юзер) глотает только
+broadcast, снапшот честен; публикация переходов `/topic/presence.activity`
+`PresenceActivityEvent{username, activity|null}` вне лока; последняя сессия юзера
+уходит → строка тихо гаснет (OFFLINE рассказывает; клиент при OFFLINE гасит локально).
+Ничего не персистится. Флаг presence-activity гейтит клиентский фетч+подписку+репорты; клиентская половина — в space-client/docs/claude/feature-log-recent.md.

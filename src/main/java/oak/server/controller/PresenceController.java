@@ -1,6 +1,8 @@
 package oak.server.controller;
 
 import lombok.RequiredArgsConstructor;
+import oak.server.dto.PresenceActivityEvent;
+import oak.server.websocket.PresenceActivityTracker;
 import oak.server.websocket.PresenceTracker;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -20,9 +22,20 @@ import java.util.List;
 public class PresenceController {
 
     private final PresenceTracker presenceTracker;
+    private final PresenceActivityTracker activityTracker;
 
     @GetMapping
     public List<String> onlineUsernames() {
         return presenceTracker.onlineUsernames().stream().sorted().toList();
+    }
+
+    /**
+     * Every online user's CURRENT activity line (users with a line only) — the roster's
+     * activity seed; live deltas ride {@code /topic/presence.activity}. The user-set
+     * activity is a transit presence state, so an unauthenticated caller gets nothing.
+     */
+    @GetMapping("/activities")
+    public List<PresenceActivityEvent> activities() {
+        return activityTracker.currentActivities();
     }
 }
