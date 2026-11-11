@@ -23,9 +23,11 @@ import java.util.Set;
 @Slf4j
 public class PresenceActivityHandler {
 
-    /** The closed verb set (the client localizes each prefix; the server stores the key). */
+    /** The closed verb set (the client localizes each prefix; the server stores the key).
+     *  "custom" is the empty-prefix kind (user request 2026-11-11): the line is
+     *  the bare name — an older server without it drops such reports silently. */
     static final Set<String> ACTIVITY_TYPES = Set.of(
-            "playing", "listening", "watching", "streaming", "competing");
+            "playing", "listening", "watching", "streaming", "competing", "custom");
 
     static final int NAME_MAX_LENGTH = 64;
 

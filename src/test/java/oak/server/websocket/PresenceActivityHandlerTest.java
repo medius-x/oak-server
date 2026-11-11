@@ -45,6 +45,12 @@ class PresenceActivityHandlerTest {
     }
 
     @Test
+    void theEmptyPrefixCustomKindPassesValidation() {
+        handler.report(new PresenceActivityReport(new PresenceActivity("custom", "CS2")), principal, "s1");
+        assertEquals("custom", tracker.currentActivities().get(0).activity().type());
+    }
+
+    @Test
     void aBlankOrOversizedNameIsASilentNoOp() {
         handler.report(new PresenceActivityReport(new PresenceActivity("playing", "   ")), principal, "s1");
         handler.report(new PresenceActivityReport(new PresenceActivity("playing", "x".repeat(65))), principal, "s1");
