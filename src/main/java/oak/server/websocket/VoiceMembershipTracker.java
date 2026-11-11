@@ -163,6 +163,21 @@ public class VoiceMembershipTracker {
         }
     }
 
+    /** True when both usernames sit in the SAME live voice channel (the share
+     *  congestion relay's audience gate, 2026-11-11: only a co-present viewer
+     *  may report loss on a publisher's share — a random user of the instance
+     *  must not be able to push the publisher's adaptive bitrate ladder down). */
+    public boolean sharesVoiceRoom(String first, String second) {
+        synchronized (lock) {
+            for (Map<String, Integer> users : channelUserCount.values()) {
+                if (users.getOrDefault(first, 0) > 0 && users.getOrDefault(second, 0) > 0) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
     public boolean isMuted(Long channelId, String username) {
         synchronized (lock) {
             return stateIn(selfMutedByChannel, channelId, username)

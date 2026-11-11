@@ -25,8 +25,12 @@ public final class ServerCapabilities {
      *  client always routes the archive through the user's computer (the legacy route).
      *  {@code afk-roster} — the yellow AFK presence dot (2026-11-04): /topic/voice.afk
      *  flips + the GET /api/voice/afk snapshot; without the flag the client skips both —
-     *  no idle 404 probes against an older server, dots simply stay green/grey. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity");
+     *  no idle 404 probes against an older server, dots simply stay green/grey.
+     *  {@code share-congestion} — the viewer→publisher congestion relay (2026-11-11):
+     *  SEND /app/share.congestion + /user/queue/share.congestion delivery, feeding the
+     *  publisher's adaptive share-bitrate ladder; without the flag the client never
+     *  sends the reports (the ladder still runs on PLI + RTT alone). */
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion");
 
     private ServerCapabilities() {
     }
