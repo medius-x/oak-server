@@ -18,7 +18,7 @@ import oak.server.repository.ChannelUserOverrideRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.service.RoleSeeder;
-import oak.server.websocket.RosterAfkTracker;
+import oak.server.websocket.RosterStatusTracker;
 import oak.server.websocket.VoiceMembershipTracker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -87,7 +87,7 @@ class PrivateChannelIntegrationTest {
     @Autowired
     private VoiceMembershipTracker voiceTracker;
     @Autowired
-    private RosterAfkTracker rosterAfkTracker;
+    private RosterStatusTracker rosterStatusTracker;
     @Autowired
     private PresenceActivityTracker presenceActivityTracker;
 
@@ -108,7 +108,7 @@ class PrivateChannelIntegrationTest {
         stagedVoiceSessions.forEach(voiceTracker::exit);
         stagedVoiceSessions.clear();
         stagedAfkSessions.forEach(sessionId ->
-                rosterAfkTracker.onDisconnect(afkDisconnect(sessionId)));
+                rosterStatusTracker.onDisconnect(afkDisconnect(sessionId)));
         stagedAfkSessions.clear();
         stagedActivitySessions.forEach(sessionId ->
                 presenceActivityTracker.onDisconnect(afkDisconnect(sessionId)));
@@ -385,7 +385,7 @@ class PrivateChannelIntegrationTest {
         registerAndLogin("bob", "supersecret");
         String carolToken = registerAndLogin("carol", "supersecret");
 
-        rosterAfkTracker.setAway("test-session-bob", "bob", true);
+        rosterStatusTracker.setAway("test-session-bob", "bob", true);
         stagedAfkSessions.add("test-session-bob");
 
         mockMvc.perform(get("/api/voice/afk"))
@@ -396,6 +396,29 @@ class PrivateChannelIntegrationTest {
         mockMvc.perform(get("/api/voice/afk").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0]").value("bob"));
+    }
+
+    /** The STATUS dimension's snapshot (the status menu, 2026-11-17): the away and dnd
+     *  sets as two plain lists (presence-class, no VIEW filtering — a plain member reads
+     *  what the owner reads), and the endpoint stays JWT-gated. Staged straight into the
+     *  tracker — the real client path is the STOMP handler (not exercisable via MockMvc). */
+    @Test
+    void rosterStatusSnapshotServesAwayAndDndSets() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        registerAndLogin("bob", "supersecret");
+        registerAndLogin("carol", "supersecret");
+
+        rosterStatusTracker.setStatus("test-status-bob", "bob", "away");
+        rosterStatusTracker.setStatus("test-status-carol", "carol", "dnd");
+        stagedAfkSessions.add("test-status-bob");
+        stagedAfkSessions.add("test-status-carol");
+
+        mockMvc.perform(get("/api/presence/status"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/presence/status").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.away[0]").value("bob"))
+                .andExpect(jsonPath("$.dnd[0]").value("carol"));
     }
 
     @Test

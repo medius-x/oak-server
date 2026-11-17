@@ -7,7 +7,7 @@ import oak.server.entity.Permission;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
 import oak.server.service.AuthorizationService;
-import oak.server.websocket.RosterAfkTracker;
+import oak.server.websocket.RosterStatusTracker;
 import oak.server.websocket.VoiceMembershipTracker;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.core.userdetails.UserDetails;
@@ -35,7 +35,7 @@ public class VoiceMembershipController {
     private final VoiceMembershipTracker tracker;
     private final AuthorizationService auth;
     private final ChannelRepository channelRepository;
-    private final RosterAfkTracker rosterAfkTracker;
+    private final RosterStatusTracker rosterStatusTracker;
 
     @GetMapping("/members")
     public List<VoiceChannelMembersDto> members(@AuthenticationPrincipal UserDetails principal) {
@@ -53,15 +53,13 @@ public class VoiceMembershipController {
     }
 
     /**
-     * Snapshot of the AFK roster dimension (user request 2026-11-04, reworked the same
-     * day): usernames whose CLIENT reported them away ({@code /app/roster.afk} — the
-     * decision is client-side, presence-class, independent of voice rooms and of the
-     * AFK-channel sweep timeout). No VIEW filtering anymore: the dimension carries no
-     * channel metadata, exactly like {@code /topic/presence} online/offline. Seeds the
-     * roster's yellow dots for a fresh connection; the flips afterwards ride the topic.
+     * Snapshot of the AFK roster dimension — the LEGACY pull side kept for 0.5.x
+     * clients (its live wire /topic/voice.afk is still published too, bridged off
+     * the status model by {@link RosterStatusTracker}). New clients seed from
+     * {@code GET /api/presence/status} instead.
      */
     @GetMapping("/afk")
     public List<String> afk() {
-        return List.copyOf(rosterAfkTracker.currentAfk());
+        return List.copyOf(rosterStatusTracker.currentAfk());
     }
 }

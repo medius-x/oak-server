@@ -73,13 +73,14 @@ class ServerProfileIntegrationTest {
                 // "share-source-state" (the minimized-share relay, 2026-11-11).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(6))
+                .andExpect(jsonPath("$.capabilities.length()").value(7))
                 .andExpect(jsonPath("$.capabilities[0]").value("backups"))
                 .andExpect(jsonPath("$.capabilities[1]").value("server-migration"))
                 .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"))
                 .andExpect(jsonPath("$.capabilities[3]").value("presence-activity"))
                 .andExpect(jsonPath("$.capabilities[4]").value("share-congestion"))
-                .andExpect(jsonPath("$.capabilities[5]").value("share-source-state"));
+                .andExpect(jsonPath("$.capabilities[5]").value("share-source-state"))
+                .andExpect(jsonPath("$.capabilities[6]").value("roster-status"));
     }
 
     @Test

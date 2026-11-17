@@ -26,6 +26,7 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -95,6 +96,51 @@ class PresenceTrackerTest {
 
         // exactly two ONLINE pushes: alice once (despite the duplicate) and bob once
         verify(messagingTemplate, times(2)).convertAndSend(eq(PresenceTracker.PRESENCE_TOPIC), any(PresenceEvent.class));
+    }
+
+    // --- the INVISIBLE mask (the status menu, 2026-11-17) ---
+
+    @Test
+    void maskingAPresentUserPublishesOfflineAndHidesThemFromTheSnapshot() {
+        tracker.onConnect(connect("s1", "alice"));
+        assertEquals(Set.of("alice"), tracker.onlineUsernames());
+
+        tracker.setMasked("alice", true);
+        assertEquals(Set.of(), tracker.onlineUsernames()); // the snapshot hides her
+        ArgumentCaptor<PresenceEvent> events = ArgumentCaptor.forClass(PresenceEvent.class);
+        verify(messagingTemplate, times(2)).convertAndSend(eq(PresenceTracker.PRESENCE_TOPIC), events.capture());
+        assertEquals(PresenceStatus.OFFLINE, events.getAllValues().get(1).status()); // the world saw her leave
+
+        tracker.setMasked("alice", true); // repeat — idempotent, no extra frame
+        verify(messagingTemplate, times(2)).convertAndSend(eq(PresenceTracker.PRESENCE_TOPIC), any(PresenceEvent.class));
+    }
+
+    @Test
+    void unmaskingAPresentUserPublishesOnlineAgain() {
+        tracker.onConnect(connect("s1", "alice"));
+        tracker.setMasked("alice", true);
+        tracker.setMasked("alice", false);
+        assertEquals(Set.of("alice"), tracker.onlineUsernames());
+
+        ArgumentCaptor<PresenceEvent> events = ArgumentCaptor.forClass(PresenceEvent.class);
+        verify(messagingTemplate, times(3)).convertAndSend(eq(PresenceTracker.PRESENCE_TOPIC), events.capture());
+        assertEquals(PresenceStatus.ONLINE, events.getAllValues().get(2).status()); // back online
+    }
+
+    @Test
+    void aMaskedConnectAnnouncesNothingAndTheLastDisconnectStillTellsOffline() {
+        tracker.setMasked("alice", true); // the pin arrived before this client connected
+        tracker.onConnect(connect("s1", "alice"));
+        verify(messagingTemplate, never()).convertAndSend(eq(PresenceTracker.PRESENCE_TOPIC), any(PresenceEvent.class));
+        assertEquals(Set.of(), tracker.onlineUsernames());
+
+        tracker.onDisconnect(disconnect("s1"));
+        // The world never saw her online; the last disconnect still publishes its
+        // OFFLINE (idempotent for the subscribers — they already believe it).
+        ArgumentCaptor<PresenceEvent> events = ArgumentCaptor.forClass(PresenceEvent.class);
+        verify(messagingTemplate, times(1)).convertAndSend(eq(PresenceTracker.PRESENCE_TOPIC), events.capture());
+        assertEquals(PresenceStatus.OFFLINE, events.getAllValues().get(0).status());
+        assertEquals(Set.of(), tracker.onlineUsernames()); // the mask died with the session
     }
 
     // --- helpers: build STOMP session events carrying a session id + principal ---

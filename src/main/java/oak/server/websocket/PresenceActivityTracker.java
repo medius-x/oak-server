@@ -19,7 +19,7 @@ import java.util.Map;
 
 /**
  * In-memory registry of the roster ACTIVITY lines ("playing CS2"), the presence-class
- * sibling of {@link RosterAfkTracker}. Clients send explicit {@code /app/presence.activity}
+ * sibling of {@link RosterStatusTracker}. Clients send explicit {@code /app/presence.activity}
  * reports from their own sessions (every live session of the user broadcasts the same
  * verdict, the {@code broadcastRosterAfk} pattern); the tracker keeps them per session
  * and derives the USER's activity: the first non-null report among the user's live

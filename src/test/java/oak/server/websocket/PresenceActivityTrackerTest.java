@@ -30,7 +30,7 @@ import static org.mockito.Mockito.verify;
 /**
  * The roster ACTIVITY dimension: explicit per-session reports, the first-live-session
  * aggregate, transition-only publishing with a dampening window, and the silent drop
- * when the last session disconnects — the RosterAfkTracker semantics transplanted onto
+ * when the last session disconnects — the RosterStatusTracker semantics transplanted onto
  * a map-valued verdict.
  */
 class PresenceActivityTrackerTest {

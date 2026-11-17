@@ -33,8 +33,13 @@ public final class ServerCapabilities {
      *  {@code share-source-state} — the minimized-share relay (2026-11-11):
      *  SEND /app/share.source-state → /topic/share.state, letting the viewers'
      *  pop-out caption a frozen (minimized) share frame; without the flag the
-     *  client skips both the reports and the topic. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state");
+     *  client skips both the reports and the topic.
+     *  {@code roster-status} — the manual STATUS dimension (2026-11-17): the
+     *  status menu (online/away/do-not-disturb + auto), SEND /app/roster.status,
+     *  /topic/roster.status flips and the GET /api/presence/status snapshot; the
+     *  legacy boolean AFK wire keeps working either way. Without the flag the
+     *  client keeps the 2026-11-04 away-only model and hides the menu. */
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status");
 
     private ServerCapabilities() {
     }

@@ -12,6 +12,7 @@ import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
 import java.security.Principal;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
@@ -24,6 +25,13 @@ import java.util.Set;
  * <p>A user may hold several sessions at once (multiple tabs); they are "online" while
  * at least one session is open. Only the 0&rarr;1 and 1&rarr;0 transitions push a
  * {@link PresenceEvent} to {@link #PRESENCE_TOPIC}.
+ *
+ * <p><b>Invisible</b> (the status menu, user request 2026-11-17): a masked user LOOKS
+ * offline to everyone — the mask filters them out of {@link #onlineUsernames()} and the
+ * ONLINE announcement flips to OFFLINE (and back on unmask), exactly as if their last
+ * session had dropped. No viewer — owner, admin, nobody — sees through the mask
+ * (user decision, Discord parity); the sessions themselves stay alive, so calls and
+ * invites still reach them and their voice-room membership keeps rendering honestly.
  *
  * <p><b>Idempotency:</b> Spring may publish {@link SessionDisconnectEvent} more than
  * once per session, and a CONNECT could theoretically repeat too. Removal/guarding is
@@ -45,6 +53,8 @@ public class PresenceTracker {
 
     private final Map<String, String> sessionToUsername = new HashMap<>();
     private final Map<String, Integer> usernameCount = new HashMap<>();
+    /** Users whose clients asked to LOOK offline while their sessions stay open. */
+    private final Set<String> maskedUsernames = new HashSet<>();
     private final Object lock = new Object();
 
     @EventListener
@@ -64,8 +74,8 @@ public class PresenceTracker {
                 return;
             }
             int openSessions = usernameCount.merge(username, 1, Integer::sum);
-            if (openSessions != 1) {
-                return; // the user already had another session online
+            if (openSessions != 1 || maskedUsernames.contains(username)) {
+                return; // already online through another session — or hidden on purpose
             }
             toPublish = new PresenceEvent(username, PresenceStatus.ONLINE);
         }
@@ -89,15 +99,49 @@ public class PresenceTracker {
                 return; // other sessions of this user are still open
             }
             usernameCount.remove(username);
+            maskedUsernames.remove(username); // the mask dies with the last session
             toPublish = new PresenceEvent(username, PresenceStatus.OFFLINE);
         }
         publish(toPublish);
     }
 
-    /** Snapshot of currently-online usernames, used to seed {@code GET /api/presence}. */
+    /**
+     * The INVISIBLE mask (the status menu): flip whether the user's live sessions
+     * count as online for the world. Flipping ON while connected publishes OFFLINE
+     * (the world sees them leave); flipping OFF publishes ONLINE again. The user's
+     * own status frames keep flowing — only this dimension is masked.
+     */
+    public void setMasked(String username, boolean masked) {
+        PresenceEvent toPublish;
+        synchronized (lock) {
+            if (masked == maskedUsernames.contains(username)) {
+                return;
+            }
+            boolean connected = usernameCount.containsKey(username);
+            if (masked) {
+                maskedUsernames.add(username);
+                if (!connected) {
+                    return; // not online — nothing to announce
+                }
+                toPublish = new PresenceEvent(username, PresenceStatus.OFFLINE);
+            } else {
+                maskedUsernames.remove(username);
+                if (!connected) {
+                    return;
+                }
+                toPublish = new PresenceEvent(username, PresenceStatus.ONLINE);
+            }
+        }
+        publish(toPublish);
+    }
+
+    /** Snapshot of currently-online usernames (masked users excluded), used to seed
+     *  {@code GET /api/presence}. */
     public Set<String> onlineUsernames() {
         synchronized (lock) {
-            return Set.copyOf(usernameCount.keySet());
+            Set<String> visible = new HashSet<>(usernameCount.keySet());
+            visible.removeAll(maskedUsernames);
+            return Set.copyOf(visible);
         }
     }
 
