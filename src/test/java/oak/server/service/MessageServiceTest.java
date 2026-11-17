@@ -43,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -526,6 +527,44 @@ class MessageServiceTest {
 
         assertEquals(1, response.mentions().size());
         assertEquals(0, response.mentions().get(0).start());
+    }
+
+    @Test
+    void createReplySignsTheFirstImageOfTheOriginalIntoTheQuote() {
+        Long channelId = 7L;
+        Channel channel = new Channel("general", ChannelType.TEXT);
+        channel.setId(channelId);
+        User author = new User("alice", "hash");
+        author.setId(5L);
+        User targetAuthor = new User("bob", "hash");
+        targetAuthor.setId(6L);
+        // A [video, image] pair: the quote previews the FIRST IMAGE — the clip ahead of it
+        // is never the square thumbnail (user request 2026-11-17).
+        AttachmentRef clip = new AttachmentRef("attachments/abc/clip.mp4", "clip.mp4");
+        AttachmentRef pic = new AttachmentRef("attachments/abc/pic.png", "pic.png", null, null, 800, 600, null);
+        Message original = new Message(channel, targetAuthor, "media pair");
+        original.setId(90L);
+        original.setAttachments(attachmentListCodec.write(java.util.List.of(clip, pic)));
+
+        when(channelRepository.findById(channelId)).thenReturn(Optional.of(channel));
+        when(userRepository.findByUsername("alice")).thenReturn(Optional.of(author));
+        when(messageRepository.findByIdAndChannelId(90L, channelId)).thenReturn(Optional.of(original));
+        when(messageRepository.save(any(Message.class))).thenAnswer(inv -> inv.getArgument(0));
+        when(messageRepository.findAllById(any())).thenReturn(java.util.List.of(original));
+        when(attachmentUrlSigner.presignedGetUrl("attachments/abc/pic.png")).thenReturn("https://minio/get/pic.png");
+        when(mentionParser.parse(any(), any(), any())).thenReturn(java.util.List.of());
+
+        MessageResponse response = messageService.create(channelId,
+                new CreateMessageRequest("nice shot", null, 90L), "alice");
+
+        assertNotNull(response.reply());
+        assertEquals("pic.png", response.reply().image().fileName());
+        assertEquals("attachments/abc/pic.png", response.reply().image().key());
+        assertEquals("https://minio/get/pic.png", response.reply().image().url());
+        assertEquals(800, response.reply().image().width());
+        assertEquals(600, response.reply().image().height());
+        // The video's key is never signed for the quote — it is not the preview.
+        verify(attachmentUrlSigner, never()).presignedGetUrl("attachments/abc/clip.mp4");
     }
 
     @Test

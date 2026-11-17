@@ -83,6 +83,46 @@ class ReplyForwardIntegrationTest {
     }
 
     @Test
+    void reply_quoteCarriesTheOriginalsFirstImage_andForwardFreezeStripsIt() throws Exception {
+        String aliceToken = registerAndLogin("alice", "supersecret");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        Long sourceChannel = createChannel(aliceToken, "source", "TEXT");
+        Long targetChannel = createChannel(aliceToken, "target", "TEXT");
+
+        // bob posts a [video, image] pair: the quote previews the FIRST IMAGE, not the first
+        // file (the noop test signer leaves url null — the NON_NULL wire drops it).
+        Long withMedia = postMediaPairMessage(bobToken, sourceChannel);
+
+        MvcResult replyResult = mockMvc.perform(post("/api/channels/" + sourceChannel + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"content\":\"nice shot\",\"replyToId\":" + withMedia + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.reply.image.fileName").value("photo.png"))
+                .andExpect(jsonPath("$.reply.image.key").value("attachments/quote-i1"))
+                .andExpect(jsonPath("$.reply.image.width").value(800))
+                .andExpect(jsonPath("$.reply.image.height").value(600))
+                .andReturn();
+        Long replyId = ((Number) JsonPath.read(replyResult.getResponse().getContentAsString(), "$.id")).longValue();
+
+        // A text-only original never grows an image field.
+        Long plainId = postMessage(bobToken, sourceChannel, "plain words");
+        mockMvc.perform(post("/api/channels/" + sourceChannel + "/messages")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"content\":\"a reply\",\"replyToId\":" + plainId + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.reply.image").doesNotExist());
+
+        // Forwarding the REPLY freezes its quote: the hour-lived presigned URL must never
+        // persist (user decision 2026-11-17) — the frozen card stays text-only.
+        mockMvc.perform(post("/api/channels/" + targetChannel + "/messages/forward")
+                        .header("Authorization", "Bearer " + aliceToken).contentType(JSON)
+                        .content("{\"sourceMessageId\":" + replyId + "}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.forward.reply.image").doesNotExist())
+                .andExpect(jsonPath("$.forward.reply.preview").value("media pair"));
+    }
+
+    @Test
     void reply_toForward_carriesTheForwardOriginInItsQuote() throws Exception {
         String aliceToken = registerAndLogin("alice", "supersecret");
         String bobToken = registerAndLogin("bob", "supersecret");
@@ -493,6 +533,21 @@ class ReplyForwardIntegrationTest {
                         .content(String.format(
                                 "{\"content\":\"%s\",\"attachments\":[{\"key\":\"%s\",\"fileName\":\"%s\"}]}",
                                 content, attachmentKey, attachmentFileName)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        return ((Number) JsonPath.read(result.getResponse().getContentAsString(), "$.id")).longValue();
+    }
+
+    /** A [video, image] attachment pair with the image's intrinsic dims — the message the
+     *  quote-image tests reply to (the first IMAGE, not the first file, is the preview). */
+    private Long postMediaPairMessage(String token, Long channelId) throws Exception {
+        MvcResult result = mockMvc.perform(post("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(JSON)
+                        .content("{\"content\":\"media pair\","
+                                + "\"attachments\":[{\"key\":\"attachments/quote-v1\",\"fileName\":\"clip.mp4\"},"
+                                + "{\"key\":\"attachments/quote-i1\",\"fileName\":\"photo.png\","
+                                + "\"width\":800,\"height\":600}]}"))
                 .andExpect(status().isCreated())
                 .andReturn();
         return ((Number) JsonPath.read(result.getResponse().getContentAsString(), "$.id")).longValue();

@@ -23,6 +23,11 @@ import java.time.Instant;
  * record: edits/deletions of any ancestor surface on every re-fetch. {@code null} here means
  * TRUNCATION (the nesting hit {@code MessageService.MAX_QUOTE_DEPTH}); a dangling reference is
  * {@code deleted=true} instead — clients must not conflate the two.
+ *
+ * <p>{@code image}: the original's first image attachment as a square-preview snapshot
+ * ({@link QuoteImage}), or null when it has none. Appended 2026-11-17 — old rows' JSON and old
+ * clients simply lack the field (the lenient codec maps it to null); in the frozen forward
+ * snapshot it is ALWAYS null (see {@link QuoteImage}).
  */
 public record ReplyInfo(
         Long messageId,
@@ -32,6 +37,7 @@ public record ReplyInfo(
         Instant createdAt,
         boolean deleted,
         ForwardInfo forward,
-        ReplyInfo reply
+        ReplyInfo reply,
+        QuoteImage image
 ) {
 }

@@ -10,6 +10,7 @@ import oak.server.dto.ForwardInfo;
 import oak.server.dto.ForwardMessageRequest;
 import oak.server.dto.MessageResponse;
 import oak.server.dto.MentionResponse;
+import oak.server.dto.QuoteImage;
 import oak.server.dto.ReactionEvent;
 import oak.server.dto.ReactionSummary;
 import oak.server.dto.ReplyInfo;
@@ -564,10 +565,13 @@ public class MessageService {
             trusted = true;
             // Forwarding a REPLY snapshots its quote tree: the copy keeps rendering the nested
             // cards the source carried (frozen — later edits of the source's own original never
-            // propagate, the same snapshot semantics as every other origin field).
+            // propagate, the same snapshot semantics as every other origin field). The quote
+            // images are STRIPPED first: a presigned URL frozen into the column goes stale in
+            // an hour and can never be re-minted (user decision 2026-11-17 — forward-nested
+            // quotes stay text-only).
             originReply = source.getRepliedToId() == null ? null
                     : nestedReplyCodec.capDepth(
-                            replyInfo(source, replyOriginalsFor(List.of(source)), MAX_QUOTE_DEPTH),
+                            stripQuoteImages(replyInfo(source, replyOriginalsFor(List.of(source)), MAX_QUOTE_DEPTH)),
                             MAX_QUOTE_DEPTH);
         } else {
             originServer = request.originServer();
@@ -924,7 +928,9 @@ public class MessageService {
      *  replied to (the forwarder) AND that the message was forwarded, not just its content.
      *  Recurses through {@code original}'s own quote ({@code ReplyInfo.reply}) so chains render
      *  as nested cards; {@code depth} counts DOWN from {@link #MAX_QUOTE_DEPTH} — at zero the
-     *  nesting is truncated (null), which clients must not read as deleted. */
+     *  nesting is truncated (null), which clients must not read as deleted. The quote's image
+     *  preview ({@link #quoteImageOf}) is part of the LIVE snapshot — a freshly presigned URL
+     *  on every fetch, never persisted. */
     private ReplyInfo replyInfo(Message message, Map<Long, Message> replyOriginals, int depth) {
         Long repliedToId = message.getRepliedToId();
         if (repliedToId == null) {
@@ -932,7 +938,7 @@ public class MessageService {
         }
         Message original = replyOriginals.get(repliedToId);
         if (original == null) {
-            return new ReplyInfo(repliedToId, null, null, null, null, true, null, null);
+            return new ReplyInfo(repliedToId, null, null, null, null, true, null, null, null);
         }
         return new ReplyInfo(
                 repliedToId,
@@ -942,7 +948,49 @@ public class MessageService {
                 original.getCreatedAt(),
                 false,
                 forwardInfo(original),
-                depth > 1 ? replyInfo(original, replyOriginals, depth - 1) : null);
+                depth > 1 ? replyInfo(original, replyOriginals, depth - 1) : null,
+                quoteImageOf(original));
+    }
+
+    /** File-extension sniffing for the quote preview (mirrors the client's isImageFile set):
+     *  the DTO carries no content type, and the first IMAGE is what the quote previews —
+     *  a video/audio/plain file never becomes the square thumbnail. */
+    private static final Set<String> QUOTE_IMAGE_EXTENSIONS = Set.of("png", "jpg", "jpeg", "gif", "webp", "bmp");
+
+    /** The original's first image attachment as the quote's square-preview snapshot, or null
+     *  when it has no image. CPU-only (JSON parse + presign), keeping {@link #toResponse}'s
+     *  no-repository invariant intact. */
+    private QuoteImage quoteImageOf(Message original) {
+        for (AttachmentRef ref : attachmentListCodec.read(original.getAttachments())) {
+            String fileName = ref.fileName();
+            if (fileName == null) {
+                continue;
+            }
+            int dot = fileName.lastIndexOf('.');
+            String extension = dot == -1 ? "" : fileName.substring(dot + 1).toLowerCase();
+            if (QUOTE_IMAGE_EXTENSIONS.contains(extension)) {
+                return new QuoteImage(fileName, ref.key(),
+                        attachmentUrlSigner.presignedGetUrl(ref.key()), ref.width(), ref.height());
+            }
+        }
+        return null;
+    }
+
+    /** Nulls out {@link QuoteImage} at every level of a quote tree (both {@code reply} and
+     *  {@code forward.reply} edges) — the forward freeze must not carry an hour-lived URL it
+     *  can never re-mint. Structure and everything else pass through untouched. */
+    private ReplyInfo stripQuoteImages(ReplyInfo quote) {
+        if (quote == null) {
+            return null;
+        }
+        ForwardInfo forward = quote.forward();
+        ForwardInfo strippedForward = forward == null ? null
+                : new ForwardInfo(forward.serverName(), forward.channelName(), forward.authorId(),
+                        forward.authorUsername(), forward.createdAt(), forward.trusted(),
+                        stripQuoteImages(forward.reply()));
+        return new ReplyInfo(quote.messageId(), quote.authorId(), quote.authorUsername(),
+                quote.preview(), quote.createdAt(), quote.deleted(), strippedForward,
+                stripQuoteImages(quote.reply()), null);
     }
 
     /** One-line quote preview of the original: newlines flatten to spaces, capped at

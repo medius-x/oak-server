@@ -1,6 +1,7 @@
 package oak.server.service;
 
 import oak.server.dto.ForwardInfo;
+import oak.server.dto.QuoteImage;
 import oak.server.dto.ReplyInfo;
 import org.junit.jupiter.api.Test;
 import tools.jackson.databind.ObjectMapper;
@@ -30,7 +31,7 @@ class NestedReplyCodecTest {
             return null;
         }
         return new ReplyInfo((long) depth, (long) depth * 10, "user" + depth, "preview " + depth,
-                STAMP, false, null, chain(depth - 1));
+                STAMP, false, null, chain(depth - 1), null);
     }
 
     private static int depthOf(ReplyInfo node) {
@@ -46,9 +47,20 @@ class NestedReplyCodecTest {
     void roundTripsANestedTree() {
         ReplyInfo tree = new ReplyInfo(1L, 10L, "alice", "outer", STAMP, false,
                 new ForwardInfo("Srv", "chan", 20L, "bob", STAMP, true, chain(2)),
-                chain(3));
+                chain(3), null);
         ReplyInfo back = codec.read(codec.write(tree));
         assertEquals(tree, back);   // record equality walks the whole tree, forward.reply included
+    }
+
+    @Test
+    void roundTripsAQuoteImage() {
+        // The image rides the frozen snapshot when present (stripQuoteImages is the CALLER's
+        // decision — the codec itself stays lossless).
+        ReplyInfo tree = new ReplyInfo(1L, 10L, "alice", "outer", STAMP, false, null, null,
+                new QuoteImage("pic.png", "attachments/1", "https://presigned", 800, 600));
+        ReplyInfo back = codec.read(codec.write(tree));
+        assertEquals(tree, back);
+        assertEquals("attachments/1", back.image().key());
     }
 
     @Test
@@ -62,6 +74,8 @@ class NestedReplyCodecTest {
         assertNotNull(parsed);
         assertEquals("alice", parsed.authorUsername());
         assertNull(parsed.reply());
+        // The appended image field: old rows lack it → null, never a failure.
+        assertNull(parsed.image());
     }
 
     @Test
@@ -80,7 +94,7 @@ class NestedReplyCodecTest {
         // The forward.reply edge counts toward the same budget: a card at depth 1 whose forward
         // context carries a 9-deep chain keeps only 4 levels of it after the cap.
         ReplyInfo withForward = new ReplyInfo(1L, 10L, "alice", "outer", STAMP, false,
-                new ForwardInfo("Srv", "chan", 20L, "bob", STAMP, false, chain(9)), null);
+                new ForwardInfo("Srv", "chan", 20L, "bob", STAMP, false, chain(9)), null, null);
         ReplyInfo capped = codec.capDepth(withForward, 5);
         assertEquals(4, depthOf(capped.forward().reply()));
         assertNull(capped.reply());

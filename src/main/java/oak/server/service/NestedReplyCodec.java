@@ -74,6 +74,6 @@ public class NestedReplyCodec {
                         capDepth(forward.reply(), maxDepth - 1));
         return new ReplyInfo(node.messageId(), node.authorId(), node.authorUsername(),
                 node.preview(), node.createdAt(), node.deleted(), cappedForward,
-                capDepth(node.reply(), maxDepth - 1));
+                capDepth(node.reply(), maxDepth - 1), node.image());
     }
 }
