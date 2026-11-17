@@ -8,6 +8,7 @@ import oak.server.dto.CreateMessageRequest;
 import oak.server.dto.EditMessageRequest;
 import oak.server.dto.ForwardInfo;
 import oak.server.dto.ForwardMessageRequest;
+import oak.server.dto.DiscussionHit;
 import oak.server.dto.MessageResponse;
 import oak.server.dto.MentionResponse;
 import oak.server.dto.QuoteImage;
@@ -18,12 +19,14 @@ import oak.server.dto.SearchMessagesResponse;
 import oak.server.dto.StickerRef;
 import oak.server.entity.Channel;
 import oak.server.entity.ChannelType;
+import oak.server.entity.Discussion;
 import oak.server.entity.Message;
 import oak.server.entity.MessageReaction;
 import oak.server.entity.Permission;
 import oak.server.entity.Sticker;
 import oak.server.entity.User;
 import oak.server.repository.ChannelRepository;
+import oak.server.repository.DiscussionRepository;
 import oak.server.repository.EmojiRepository;
 import oak.server.repository.MessageReactionRepository;
 import oak.server.repository.MessageRepository;
@@ -43,6 +46,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -119,6 +123,7 @@ public class MessageService {
 
     private final MessageRepository messageRepository;
     private final ChannelRepository channelRepository;
+    private final DiscussionRepository discussionRepository;
     private final UserRepository userRepository;
     private final SimpMessagingTemplate messagingTemplate;
     private final AttachmentUrlSigner attachmentUrlSigner;
@@ -310,40 +315,66 @@ public class MessageService {
 
     /** Message search (Discord-style): substring match on the content and the attachments JSON
      *  (file names match), newest first, paged by {@code beforeId}. Scope: one channel
-     *  ({@code channelId} given — a DM works, the gate degenerates to the participant check) or
-     *  the whole server (every server TEXT channel the viewer can read; DM/group-DM channels are
-     *  excluded BY TYPE — a server-wide search must never return anyone's DMs). {@code q} and
+     *  ({@code channelId} given — a DM works, the gate degenerates to the participant check; a
+     *  DISCUSSION channel works too, its permissions resolve through the parent) or the whole
+     *  server (every server TEXT channel the viewer can read; DM/group-DM channels are excluded
+     *  BY TYPE — a server-wide search must never return anyone's DMs). {@code q} and
      *  {@code author} are both optional filters, at least one required; an unknown author yields
-     *  an empty result (total 0) rather than 404 — no oracle for probing logins. */
+     *  an empty result (total 0) rather than 404 — no oracle for probing logins.
+     *
+     *  <p>{@code includeDiscussions} (2026-11-18): threads join the search. A channel scope then
+     *  covers the channel PLUS its discussions ({@code Discussion.parentChannelId}); the
+     *  server-wide scope covers every readable discussion too. The response carries
+     *  {@code DiscussionHit} context for the page's thread hits — the client's channel list has
+     *  no discussions, the pair {@code MessageResponse.channelId ↔ DiscussionHit.id} is the
+     *  resolver. The parameter is the compatibility gate: old clients never send it. */
     @Transactional(readOnly = true)
     public SearchMessagesResponse searchMessages(String q, Long channelId, String author,
-                                                 Long beforeId, Integer limit, String viewerUsername) {
+                                                 Long beforeId, Integer limit, String viewerUsername,
+                                                 boolean includeDiscussions) {
         boolean hasQuery = !isBlank(q);
         if (!hasQuery && isBlank(author)) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Provide a query or an author filter");
         }
         User viewer = auth.requireUser(viewerUsername);
         List<Long> channelIds;
+        Set<Long> discussionCandidateIds = new LinkedHashSet<>();
         if (channelId != null) {
             Channel channel = channelRepository.findById(channelId)
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
-            // A discussion thread is not searchable: its hits would carry no channel context in
-            // the client's list (discussions are absent from the channel list), and the
-            // server-wide flavour below already walks TEXT channels only.
-            if (channel.getType() == ChannelType.DISCUSSION) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Discussions are not searchable");
-            }
             auth.requireInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY);
-            channelIds = List.of(channelId);
+            if (channel.getType() == ChannelType.DISCUSSION) {
+                // A direct thread scope: the thread's own history (one channel, no children).
+                channelIds = List.of(channelId);
+                discussionCandidateIds.add(channelId);
+            } else {
+                channelIds = new ArrayList<>(List.of(channelId));
+                if (includeDiscussions && channel.getType() == ChannelType.TEXT) {
+                    // The channel + every discussion under it: permissions DELEGATE to the
+                    // parent (AuthorizationService.hasInChannel), so the gate above already
+                    // covers the threads — no per-thread check needed.
+                    for (Discussion discussion : discussionRepository.findByParentChannelId(channelId)) {
+                        channelIds.add(discussion.getChannelId());
+                        discussionCandidateIds.add(discussion.getChannelId());
+                    }
+                }
+            }
         } else {
             // The ReadStateService.snapshot pattern: walk the non-DM channels, keep the ones the
-            // viewer may read. hasInChannel's VIEW_CHANNEL master gate drops hidden channels.
-            channelIds = channelRepository
-                    .findByTypeNotInOrderByIdAsc(List.of(ChannelType.DM, ChannelType.GROUP_DM)).stream()
-                    .filter(channel -> channel.getType() == ChannelType.TEXT)
-                    .filter(channel -> auth.hasInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY))
-                    .map(Channel::getId)
-                    .toList();
+            // viewer may read. hasInChannel's VIEW_CHANNEL master gate drops hidden channels
+            // (a DISCUSSION delegates one hop to its parent).
+            List<Long> readable = new ArrayList<>();
+            for (Channel channel : channelRepository.findByTypeNotInOrderByIdAsc(List.of(ChannelType.DM, ChannelType.GROUP_DM))) {
+                boolean candidate = channel.getType() == ChannelType.TEXT
+                        || (includeDiscussions && channel.getType() == ChannelType.DISCUSSION);
+                if (candidate && auth.hasInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY)) {
+                    readable.add(channel.getId());
+                    if (channel.getType() == ChannelType.DISCUSSION) {
+                        discussionCandidateIds.add(channel.getId());
+                    }
+                }
+            }
+            channelIds = readable;
         }
         long authorId = 0;
         if (!isBlank(author)) {
@@ -366,7 +397,28 @@ public class MessageService {
                 .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
                         replyOriginals))
                 .toList();
-        return new SearchMessagesResponse(total, results);
+        return new SearchMessagesResponse(total, results, discussionHitsFor(page, discussionCandidateIds));
+    }
+
+    /** The page's thread context: the (distinct) discussion channels among the page's hits —
+     *  the client resolves each hit by {@code channelId ↔ DiscussionHit.id}. */
+    private List<DiscussionHit> discussionHitsFor(List<Message> page, Set<Long> discussionCandidateIds) {
+        if (discussionCandidateIds.isEmpty() || page.isEmpty()) {
+            return List.of();
+        }
+        List<Long> hitThreadIds = page.stream()
+                .map(message -> message.getChannel().getId())
+                .filter(discussionCandidateIds::contains)
+                .distinct()
+                .toList();
+        if (hitThreadIds.isEmpty()) {
+            return List.of();
+        }
+        return discussionRepository.findByChannelIdIn(hitThreadIds).stream()
+                .map(discussion -> new DiscussionHit(discussion.getChannelId(),
+                        discussion.getParentChannelId(), discussion.getOriginMessageId(),
+                        discussion.getOriginSnippet()))
+                .toList();
     }
 
     /** Replaces a message's text and/or prunes its attachment list (remove-only, Discord-style:

@@ -386,16 +386,60 @@ class DiscussionIntegrationTest {
                         result.getResponse().getContentAsString().contains("\"channelId\":" + discussionId),
                         "discussions are read-state-silent"));
 
-        // channel-scoped search on a discussion → 400; server-wide search walks TEXT channels only
-        mockMvc.perform(get("/api/search/messages?q=needle&channelId=" + discussionId)
-                        .header("Authorization", "Bearer " + ownerToken))
-                .andExpect(status().isBadRequest());
+        // server-wide search WITHOUT the opt-in walks TEXT channels only (the old-client
+        // contract — the parameter is the compatibility gate); a DIRECT thread scope is a
+        // legal one-channel search now (was a 400 before threads became searchable).
         MvcResult search = mockMvc.perform(get("/api/search/messages?q=needle")
                         .header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andReturn();
         assertTrue(search.getResponse().getContentAsString().contains("origin with a needle"));
         assertFalse(search.getResponse().getContentAsString().contains("a needle in the thread"));
+        mockMvc.perform(get("/api/search/messages?q=needle&channelId=" + discussionId)
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.results[0].content").value("a needle in the thread"))
+                .andExpect(jsonPath("$.discussions[0].id").value(discussionId.intValue()))
+                .andExpect(jsonPath("$.discussions[0].parentChannelId").value(channelId.intValue()));
+    }
+
+    @Test
+    void searchCoversDiscussionsWhenAsked() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(ownerToken, "general", "TEXT");
+        Long messageId = postMessage(ownerToken, channelId, "origin with a needle");
+        Long discussionId = startDiscussion(ownerToken, channelId, messageId);
+        postMessageInto(discussionId, ownerToken, "a needle in the thread");
+
+        // Channel scope + opt-in: the channel's own hit AND the thread's hit, with the
+        // thread context attached (id = the DISCUSSION channel's id, matched to each
+        // hit's channelId by the client).
+        mockMvc.perform(get("/api/search/messages?q=needle&channelId=" + channelId + "&includeDiscussions=true")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total").value(2))
+                .andExpect(jsonPath("$.discussions.length()").value(1))
+                .andExpect(jsonPath("$.discussions[0].id").value(discussionId.intValue()))
+                .andExpect(jsonPath("$.discussions[0].parentChannelId").value(channelId.intValue()))
+                .andExpect(jsonPath("$.discussions[0].originMessageId").value(messageId.intValue()));
+
+        // Server-wide + opt-in: the thread hit appears too.
+        mockMvc.perform(get("/api/search/messages?q=thread+needle")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total").value(0));
+        mockMvc.perform(get("/api/search/messages?q=needle&includeDiscussions=true")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total").value(2))
+                .andExpect(jsonPath("$.discussions.length()").value(1));
+
+        // Channel scope WITHOUT the opt-in: the channel's own hit only.
+        mockMvc.perform(get("/api/search/messages?q=needle&channelId=" + channelId)
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.total").value(1))
+                .andExpect(jsonPath("$.discussions.length()").value(0));
     }
 
     @Test
