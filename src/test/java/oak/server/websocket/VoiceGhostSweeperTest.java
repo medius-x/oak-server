@@ -143,4 +143,67 @@ class VoiceGhostSweeperTest {
 
         verify(voiceAccess, never()).revokeTokensForUser(anyString());
     }
+
+    @Test
+    void invisibleHolderLosesTheChannelTokenAfterTheGrace() {
+        // The silent listener: STOMP-online, token live, NO voice.join → invisible to the
+        // membership for INVISIBLE_TOKEN_TICKS consecutive ticks → the CHANNEL's tokens are
+        // revoked (the gateway tears the session down). The offline TTL never fires — the
+        // holder is online.
+        when(tracker.snapshot()).thenReturn(List.of());
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of(
+                5L, List.of("silent-listener")));
+        when(presence.onlineUsernames()).thenReturn(Set.of("silent-listener"));
+
+        for (int tick = 0; tick < VoiceGhostSweeper.INVISIBLE_TOKEN_TICKS - 1; tick++) {
+            sweeper.sweep();
+        }
+        verify(voiceAccess, never()).revokeTokens(anyLong(), anyString());
+
+        sweeper.sweep();
+
+        verify(voiceAccess).revokeTokens(5L, "silent-listener");
+        verify(voiceAccess, never()).revokeTokensForUser(anyString());
+    }
+
+    @Test
+    void joiningTheChannelResetsTheInvisibleCounter() {
+        // An honest holder briefly absent (the /room → voice.join ramp, a STOMP reconnect
+        // resync) must never hit the grace: membership presence resets the counter, and the
+        // next invisible streak starts from zero.
+        when(tracker.snapshot()).thenReturn(List.of());
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of(
+                5L, List.of("honest")));
+        when(presence.onlineUsernames()).thenReturn(Set.of("honest"));
+
+        sweeper.sweep();
+        sweeper.sweep(); // two invisible ticks — one short of the grace
+        when(tracker.snapshot()).thenReturn(List.of(
+                new VoiceChannelMembersDto(5L, List.of("honest"))));
+        sweeper.sweep(); // joined: the counter resets
+        when(tracker.snapshot()).thenReturn(List.of());
+        sweeper.sweep();
+        sweeper.sweep(); // two more invisible ticks — STILL one short
+
+        verify(voiceAccess, never()).revokeTokens(anyLong(), anyString());
+    }
+
+    @Test
+    void invisibleRevocationIsChannelScoped() {
+        // A holder of tokens in TWO channels, present in only one: the absent channel's
+        // tokens are revoked, the present one keeps theirs.
+        when(tracker.snapshot()).thenReturn(List.of(
+                new VoiceChannelMembersDto(8L, List.of("multi"))));
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of(
+                5L, List.of("multi"),
+                8L, List.of("multi")));
+        when(presence.onlineUsernames()).thenReturn(Set.of("multi"));
+
+        for (int tick = 0; tick < VoiceGhostSweeper.INVISIBLE_TOKEN_TICKS; tick++) {
+            sweeper.sweep();
+        }
+
+        verify(voiceAccess).revokeTokens(5L, "multi");
+        verify(voiceAccess, never()).revokeTokens(eq(8L), anyString());
+    }
 }

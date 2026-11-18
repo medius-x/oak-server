@@ -42,6 +42,17 @@ import java.util.TreeSet;
  *       {@value #OFFLINE_TOKEN_TICKS} consecutive ticks loses all their tokens — a live
  *       voice session without STOMP is impossible for an honest client (10 s heartbeats),
  *       and a brief reconnect blip re-arms the counter within a tick.</li>
+ *   <li><b>Invisible-holder revocation</b> (2026-11-18, the "silent listener" hole): a
+ *       rogue can hold a minted token, stay STOMP-online and simply never send
+ *       {@code voice.join} — invisible to the membership tiles while listening (and even
+ *       publishing: its username sits in the token registry, so the ghost-kick's known-set
+ *       spares it). Rule: a token holder absent from the channel's MEMBERSHIP for
+ *       {@value #INVISIBLE_TOKEN_TICKS} consecutive ticks has that channel's tokens
+ *       revoked. The grace covers every honest window — the /room → voice.join ramp (join
+ *       follows within seconds), a STOMP reconnect (the client re-sends voice.join on
+ *       resync), a channel switch (leave + join are immediate) — so a live honest session
+ *       is never torn down mid-talk. The revocation kills the gateway session itself:
+ *       nothing cooperative, nothing the rogue can ignore.</li>
  * </ul>
  */
 @Component
@@ -57,8 +68,19 @@ public class VoiceGhostSweeper {
     /** Consecutive offline ticks before a token holder's tokens are revoked (tick = the sweep interval). */
     private static final int OFFLINE_TOKEN_TICKS = 5;
 
+    /**
+     * Consecutive ticks a channel-token holder may live absent from that channel's MEMBERSHIP
+     * before the channel's tokens are revoked (the invisible-holder rule; tick = the sweep
+     * interval → up to ~3 minutes of grace for the honest /room→join ramp and STOMP reconnects).
+     */
+    static final int INVISIBLE_TOKEN_TICKS = 3;
+
     /** Per-username count of consecutive ticks spent holding tokens while offline (presence absent). */
     private final Map<String, Integer> offlineTokenTicks = new HashMap<>();
+
+    /** (username → channelId) count of consecutive ticks holding a token while absent from that
+     *  channel's membership — the invisible-holder counters, cleared on join or revocation. */
+    private final Map<String, Map<Long, Integer>> invisibleTokenTicks = new HashMap<>();
 
     /** How often occupied rooms are probed for ghost publishers. */
     @Scheduled(fixedDelayString = "${oak.voice.ghost-sweep-interval:PT60S}")
@@ -75,6 +97,7 @@ public class VoiceGhostSweeper {
             voiceAccess.kickUnknownPublishers(room.getKey(), room.getValue());
         }
         expireOfflineTokens();
+        expireInvisibleTokens();
     }
 
     /**
@@ -124,6 +147,83 @@ public class VoiceGhostSweeper {
                 voiceAccess.revokeTokensForUser(username);
             }
         }
+    }
+
+    /**
+     * The invisible-holder rule: for every live (username, channelId) token, a holder absent
+     * from that channel's MEMBERSHIP accumulates a tick; at {@value #INVISIBLE_TOKEN_TICKS}
+     * the channel's tokens are revoked (the gateway tears the session down — the silent
+     * listener goes deaf). Joining the channel (or losing the token) resets the counter.
+     *
+     * <p><b>Diagnostics.</b> Every revocation of a possibly-honest user must be explainable
+     * from the log alone: the FIRST invisible tick logs an INFO marker with the full context
+     * (presence verdict, the holder's other membership channels — the two facts that tell a
+     * slow join from a stuck leave), a near-grace recovery logs its reset, and the revocation
+     * itself logs WARN with the whole story. A false-positive victim therefore leaves a
+     * three-line biography: marker → (optional reset) → revocation.
+     */
+    private void expireInvisibleTokens() {
+        Map<Long, Set<String>> membersByChannel = new HashMap<>();
+        for (VoiceChannelMembersDto room : tracker.snapshot()) {
+            membersByChannel.put(room.channelId(), new HashSet<>(room.usernames()));
+        }
+        Map<Long, List<String>> holders = voiceAccess.tokenHoldersByChannel();
+        // The counters only ever track live tokens — a revocation or token expiry
+        // drops them, so a fresh /room starts from a clean slate.
+        invisibleTokenTicks.entrySet().removeIf(entry -> {
+            Map<Long, Integer> byChannel = entry.getValue();
+            byChannel.keySet().removeIf(channelId ->
+                    !holders.containsKey(channelId) || !holders.get(channelId).contains(entry.getKey()));
+            return byChannel.isEmpty();
+        });
+        for (Map.Entry<Long, List<String>> room : holders.entrySet()) {
+            long channelId = room.getKey();
+            Set<String> members = membersByChannel.getOrDefault(channelId, Set.of());
+            for (String username : room.getValue()) {
+                if (members.contains(username)) {
+                    Integer previousTicks = invisibleTokenTicks.getOrDefault(username, Map.of()).remove(channelId);
+                    if (previousTicks != null && previousTicks >= INVISIBLE_TOKEN_TICKS - 1) {
+                        // A near-grace recovery: one more absent tick would have revoked —
+                        // exactly the borderline case a false-positive report hinges on.
+                        log.info("[ghost-sweep] holder '{}' back in room {} membership after {} invisible ticks — counter reset",
+                                username, channelId, previousTicks);
+                    }
+                    continue;
+                }
+                int ticks = invisibleTokenTicks
+                        .computeIfAbsent(username, ignored -> new HashMap<>())
+                        .merge(channelId, 1, Integer::sum);
+                if (ticks == 1) {
+                    log.info("[ghost-sweep] holder '{}' ({}) holds a token for room {} but is absent from its "
+                                    + "membership (tick 1/{}; holder's membership channels: {}) — revoking in {} more ticks if it stays this way",
+                            username, presence.onlineUsernames().contains(username) ? "online" : "OFFLINE",
+                            channelId, INVISIBLE_TOKEN_TICKS, membershipChannelsOf(username, membersByChannel),
+                            INVISIBLE_TOKEN_TICKS - 1);
+                }
+                if (ticks >= INVISIBLE_TOKEN_TICKS) {
+                    invisibleTokenTicks.getOrDefault(username, Map.of()).remove(channelId);
+                    log.warn("[ghost-sweep] revoking room-{} tokens of invisible holder '{}' — absent from membership "
+                                    + "for {} ticks, holder is {}, membership channels: {} (an honest client re-joins via /room; "
+                                    + "if this was a live talk, look for the holder's tick-1 marker above)",
+                            channelId, username, ticks,
+                            presence.onlineUsernames().contains(username) ? "online" : "OFFLINE",
+                            membershipChannelsOf(username, membersByChannel));
+                    voiceAccess.revokeTokens(channelId, username);
+                }
+            }
+        }
+    }
+
+    /** The channels the username currently sits in per the membership tracker — the
+     *  revocation log's "where are they instead" context. */
+    private static Set<Long> membershipChannelsOf(String username, Map<Long, Set<String>> membersByChannel) {
+        Set<Long> channels = new TreeSet<>();
+        for (Map.Entry<Long, Set<String>> room : membersByChannel.entrySet()) {
+            if (room.getValue().contains(username)) {
+                channels.add(room.getKey());
+            }
+        }
+        return channels;
     }
 
     /** Union of the two occupancy registries: channelId → known usernames. Package-private
