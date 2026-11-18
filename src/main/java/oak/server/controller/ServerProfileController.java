@@ -2,13 +2,16 @@ package oak.server.controller;
 
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.AttachmentUploadRequest;
 import oak.server.dto.AttachmentUploadResponse;
 import oak.server.dto.AvatarKeysRequest;
 import oak.server.dto.AvatarOriginalResponse;
+import oak.server.dto.IgdbSettingsResponse;
 import oak.server.dto.ServerCapabilities;
 import oak.server.dto.ServerProfileResponse;
 import oak.server.dto.UpdateConnectionInfoRequest;
+import oak.server.dto.UpdateIgdbCredentialsRequest;
 import oak.server.dto.UpdateServerNameRequest;
 import oak.server.entity.Permission;
 import oak.server.entity.ServerProfile;
@@ -17,6 +20,7 @@ import oak.server.repository.ServerProfileRepository;
 import oak.server.service.AttachmentSlotRegistry;
 import oak.server.service.AttachmentUrlSigner;
 import oak.server.service.AuthorizationService;
+import oak.server.service.igdb.IgdbAuthService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.info.BuildProperties;
 import org.springframework.http.HttpStatus;
@@ -42,6 +46,7 @@ import java.util.Locale;
  * {@code MANAGE_SERVER}. Each mutation pushes the fresh profile to {@value #SERVER_TOPIC} so every
  * connected client repaints its sidebar icon + name live. Mirrors {@code UserController}'s avatar flow.
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/server")
 @RequiredArgsConstructor
@@ -55,6 +60,7 @@ public class ServerProfileController {
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
     private final AttachmentSlotRegistry slotRegistry;
+    private final IgdbAuthService igdbAuthService;
     /** Absent when the app runs unpackaged without build-info (an IDE run) — "dev" then. */
     private final ObjectProvider<BuildProperties> buildProperties;
 
@@ -67,7 +73,9 @@ public class ServerProfileController {
     /** The instance name + icon. Open to any authenticated member. */
     @GetMapping
     public ServerProfileResponse get() {
-        return ServerProfileResponse.from(profile(), attachmentUrlSigner, serverVersion(), ServerCapabilities.FEATURES);
+        ServerProfile profile = profile();
+        return ServerProfileResponse.from(profile, attachmentUrlSigner, serverVersion(),
+                ServerCapabilities.featuresFor(profile));
     }
 
     /** Renames the instance ({@code MANAGE_SERVER}); pushes the new profile to {@value #SERVER_TOPIC}. */
@@ -198,6 +206,56 @@ public class ServerProfileController {
         return new AvatarOriginalResponse(attachmentUrlSigner.presignedGetUrl(originalKey));
     }
 
+    /**
+     * The IGDB integration's settings view ({@code MANAGE_SERVER}): the Client ID and
+     * whether both credentials are set. The SECRET is deliberately absent — it is
+     * write-only through the API (and through the logs).
+     */
+    @GetMapping("/igdb")
+    public IgdbSettingsResponse igdbSettings(@AuthenticationPrincipal UserDetails principal) {
+        requireManageServer(principal);
+        ServerProfile profile = profile();
+        return new IgdbSettingsResponse(profile.getIgdbClientId(),
+                IgdbAuthService.isConfigured(profile));
+    }
+
+    /**
+     * Writes the Twitch application credentials ({@code MANAGE_SERVER}). Null fields
+     * keep the stored value; an EMPTY STRING clears it — clearing either side
+     * switches the integration off (the {@code igdb-games} capability disappears and
+     * /api/games starts answering 503). A change drops the cached token and repushes
+     * the profile, so every connected client re-evaluates the capability live.
+     */
+    @PatchMapping("/igdb")
+    @Transactional
+    public IgdbSettingsResponse updateIgdbSettings(@AuthenticationPrincipal UserDetails principal,
+                                                   @RequestBody @Valid UpdateIgdbCredentialsRequest request) {
+        requireManageServer(principal);
+        ServerProfile profile = profile();
+        boolean changed = false;
+        if (request.clientId() != null) {
+            profile.setIgdbClientId(blankToNull(request.clientId()));
+            changed = true;
+        }
+        if (request.clientSecret() != null) {
+            profile.setIgdbClientSecret(blankToNull(request.clientSecret()));
+            changed = true;
+        }
+        if (changed) {
+            serverProfileRepository.save(profile);
+            igdbAuthService.invalidate(); // the cached token belongs to the OLD pair
+            log.info("IGDB credentials updated (configured: {})", IgdbAuthService.isConfigured(profile));
+            publish(profile);
+        }
+        return new IgdbSettingsResponse(profile.getIgdbClientId(),
+                IgdbAuthService.isConfigured(profile));
+    }
+
+    private static String blankToNull(String raw) {
+        String trimmed = raw.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     private ServerProfile profile() {
         return serverProfileRepository.singleton();
     }
@@ -210,7 +268,7 @@ public class ServerProfileController {
     /** Broadcasts the profile so connected clients repaint the sidebar icon + name live. */
     private ServerProfileResponse publish(ServerProfile profile) {
         ServerProfileResponse response = ServerProfileResponse.from(profile, attachmentUrlSigner,
-                serverVersion(), ServerCapabilities.FEATURES);
+                serverVersion(), ServerCapabilities.featuresFor(profile));
         messagingTemplate.convertAndSend(SERVER_TOPIC, response);
         return response;
     }

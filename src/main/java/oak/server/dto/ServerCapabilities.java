@@ -1,5 +1,8 @@
 package oak.server.dto;
 
+import oak.server.entity.ServerProfile;
+
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -46,6 +49,29 @@ public final class ServerCapabilities {
      *  client hides the limit editor — the 403 of an old client hitting a full room
      *  is handled by its generic error path anyway. */
     public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit");
+
+    /** CONDITIONAL flag — deliberately NOT a member of {@link #FEATURES}: the IGDB
+     *  game auto-detect ladder (2026-11-19): {@code GET /api/games/lookup} +
+     *  {@code GET /api/games/{id}} + {@code POST /api/games/confirm} + the Server
+     *  Settings credential endpoints ({@code GET/PATCH /api/server/igdb}). Reported
+     *  by {@link #featuresFor} ONLY while both Twitch application credentials are
+     *  configured: without them every /api/games endpoint answers 503, so lighting
+     *  the client's auto-detect UI up would be a dead button. Like every flag, once
+     *  reported the literal is frozen forever. */
+    public static final String IGDB_GAMES = "igdb-games";
+
+    /** The runtime list for {@code GET /api/server}: the unconditional {@link #FEATURES}
+     *  plus the conditional flags the instance's configuration currently earns. */
+    public static List<String> featuresFor(ServerProfile profile) {
+        if (profile == null
+                || profile.getIgdbClientId() == null || profile.getIgdbClientId().isBlank()
+                || profile.getIgdbClientSecret() == null || profile.getIgdbClientSecret().isBlank()) {
+            return FEATURES;
+        }
+        List<String> out = new ArrayList<>(FEATURES);
+        out.add(IGDB_GAMES);
+        return List.copyOf(out);
+    }
 
     private ServerCapabilities() {
     }

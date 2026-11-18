@@ -67,6 +67,13 @@ desktop-клиент, `../space-client`; историческое имя `oak-cl
 - **Безопасность**: серия аудит-раундов — запрет STOMP SEND в брокерские топики,
   DirectContactGate (запрет ЛС по роли), Janus enforcement, SPEAK enforcement,
   REST/MinIO scoped-ключи и квоты, read-гейты метаданных, получатели личных пушей.
+- **IGDB-интеграция** (round 1, V19): Twitch-ключи в Server Settings (`/api/server/igdb`,
+  MANAGE_SERVER, секрет write-only), токен client_credentials в памяти с автореминтом;
+  прокси к api.igdb.com (сервер-only, без CORS у IGDB); матчинг exe→игра: Steam appid →
+  fuzzy search по нормализованным именам (точное совпадение / candidates + confirm);
+  кэш `igdb_games` + `igdb_match_cache`; `/api/games/*` — аутентифицированным,
+  30/мин/юзер, Apicalypse-санитайз; capability `igdb-games` УСЛОВНЫЙ (только при
+  настроенных ключах). Решения — security-operations.md.
 - **Инфраструктура**: Flyway владеет схемой (`ddl-auto: validate`, изменения — только
   `V*.sql` в том же коммите); логгирование (rolling, часовой rollover, retention ≈ сутки,
   `GET /api/server/logs`); healthcheck периферии; capability-скелет (`GET /api/server`
@@ -102,7 +109,8 @@ desktop-клиент, `../space-client`; историческое имя `oak-cl
 - **Message** — сообщение (контент + JSON-вложения + reply/forward-поля).
 - **Role** — глобальная роль (bitmask permissions, position-иерархия, kind
   EVERYONE/OWNER/CUSTOM); **ChannelRoleOverride** — per-канальный allow/deny.
-- **ServerProfile** — singleton-строка: имя/иконка инстанса, watermark'ы хранения.
+- **ServerProfile** — singleton-строка: имя/иконка инстанса, watermark'ы хранения, Twitch-ключи IGDB.
+- **IgdbGame / IgdbMatchCache** — кэш IGDB: карточки игр + ключи матчинга (V19).
 - Схема — по миграциям Flyway (`src/main/resources/db/migration/`).
 
 ## Структура пакетов

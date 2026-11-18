@@ -99,6 +99,20 @@ public class ServerProfile {
     @Column(name = "afk_timeout_minutes", columnDefinition = "int default 30")
     private Integer afkTimeoutMinutes;
 
+    /** Twitch application Client ID of the IGDB game-database integration (registered
+     *  at dev.twitch.tv, pasted by the admin in Server Settings → IGDB). Either
+     *  credential null = the integration is off: /api/games answers 503 and the
+     *  {@code igdb-games} capability is not reported. Never secret — but only shown
+     *  in the MANAGE_SERVER settings screen. */
+    @Column(name = "igdb_client_id", length = 64)
+    private String igdbClientId;
+
+    /** The Client ID's secret twin. NEVER returned by any API endpoint (the settings
+     *  response carries only the id + a configured flag) and never written to logs;
+     *  lives in the DB like the rest of the instance configuration. */
+    @Column(name = "igdb_client_secret", length = 128)
+    private String igdbClientSecret;
+
     public ServerProfile(String name) {
         this.name = name;
     }

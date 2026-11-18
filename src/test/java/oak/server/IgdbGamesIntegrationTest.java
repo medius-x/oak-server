@@ -1,0 +1,347 @@
+package oak.server;
+
+import com.jayway.jsonpath.JsonPath;
+import oak.server.service.igdb.IgdbClient;
+import oak.server.service.igdb.IgdbLookupRateLimiter;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.transaction.annotation.Transactional;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+/**
+ * MockMvc coverage of the IGDB round-1 endpoints on the in-memory H2 profile with the
+ * outbound {@link IgdbClient} mocked: the 503/403/400/429 gates, the full match
+ * ladder (Steam appid → exact-name search → candidates), the cache discipline (a hit
+ * and a fresh miss never touch IGDB twice; an ambiguous result caches nothing), the
+ * confirm pinning, and the Apicalypse-injection neutralization on the search body.
+ */
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")
+@Transactional
+class IgdbGamesIntegrationTest {
+
+    private static final MediaType JSON = MediaType.APPLICATION_JSON;
+    private static final JsonMapper MAPPER = JsonMapper.builder().build();
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @Autowired
+    private TestInvites testInvites;
+
+    @MockitoBean
+    private IgdbClient igdbClient;
+
+    private String ownerToken;
+
+    /** Fresh ordinary member per TEST: the lookup rate limiter is a context-wide
+     *  singleton (in-memory, not transactional), so a spray test must not poison the
+     *  window of every later test's user. */
+    private static final java.util.concurrent.atomic.AtomicInteger MEMBER_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger();
+
+    @BeforeEach
+    void registerOwner() throws Exception {
+        ownerToken = registerAndLogin("owner", "supersecret");   // first = OWNER
+    }
+
+    private String memberToken() throws Exception {
+        return registerAndLogin("member" + MEMBER_SEQ.incrementAndGet(), "supersecret");
+    }
+
+    // --- configuration gates ---
+
+    @Test
+    void lookupAnswers503AndHidesTheCapabilityWhileUnconfigured() throws Exception {
+        String memberToken = memberToken();
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("exeName", "eldenring.exe"))
+                .andExpect(status().isServiceUnavailable());
+
+        String capabilities = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andExpect(jsonPath("$.capabilities").isArray())
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(capabilities.contains("igdb-games"));
+    }
+
+    @Test
+    void settingsAreWriteOnlyForManagersAndNeverEchoTheSecret() throws Exception {
+        String memberToken = memberToken();
+        // an ordinary member can neither read nor write the integration settings
+        mockMvc.perform(get("/api/server/igdb").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(patch("/api/server/igdb").header("Authorization", "Bearer " + memberToken)
+                        .contentType(JSON).content("{\"clientId\":\"x\",\"clientSecret\":\"y\"}"))
+                .andExpect(status().isForbidden());
+
+        // the owner configures the pair; the answer carries the id + configured only
+        String settings = mockMvc
+                .perform(patch("/api/server/igdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON)
+                        .content("{\"clientId\":\"cid123\",\"clientSecret\":\"supersecret456\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.clientId").value("cid123"))
+                .andExpect(jsonPath("$.configured").value(true))
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(settings.contains("supersecret456"));
+
+        // the capability lights up for EVERY member (the profile was re-pushed)
+        String capabilities = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertTrue(capabilities.contains("igdb-games"));
+    }
+
+    // --- the ladder ---
+
+    @Test
+    void steamAppidHitResolvesOnceThenServesFromCache() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), contains("external_games.external_game_source = 1")))
+                .thenReturn(igdb("[{\"id\":1942,\"name\":\"The Witcher 3: Wild Hunt\","
+                        + "\"cover\":{\"image_id\":\"co1tiw\"},"
+                        + "\"genres\":[{\"id\":31,\"name\":\"Adventure\"}],"
+                        + "\"first_release_date\":1431993600}]"));
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "292030").param("exeName", "witcher3.exe")
+                        .param("folderName", "The Witcher 3"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game.igdbId").value(1942))
+                .andExpect(jsonPath("$.game.name").value("The Witcher 3: Wild Hunt"))
+                .andExpect(jsonPath("$.game.coverImageId").value("co1tiw"))
+                .andExpect(jsonPath("$.game.genres[0].name").value("Adventure"))
+                .andExpect(jsonPath("$.game.firstReleaseDate").value(1431993600))
+                .andExpect(jsonPath("$.candidates").isEmpty());
+
+        // the second lookup never leaves the cache
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "292030"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game.igdbId").value(1942));
+        verify(igdbClient, times(1)).query(anyString(), anyString());
+    }
+
+    @Test
+    void steamMissRecordsACacheEntryAndSkipsIgdbOnRepeat() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), anyString())).thenReturn(igdb("[]"));
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "730"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game").doesNotExist())
+                .andExpect(jsonPath("$.candidates").isEmpty());
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "730"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game").doesNotExist());
+        verify(igdbClient, times(1)).query(anyString(), anyString()); // the miss was cached
+    }
+
+    @Test
+    void exactNameMatchResolvesConfidently() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), contains("search")))
+                .thenReturn(igdb("[{\"id\":1030,\"name\":\"ELDEN RING\",\"genres\":[]}]"));
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("folderName", "ELDEN RING"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game.igdbId").value(1030))
+                .andExpect(jsonPath("$.candidates").isEmpty());
+    }
+
+    @Test
+    void ambiguousSearchReturnsCandidatesAndDeliberatelyCachesNothing() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), contains("search")))
+                .thenReturn(igdb("[{\"id\":1,\"name\":\"Elden Ring Nightreign\",\"genres\":[]},"
+                        + "{\"id\":2,\"name\":\"Elden Gunfire\",\"genres\":[]}]"));
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("exeName", "eldenring.exe"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game").doesNotExist())
+                .andExpect(jsonPath("$.candidates.length()").value(2));
+
+        // nothing pinned: a repeated lookup re-searches honestly
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("exeName", "eldenring.exe"))
+                .andExpect(jsonPath("$.candidates.length()").value(2));
+        verify(igdbClient, times(2)).query(anyString(), contains("search"));
+    }
+
+    @Test
+    void confirmPinsThePickAndTheNextLookupSkipsIgdbEntirely() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), contains("search")))
+                .thenReturn(igdb("[{\"id\":1,\"name\":\"Elden Ring Nightreign\",\"genres\":[]},"
+                        + "{\"id\":2,\"name\":\"ELDEN RING\",\"genres\":[]}]"));
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("exeName", "eldenring.exe"))
+                .andExpect(jsonPath("$.candidates.length()").value(2));
+
+        mockMvc.perform(post("/api/games/confirm").header("Authorization", "Bearer " + memberToken)
+                        .contentType(JSON)
+                        .content("{\"exeName\":\"eldenring.exe\",\"igdbId\":2}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("exeName", "eldenring.exe"))
+                .andExpect(jsonPath("$.game.igdbId").value(2))
+                .andExpect(jsonPath("$.candidates").isEmpty());
+        verify(igdbClient, times(1)).query(anyString(), anyString()); // only the first search
+    }
+
+    @Test
+    void confirmOfANeverSeenGameIsRejected() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        mockMvc.perform(post("/api/games/confirm").header("Authorization", "Bearer " + memberToken)
+                        .contentType(JSON)
+                        .content("{\"exeName\":\"whatever.exe\",\"igdbId\":999}"))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void cardEndpointServesCachesAnd404s() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), contains("where id = 1942")))
+                .thenReturn(igdb("[{\"id\":1942,\"name\":\"The Witcher 3: Wild Hunt\",\"genres\":[]}]"));
+        when(igdbClient.query(anyString(), contains("where id = 424242")))
+                .thenReturn(igdb("[]"));
+
+        mockMvc.perform(get("/api/games/1942").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name").value("The Witcher 3: Wild Hunt"));
+        mockMvc.perform(get("/api/games/1942").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk());
+        verify(igdbClient, times(1)).query(anyString(), anyString()); // second call: cache
+
+        mockMvc.perform(get("/api/games/424242").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isNotFound());
+    }
+
+    // --- input gates ---
+
+    @Test
+    void malformedAndEmptyInputsAreRejectedBeforeIgdb() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "730\"; drop")) // injection in the app id
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("exeName", "a".repeat(300)))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isBadRequest()); // nothing to look up
+        verify(igdbClient, times(0)).query(anyString(), anyString());
+    }
+
+    @Test
+    void apicalypseMetaCharactersNeverReachTheQueryBody() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), anyString())).thenReturn(igdb("[]"));
+
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("folderName", "weird\"; limit 500; where id = 1"))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(igdbClient).query(anyString(), body.capture());
+        String sent = body.getValue();
+        // the sanitized title rides INSIDE the search quotes; the injection attempt
+        // (closing them early, starting a new statement) is gone
+        assertTrue(sent.startsWith("search \"weird limit 500 where id = 1\";"));
+        assertFalse(sent.contains("\"; limit"));
+    }
+
+    @Test
+    void lookupSprayIsThrottledPerUser() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), anyString())).thenReturn(igdb("[]"));
+        mockMvc.perform(post("/api/games/confirm").header("Authorization", "Bearer " + memberToken)
+                        .contentType(JSON).content("{\"exeName\":\"eldenring.exe\",\"igdbId\":1}"))
+                .andExpect(status().isBadRequest()); // unknown game — but it BURNS one slot
+        for (int attempt = 0; attempt < IgdbLookupRateLimiter.CAP - 1; attempt++) {
+            mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                            .param("appId", "730"))
+                    .andExpect(status().isOk());
+        }
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "730"))
+                .andExpect(status().isTooManyRequests());
+    }
+
+    @Test
+    void everythingRequiresAuthentication() throws Exception {
+        mockMvc.perform(get("/api/games/lookup").param("appId", "730"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/games/1942"))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(post("/api/games/confirm").contentType(JSON)
+                        .content("{\"exeName\":\"a.exe\",\"igdbId\":1}"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    // --- helpers ---
+
+    private void configure() throws Exception {
+        mockMvc.perform(patch("/api/server/igdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON)
+                        .content("{\"clientId\":\"cid123\",\"clientSecret\":\"csec456\"}"))
+                .andExpect(status().isOk());
+    }
+
+    private static JsonNode igdb(String json) {
+        return MAPPER.readTree(json);
+    }
+
+    private String registerAndLogin(String username, String password) throws Exception {
+        mockMvc.perform(post("/api/auth/register").contentType(JSON)
+                        .content(testInvites.registrationBody(username, password)))
+                .andExpect(status().isCreated());
+        MvcResult login = mockMvc.perform(post("/api/auth/login").contentType(JSON)
+                        .content(String.format("{\"username\":\"%s\",\"password\":\"%s\"}",
+                                username, password)))
+                .andExpect(status().isOk())
+                .andReturn();
+        return JsonPath.read(login.getResponse().getContentAsString(), "$.token");
+    }
+}
