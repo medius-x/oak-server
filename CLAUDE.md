@@ -149,16 +149,10 @@ oak.server
 
 - **Server-side logout**: `POST /api/auth/logout` — отзыв refresh текущей сессии
   (идемпотентный 204); опционально `logout-all` (вся семья = «выйти со всех устройств»).
-- **Remote provisioning, фаза 1 (one-line server)**: контейнеризация oak-server в compose
-  + install-скрипт (curl|bash: compose в `/opt/oak/`, генерация `.env` со случайными
-  секретами, автодетект `TURN_EXTERNAL_IP`, `docker compose up -d`, полл health-check;
-  идемпотентность: живой `/opt/oak` → adopt, никогда `down -v`; v1 без TLS — только
-  LAN/VPN, честно пометить).
-- **Remote provisioning, фаза 2 (SSH-диалог из клиента)**: клиент по SSH зондирует
-  (ОС/Docker), выкладывает артефакты фазы 1, ждёт health-check, подключается; SSH-креды
-  не персистить.
 - **Схлопнуть миграции V3–V5 в чистый набор ПЕРЕД УПАКОВКОЙ** (V5 существует только
   потому, что V3/V4 уже исполнялись на dev).
-- **Активность «Играет в …»** (оценка M, wire парный) — модель продумана, не реализовано.
+
+Реализовано ранее (в списке не держать): remote provisioning обеих фаз (SSH-пайплайн
+round C — см. space-client docs/claude/launch-rounds.md), активность «Играет в …».
 
 Детали и историю решений — `docs/claude/{feature-core,security-operations,infra-releases,research-backlog}.md`.
