@@ -180,19 +180,28 @@ public class VoiceGhostSweeper {
             long channelId = room.getKey();
             Set<String> members = membersByChannel.getOrDefault(channelId, Set.of());
             for (String username : room.getValue()) {
+                // NULL-checked lookups throughout — a getOrDefault(..., Map.of()) default
+                // threw UnsupportedOperationException on remove() for every holder without
+                // a counter (i.e. every VISIBLE participant, every tick — the live
+                // "куча UnsupportedOperationException" report 2026-11-18: the immutable
+                // map's remove throws even for absent keys).
+                Map<Long, Integer> userTicks = invisibleTokenTicks.get(username);
                 if (members.contains(username)) {
-                    Integer previousTicks = invisibleTokenTicks.getOrDefault(username, Map.of()).remove(channelId);
-                    if (previousTicks != null && previousTicks >= INVISIBLE_TOKEN_TICKS - 1) {
-                        // A near-grace recovery: one more absent tick would have revoked —
-                        // exactly the borderline case a false-positive report hinges on.
-                        log.info("[ghost-sweep] holder '{}' back in room {} membership after {} invisible ticks — counter reset",
-                                username, channelId, previousTicks);
+                    if (userTicks != null) {
+                        Integer previousTicks = userTicks.remove(channelId);
+                        if (previousTicks != null && previousTicks >= INVISIBLE_TOKEN_TICKS - 1) {
+                            // A near-grace recovery: one more absent tick would have revoked —
+                            // exactly the borderline case a false-positive report hinges on.
+                            log.info("[ghost-sweep] holder '{}' back in room {} membership after {} invisible ticks — counter reset",
+                                    username, channelId, previousTicks);
+                        }
                     }
                     continue;
                 }
-                int ticks = invisibleTokenTicks
-                        .computeIfAbsent(username, ignored -> new HashMap<>())
-                        .merge(channelId, 1, Integer::sum);
+                if (userTicks == null) {
+                    userTicks = invisibleTokenTicks.computeIfAbsent(username, ignored -> new HashMap<>());
+                }
+                int ticks = userTicks.merge(channelId, 1, Integer::sum);
                 if (ticks == 1) {
                     log.info("[ghost-sweep] holder '{}' ({}) holds a token for room {} but is absent from its "
                                     + "membership (tick 1/{}; holder's membership channels: {}) — revoking in {} more ticks if it stays this way",
@@ -201,7 +210,7 @@ public class VoiceGhostSweeper {
                             INVISIBLE_TOKEN_TICKS - 1);
                 }
                 if (ticks >= INVISIBLE_TOKEN_TICKS) {
-                    invisibleTokenTicks.getOrDefault(username, Map.of()).remove(channelId);
+                    userTicks.remove(channelId);
                     log.warn("[ghost-sweep] revoking room-{} tokens of invisible holder '{}' — absent from membership "
                                     + "for {} ticks, holder is {}, membership channels: {} (an honest client re-joins via /room; "
                                     + "if this was a live talk, look for the holder's tick-1 marker above)",

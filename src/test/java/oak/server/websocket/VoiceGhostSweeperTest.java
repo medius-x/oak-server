@@ -59,6 +59,26 @@ class VoiceGhostSweeperTest {
     }
 
     @Test
+    void aVisibleHolderWithoutACounterMustNotBlowUpTheTick() {
+        // The live UOE regression (2026-11-18): a holder PRESENT in the channel's membership
+        // and holding NO invisible counter is the ordinary state of every visible participant
+        // every tick — the old getOrDefault(..., Map.of()).remove(...) threw
+        // UnsupportedOperationException right there, killing the whole sweep pass.
+        when(tracker.snapshot()).thenReturn(List.of(
+                new VoiceChannelMembersDto(7L, List.of("alice"))));
+        when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of(
+                7L, List.of("alice", "carol")));
+        when(presence.onlineUsernames()).thenReturn(Set.of("alice", "carol"));
+
+        for (int tick = 0; tick < VoiceGhostSweeper.INVISIBLE_TOKEN_TICKS; tick++) {
+            sweeper.sweep(); // must not throw; carol's counter keeps accumulating meanwhile
+        }
+
+        verify(voiceAccess).revokeTokens(7L, "carol");
+        verify(voiceAccess, never()).revokeTokens(7L, "alice");
+    }
+
+    @Test
     void sweepSkipsIdleRooms() {
         when(tracker.snapshot()).thenReturn(List.of());
         when(voiceAccess.tokenHoldersByChannel()).thenReturn(Map.of());
