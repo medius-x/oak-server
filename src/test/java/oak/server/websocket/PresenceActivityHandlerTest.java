@@ -67,4 +67,19 @@ class PresenceActivityHandlerTest {
         handler.report(null, principal, "s1"); // no body at all — no throw, no state
         assertEquals(0, tracker.currentActivities().size());
     }
+
+    @Test
+    void theIgdbCardReferenceRidesAlongAndABogusOneOnlyDropsItself() {
+        // a game line's card reference passes validation untouched
+        handler.report(new PresenceActivityReport(new PresenceActivity("playing", "ELDEN RING", 1030L)),
+                principal, "s1");
+        assertEquals(1030L, tracker.currentActivities().get(0).activity().igdbGameId());
+
+        // a bogus id (≤0) kills ONLY the card reference — the line itself survives
+        // (the tracker keeps the FIRST live report per user, so s1 clears first)
+        handler.report(new PresenceActivityReport(null), principal, "s1");
+        handler.report(new PresenceActivityReport(new PresenceActivity("playing", "CS2", 0L)), principal, "s2");
+        assertNull(tracker.currentActivities().get(0).activity().igdbGameId());
+        assertEquals("CS2", tracker.currentActivities().get(0).activity().name());
+    }
 }

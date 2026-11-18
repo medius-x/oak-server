@@ -46,7 +46,9 @@ public class PresenceActivityHandler {
         tracker.setActivity(sessionId, sender.getName(), activity);
     }
 
-    /** Valid activity, or null; a null input (the CLEAR report) passes through as null. */
+    /** Valid activity, or null; a null input (the CLEAR report) passes through as null.
+     *  A bogus {@code igdbGameId} (missing/≤0) only drops the card reference — the
+     *  line itself stays (the id is cosmetic: cover/genres rendering, nothing more). */
     private static PresenceActivity sanitize(PresenceActivity activity) {
         if (activity == null) {
             return null;
@@ -58,6 +60,8 @@ public class PresenceActivityHandler {
         if (name.isEmpty() || name.length() > NAME_MAX_LENGTH) {
             return null;
         }
-        return new PresenceActivity(activity.type(), name);
+        Long igdbGameId = activity.igdbGameId() != null && activity.igdbGameId() > 0
+                ? activity.igdbGameId() : null;
+        return new PresenceActivity(activity.type(), name, igdbGameId);
     }
 }
