@@ -24,7 +24,7 @@ import static org.mockito.Mockito.verify;
 class ShareCongestionHandlerTest {
 
     private final SimpMessagingTemplate messaging = mock(SimpMessagingTemplate.class);
-    private final VoiceMembershipTracker voiceMembership = new VoiceMembershipTracker(messaging);
+    private final VoiceMembershipTracker voiceMembership = new VoiceMembershipTracker(messaging, mock(oak.server.service.JanusVoiceAccessService.class));
     private final ShareCongestionHandler handler = new ShareCongestionHandler(messaging, voiceMembership);
     private final Principal viewer = new UsernamePasswordAuthenticationToken("alice", "pw");
 

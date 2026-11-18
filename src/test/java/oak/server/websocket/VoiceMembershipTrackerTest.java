@@ -11,6 +11,7 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.messaging.Message;
+import oak.server.service.JanusVoiceAccessService;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.messaging.simp.stomp.StompCommand;
 import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
@@ -25,7 +26,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
@@ -44,6 +48,9 @@ class VoiceMembershipTrackerTest {
 
     @Mock
     private SimpMessagingTemplate messagingTemplate;
+
+    @Mock
+    private JanusVoiceAccessService voiceAccess;
 
     @InjectMocks
     private VoiceMembershipTracker tracker;
@@ -416,6 +423,52 @@ class VoiceMembershipTrackerTest {
                 .map(VoiceChannelMembersDto::usernames)
                 .findFirst()
                 .orElse(List.of());
+    }
+
+    @Test
+    void explicitLeaveRevokesTheRoomTokenImmediately() {
+        // The honest-exit tail cleanup (2026-11-18): /voice.leave used to leave the gateway
+        // token alive for the ghost sweep's grace — three minutes of INFO/WARN log noise per
+        // ordinary exit. The explicit leave now revokes at once, quietly.
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.exit("s1");
+
+        verify(voiceAccess).revokeTokens(CHANNEL_A, "alice");
+    }
+
+    @Test
+    void roomSwitchRevokesTheOldRoomToken() {
+        // enter-as-switch emits LEFT for the old room — and drops its token: the switch is
+        // explicit, the old room's token has no honest future (the new room mints its own).
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.enter("s1", "alice", CHANNEL_B);
+
+        verify(voiceAccess).revokeTokens(CHANNEL_A, "alice");
+        verify(voiceAccess, never()).revokeTokens(eq(CHANNEL_B), any());
+    }
+
+    @Test
+    void multiSessionExitKeepsTheTokenUntilTheLastSessionLeaves() {
+        // Refcount parity for the revocation: two tabs in one room — the first exit must not
+        // kill the token the still-connected tab holds.
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.enter("s2", "alice", CHANNEL_A);
+        tracker.exit("s1");
+        verify(voiceAccess, never()).revokeTokens(anyLong(), anyString());
+
+        tracker.exit("s2");
+        verify(voiceAccess).revokeTokens(CHANNEL_A, "alice");
+    }
+
+    @Test
+    void aDisconnectMustNotRevokeTheToken() {
+        // The "never cut a live talk" rule (2026-11-18): a STOMP blip must not revoke —
+        // the Janus long-poll is a separate socket and the voice session survives it; the
+        // ghost sweep's greces own the truly-abandoned case.
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.onDisconnect(disconnect("s1"));
+
+        verify(voiceAccess, never()).revokeTokens(anyLong(), anyString());
     }
 
     private static SessionDisconnectEvent disconnect(String sessionId) {

@@ -23,7 +23,7 @@ import static org.mockito.Mockito.verify;
 class ShareSourceStateHandlerTest {
 
     private final SimpMessagingTemplate messaging = mock(SimpMessagingTemplate.class);
-    private final VoiceMembershipTracker voiceMembership = new VoiceMembershipTracker(messaging);
+    private final VoiceMembershipTracker voiceMembership = new VoiceMembershipTracker(messaging, mock(oak.server.service.JanusVoiceAccessService.class));
     private final ShareSourceStateHandler handler = new ShareSourceStateHandler(messaging, voiceMembership);
     private final Principal publisher = new UsernamePasswordAuthenticationToken("bob", "pw");
 

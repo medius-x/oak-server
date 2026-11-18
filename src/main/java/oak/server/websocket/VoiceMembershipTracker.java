@@ -1,10 +1,12 @@
 package oak.server.websocket;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.VoiceChannelMembersDto;
 import oak.server.dto.VoiceControlState;
 import oak.server.dto.VoiceMemberEvent;
 import oak.server.dto.VoiceMemberStatus;
+import oak.server.service.JanusVoiceAccessService;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
@@ -41,6 +43,7 @@ import java.util.TreeMap;
  */
 @Component
 @RequiredArgsConstructor
+@Slf4j
 public class VoiceMembershipTracker {
 
     /** STOMP destination voice-membership deltas are pushed to: {@code /topic/voice}. */
@@ -49,6 +52,13 @@ public class VoiceMembershipTracker {
     public static final String VOICE_STATE_TOPIC = "/topic/voice.state";
 
     private final SimpMessagingTemplate messagingTemplate;
+    /** Immediate token revocation on the EXPLICIT leave paths (2026-11-18): leaving a room
+     *  used to leave the gateway token alive for the ghost sweep's grace — an honest
+     *  exit then produced a three-minute INFO/WARN log tail. Revoking at the leave kills
+     *  the token at once and quietly; the sweep's invisible-holder grace stays as the
+     *  anomaly backstop (a DISCONNECT deliberately does NOT revoke — a live voice session
+     *  can survive a STOMP blip, and the sweep's greces own that path). */
+    private final JanusVoiceAccessService voiceAccess;
 
     private final Map<String, String> sessionToUsername = new HashMap<>();
     private final Map<String, Long> sessionToChannel = new HashMap<>();
@@ -83,13 +93,16 @@ public class VoiceMembershipTracker {
     public void enter(String sessionId, String username, Long channelId) {
         List<VoiceMemberEvent> toPublish = new ArrayList<>();
         List<String> membersWithState = new ArrayList<>();
+        List<Revocation> toRevoke = new ArrayList<>(); // the old room, when this enter is a switch
         synchronized (lock) {
             Long current = sessionToChannel.get(sessionId);
             if (current != null && current.equals(channelId)) {
                 return; // already in this channel — duplicate join is a no-op
             }
             if (current != null) {
-                leaveUnderLock(sessionId, toPublish); // switching rooms: emit LEFT for the old one first
+                // switching rooms: emit LEFT for the old one first (and drop its token —
+                // the switch is explicit, the old room's token has no honest future)
+                leaveUnderLock(sessionId, toPublish, toRevoke);
             }
             sessionToUsername.put(sessionId, username);
             sessionToChannel.put(sessionId, channelId);
@@ -114,15 +127,12 @@ public class VoiceMembershipTracker {
         }
         toPublish.forEach(this::publish);
         membersWithState.forEach(member -> publishStateIfChanged(true, channelId, member));
+        toRevoke.forEach(this::revokeLeft);
     }
 
     /** Records that {@code sessionId} has left whatever room it was in (no-op if it was in none). */
     public void exit(String sessionId) {
-        List<VoiceMemberEvent> toPublish = new ArrayList<>();
-        synchronized (lock) {
-            leaveUnderLock(sessionId, toPublish);
-        }
-        toPublish.forEach(this::publish);
+        leave(sessionId, true);
     }
 
     // --- server-side mute / deafen / kick ---
@@ -307,11 +317,39 @@ public class VoiceMembershipTracker {
         return set != null && set.remove(username);
     }
 
-    /** Drops a disconnecting session from its room — the safety net for abrupt loss / {@code System.exit}. */
+    /** Drops a disconnecting session from its room — the safety net for abrupt loss / {@code System.exit}.
+     *  Deliberately does NOT revoke the room token: a live voice session can outlive a STOMP
+     *  blip (the Janus long-poll is a separate socket), and the ghost sweep's greaces own the
+     *  truly-abandoned case — an instant revoke here would cut mid-talk voice on every network
+     *  hiccup (the "never kick a live talk" rule, 2026-11-18). */
     @EventListener
     public void onDisconnect(SessionDisconnectEvent event) {
         StompHeaderAccessor accessor = StompHeaderAccessor.wrap(event.getMessage());
-        exit(accessor.getSessionId());
+        leave(accessor.getSessionId(), false);
+    }
+
+    /** The shared leave path: registry update under the lock, publishing and (for the EXPLICIT
+     *  leaves only) token revocation after it. */
+    private void leave(String sessionId, boolean revokeOnEmpty) {
+        List<VoiceMemberEvent> toPublish = new ArrayList<>();
+        List<Revocation> toRevoke = new ArrayList<>();
+        synchronized (lock) {
+            leaveUnderLock(sessionId, toPublish, toRevoke);
+        }
+        toPublish.forEach(this::publish);
+        if (revokeOnEmpty) {
+            toRevoke.forEach(this::revokeLeft);
+        }
+    }
+
+    /** A user fully leaving a room — the token revocation unit. */
+    private record Revocation(String username, long channelId) {}
+
+    /** Fires the immediate token revocation for an explicitly left room (quiet — this is the
+     *  ordinary exit path, not a security event; the ghost sweep logs the anomalies). */
+    private void revokeLeft(Revocation revocation) {
+        log.debug("[voice] revoking room-{} tokens of '{}' (explicit leave)", revocation.channelId(), revocation.username());
+        voiceAccess.revokeTokens(revocation.channelId(), revocation.username());
     }
 
     /** Snapshot of every voice room's members, used to seed {@code GET /api/voice/members}. */
@@ -329,8 +367,9 @@ public class VoiceMembershipTracker {
         }
     }
 
-    /** Must run under {@link #lock}: decrements the session's room refcount, emits a LEFT only on 1&rarr;0. */
-    private void leaveUnderLock(String sessionId, List<VoiceMemberEvent> toPublish) {
+    /** Must run under {@link #lock}: decrements the session's room refcount, emits a LEFT and
+     *  queues a token revocation only on 1&rarr;0 (the caller decides whether to fire it). */
+    private void leaveUnderLock(String sessionId, List<VoiceMemberEvent> toPublish, List<Revocation> toRevoke) {
         String username = sessionToUsername.remove(sessionId);
         if (username == null) {
             return; // not in any room (duplicate exit / disconnect) — no-op
@@ -358,6 +397,7 @@ public class VoiceMembershipTracker {
                 }
             }
             toPublish.add(new VoiceMemberEvent(username, channelId, VoiceMemberStatus.LEFT));
+            toRevoke.add(new Revocation(username, channelId));
         }
     }
 
