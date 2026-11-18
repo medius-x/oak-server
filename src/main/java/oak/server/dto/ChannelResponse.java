@@ -17,10 +17,12 @@ import java.time.Instant;
  * {@code position} the manual sidebar order — {@code (position, id)} sorts the list.
  * {@code afk} flags THE server's AFK channel (the idle-sweep target — one per server);
  * PUT /api/server/afk pings channels.changed so every viewer refetches the flag.
+ * {@code userLimit} is the VOICE room's participant limit ({@code null} = none, else 1..99;
+ * V18) — non-VOICE rows always answer null, and an older client simply ignores the field.
  * WIRE: adding a component changes the record's arity — clients and servers deploy in lockstep.
  */
 public record ChannelResponse(Long id, String name, ChannelType type, Instant createdAt, boolean locked,
-                              Long parentId, int position, boolean afk) {
+                              Long parentId, int position, boolean afk, Integer userLimit) {
 
     public static ChannelResponse from(Channel channel) {
         return from(channel, false, false);
@@ -33,6 +35,7 @@ public record ChannelResponse(Long id, String name, ChannelType type, Instant cr
     /** The list/rename shape: per-viewer lock + the server-wide AFK flag. */
     public static ChannelResponse from(Channel channel, boolean locked, boolean afk) {
         return new ChannelResponse(channel.getId(), channel.getName(), channel.getType(),
-                channel.getCreatedAt(), locked, channel.getParentId(), channel.getPosition(), afk);
+                channel.getCreatedAt(), locked, channel.getParentId(), channel.getPosition(), afk,
+                channel.getUserLimit());
     }
 }

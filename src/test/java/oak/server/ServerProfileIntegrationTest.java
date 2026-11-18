@@ -69,18 +69,20 @@ class ServerProfileIntegrationTest {
                 // without it the client routes archives through the user's computer),
                 // "afk-roster" (the yellow presence dot, 2026-11-04),
                 // "presence-activity" (the roster activity lines, 2026-11-10),
-                // "share-congestion" (the viewer→publisher loss relay, 2026-11-11) and
-                // "share-source-state" (the minimized-share relay, 2026-11-11).
+                // "share-congestion" (the viewer→publisher loss relay, 2026-11-11),
+                // "share-source-state" (the minimized-share relay, 2026-11-11) and
+                // "voice-user-limit" (the VOICE room participant limit, 2026-11-18).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(7))
+                .andExpect(jsonPath("$.capabilities.length()").value(8))
                 .andExpect(jsonPath("$.capabilities[0]").value("backups"))
                 .andExpect(jsonPath("$.capabilities[1]").value("server-migration"))
                 .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"))
                 .andExpect(jsonPath("$.capabilities[3]").value("presence-activity"))
                 .andExpect(jsonPath("$.capabilities[4]").value("share-congestion"))
                 .andExpect(jsonPath("$.capabilities[5]").value("share-source-state"))
-                .andExpect(jsonPath("$.capabilities[6]").value("roster-status"));
+                .andExpect(jsonPath("$.capabilities[6]").value("roster-status"))
+                .andExpect(jsonPath("$.capabilities[7]").value("voice-user-limit"));
     }
 
     @Test

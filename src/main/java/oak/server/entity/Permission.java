@@ -20,7 +20,9 @@ package oak.server.entity;
  * REPURPOSED later by renaming the constant to the new meaning — safe only while the bit is cleared
  * from every persisted mask ({@code V16__retire_reserved_permission_bits.sql} did that at retirement
  * time; a restored backup from before V16 would need the same cleanup re-run, or the stale grant
- * would silently hand the new permission to everyone).
+ * would silently hand the new permission to everyone). First repurpose: bit 14, retired as
+ * EMBED_LINKS 2026-10-02, became {@link #JOIN_FULL_ROOMS} on 2026-11-18 (bit 17 / the former
+ * USE_EXTERNAL_EMOJIS stays reserved).
  */
 public enum Permission {
 
@@ -43,8 +45,11 @@ public enum Permission {
     SEND_MESSAGES(Group.TEXT),
     MANAGE_MESSAGES(Group.TEXT),           // edit/delete others' messages, pin, close discussions
     ATTACH_FILES(Group.TEXT),
-    RESERVED_EMBED_LINKS(Group.TEXT, true),          // retired 2026-10-02 (never enforced; link previews
-                                                     // are client-side) — bit 14 reserved, see class javadoc
+    JOIN_FULL_ROOMS(Group.VOICE),          // repurposed 2026-11-18 from RESERVED_EMBED_LINKS (bit 14,
+                                           // retired 2026-10-02): enter a voice room that is AT its
+                                           // user limit — the bypass beside RoomController's /room gate,
+                                           // channel-scoped like CONNECT (overrides can grant it per
+                                           // channel). Sits in the text block only for bit stability.
     READ_MESSAGE_HISTORY(Group.TEXT),
     MENTION_EVERYONE(Group.TEXT),
     RESERVED_USE_EXTERNAL_EMOJIS(Group.TEXT, true),  // retired 2026-10-02 (no external catalogs exist on a

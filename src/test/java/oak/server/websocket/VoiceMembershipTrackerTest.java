@@ -471,6 +471,20 @@ class VoiceMembershipTrackerTest {
         verify(voiceAccess, never()).revokeTokens(anyLong(), anyString());
     }
 
+    @Test
+    void usernamesInCountsUsersNotTabs() {
+        // The V18 occupancy input: one seat per USER — multi-session members count once, other
+        // channels and the empty case stay out of the answer.
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.enter("s2", "alice", CHANNEL_A);
+        tracker.enter("s3", "bob", CHANNEL_A);
+        tracker.enter("s4", "carol", CHANNEL_B);
+
+        assertEquals(java.util.Set.of("alice", "bob"), tracker.usernamesIn(CHANNEL_A));
+        assertEquals(java.util.Set.of("carol"), tracker.usernamesIn(CHANNEL_B));
+        assertTrue(tracker.usernamesIn(30L).isEmpty());
+    }
+
     private static SessionDisconnectEvent disconnect(String sessionId) {
         // The tracker keys disconnect handling by session id only, so the user on the frame is
         // irrelevant; "unused" mirrors that it is never read (same convention as PresenceTrackerTest).

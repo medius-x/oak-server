@@ -47,7 +47,9 @@ desktop-клиент, `../space-client`; историческое имя `oak-cl
 - **Presence** (`PresenceTracker`, `/topic/presence`), **voice-membership**
   (`VoiceMembershipTracker`, `/topic/voice`), **WebRTC-сигналинг 1-на-1**
   (`CallSignalingHandler` → `/user/queue/call.signal`), **Janus-оркестрация** +
-  token_auth с per-room pin/secret, принудительный mute/kick.
+  token_auth с per-room pin/secret, принудительный mute/kick; голосовые комнаты
+  с лимитом участников (V18: гейт в `/room`, 409 при полноте, байпас-право
+  JOIN_FULL_ROOMS — repurpose бита 14).
 - **MinIO-вложения**: presigned PUT/GET, переподписка `GET /api/attachments/link?key=`
   (стримовое воспроизведение переживает часовой URL); мультивложения 0..10
   (JSON-колонка `messages.attachments`, `AttachmentListCodec`); видео-превью —

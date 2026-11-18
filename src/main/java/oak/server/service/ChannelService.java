@@ -152,6 +152,7 @@ public class ChannelService {
         Long parentId = validatedParentId(type, request.parentId());
         Channel channel = new Channel(request.name(), type);
         channel.setParentId(parentId);
+        channel.setUserLimit(validatedUserLimit(type, request.userLimit()));
         // New rows append to the END of the sidebar (max + 1) — the entity's Java default 0
         // must never leak to the wire (it would jump the channel to the top).
         Channel top = channelRepository.findTopByOrderByPositionDesc();
@@ -162,6 +163,44 @@ public class ChannelService {
         // having to reselect the server. Same REST-write → push pattern as MessageService.create.
         messagingTemplate.convertAndSend(CHANNELS_TOPIC, response);
         return response;
+    }
+
+    /** The create/update user-limit gate: null passes (= no limit); only a VOICE channel may
+     *  carry one, and it must be 1..99 (Discord's cap). All failures are 400s — the client's
+     *  channel editor surfaces the message verbatim. */
+    private static Integer validatedUserLimit(ChannelType type, Integer userLimit) {
+        if (userLimit == null) {
+            return null;
+        }
+        if (type != ChannelType.VOICE) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Only voice channels carry a user limit");
+        }
+        if (userLimit < 1 || userLimit > 99) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "User limit must be between 1 and 99");
+        }
+        return userLimit;
+    }
+
+    /** Sets (or clears, on null) a VOICE channel's participant limit. {@code MANAGE_CHANNELS},
+     *  consistent with create/rename. Lowering the limit below the room's current occupancy is
+     *  ALLOWED and evicts nobody — the gate in {@code RoomController} only blocks new entries.
+     *  Broadcasts the {@link #CHANNELS_CHANGED_TOPIC} ping AFTER COMMIT so every viewer's
+     *  N/L counter refetches. */
+    @Transactional
+    public ChannelResponse setUserLimit(Long channelId, Integer userLimit, String actorUsername) {
+        User actor = auth.requireUser(actorUsername);
+        auth.requireServer(actor, Permission.MANAGE_CHANNELS);
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        if (channel.getType() == ChannelType.DM || channel.getType() == ChannelType.GROUP_DM
+                || channel.getType() == ChannelType.DISCUSSION || channel.getType() == ChannelType.CATEGORY) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not a voice channel");
+        }
+        channel.setUserLimit(validatedUserLimit(channel.getType(), userLimit));
+        channel = channelRepository.save(channel);
+        pingChannelsChangedAfterCommit();
+        boolean afk = channel.getId().equals(profileRepository.singleton().getAfkChannelId());
+        return ChannelResponse.from(channel, lockedFor(channel, auth.resolveChannelMask(actor, channel)), afk);
     }
 
     /** The create/reorder parent gate: null passes (top level); anything else must reference

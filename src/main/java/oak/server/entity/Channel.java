@@ -78,6 +78,14 @@ public class Channel {
     @Column(nullable = false)
     private int position;
 
+    /** The voice room's participant limit ({@code V18}): {@code null} = no limit, else 1..99.
+     *  Meaningful on {@link ChannelType#VOICE} rows only (the service rejects it elsewhere);
+     *  enforced at the entrance — {@code RoomController} refuses {@code GET /room} with 403 when
+     *  the room is full. Lowering the limit below the current occupancy evicts NOBODY: the gate
+     *  only blocks new entries (Discord semantics). */
+    @Column(name = "user_limit")
+    private Integer userLimit;
+
     public Channel(String name, ChannelType type) {
         this.name = name;
         this.type = type;

@@ -7,6 +7,7 @@ import oak.server.dto.ChannelResponse;
 import oak.server.dto.CreateChannelRequest;
 import oak.server.dto.RenameChannelRequest;
 import oak.server.dto.ReorderChannelsRequest;
+import oak.server.dto.UpdateChannelLimitRequest;
 import oak.server.service.ChannelService;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
@@ -65,6 +66,17 @@ public class ChannelController {
                                   @RequestBody @Valid RenameChannelRequest request,
                                   @AuthenticationPrincipal UserDetails principal) {
         return channelService.rename(id, request.name(), principal.getUsername());
+    }
+
+    /** Sets ({@code 1..99}) or clears ({@code null}) a VOICE channel's participant limit
+     *  ({@code MANAGE_CHANNELS}); non-VOICE ids are rejected with 400. Non-atomically beside
+     *  {@code /name} on purpose — the limit is its own knob with its own validation, not a
+     *  rename side-effect. Viewers refresh their N/L counters on the channels-changed ping. */
+    @PatchMapping("/{id}/user-limit")
+    public ChannelResponse setUserLimit(@PathVariable Long id,
+                                        @RequestBody UpdateChannelLimitRequest request,
+                                        @AuthenticationPrincipal UserDetails principal) {
+        return channelService.setUserLimit(id, request.userLimit(), principal.getUsername());
     }
 
     /** The signed-in member's resolved (override-aware) SEND_MESSAGES / ATTACH_FILES on this channel —

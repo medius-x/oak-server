@@ -202,6 +202,15 @@ public class VoiceMembershipTracker {
         }
     }
 
+    /** Distinct usernames with at least one live session in the channel — the voice room's
+     *  occupancy for the user-limit gate ({@code RoomController}): one seat per USER, not per
+     *  tab (multi-session users count once). An idle channel answers an empty set. */
+    public Set<String> usernamesIn(Long channelId) {
+        synchronized (lock) {
+            return Set.copyOf(channelUserCount.getOrDefault(channelId, Map.of()).keySet());
+        }
+    }
+
     public boolean isMuted(Long channelId, String username) {
         synchronized (lock) {
             return stateIn(selfMutedByChannel, channelId, username)

@@ -38,8 +38,14 @@ public final class ServerCapabilities {
      *  status menu (online/away/do-not-disturb + auto), SEND /app/roster.status,
      *  /topic/roster.status flips and the GET /api/presence/status snapshot; the
      *  legacy boolean AFK wire keeps working either way. Without the flag the
-     *  client keeps the 2026-11-04 away-only model and hides the menu. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status");
+     *  client keeps the 2026-11-04 away-only model and hides the menu.
+     *  {@code voice-user-limit} — the VOICE room participant limit (2026-11-18):
+     *  {@code ChannelResponse.userLimit} + {@code PATCH /api/channels/{id}/user-limit}
+     *  + the 403 full-room gate on {@code GET /room} + the JOIN_FULL_ROOMS bypass
+     *  permission (rides the regular /api/permissions catalog). Without the flag the
+     *  client hides the limit editor — the 403 of an old client hitting a full room
+     *  is handled by its generic error path anyway. */
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit");
 
     private ServerCapabilities() {
     }

@@ -82,20 +82,26 @@ class RbacIntegrationTest {
         assertFalse(catalogNames.stream().anyMatch(name -> name.startsWith("RESERVED_")), "catalog must carry no reserved bits");
         assertFalse(catalogNames.contains("EMBED_LINKS"));
         assertFalse(catalogNames.contains("USE_EXTERNAL_EMOJIS"));
+        // …while bit 14, repurposed from RESERVED_EMBED_LINKS into JOIN_FULL_ROOMS (2026-11-18),
+        // is a live catalog row again — in the VOICE group.
+        assertTrue(catalogNames.contains("JOIN_FULL_ROOMS"));
+        List<String> fullRoomGroup = JsonPath.read(catalogResult.getResponse().getContentAsString(),
+                "$[?(@.name == 'JOIN_FULL_ROOMS')].group");
+        assertEquals(List.of("VOICE"), fullRoomGroup);
 
-        // …and the OWNER's "every permission" name list skips them too — the ADMINISTRATOR
+        // …and the OWNER's "every permission" name list skips reserved bits — the ADMINISTRATOR
         // short-circuit sets every BIT (reserved included), names() must filter them out.
         mockMvc.perform(get("/api/users/me/permissions").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.not(
-                        org.hamcrest.Matchers.hasItem("RESERVED_EMBED_LINKS"))))
-                .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.not(
-                        org.hamcrest.Matchers.hasItem("RESERVED_USE_EXTERNAL_EMOJIS"))));
+                        org.hamcrest.Matchers.hasItem("RESERVED_USE_EXTERNAL_EMOJIS"))))
+                .andExpect(jsonPath("$.permissions").value(org.hamcrest.Matchers.hasItem("JOIN_FULL_ROOMS")));
 
-        // Fresh @everyone defaults carry neither retired bit (V16 clears legacy rows).
-        long retiredBits = Permission.RESERVED_EMBED_LINKS.bit | Permission.RESERVED_USE_EXTERNAL_EMOJIS.bit;
+        // Fresh @everyone defaults carry neither the still-reserved bit 17 nor the repurposed bit 14
+        // (V16 cleared it from legacy rows and the seeder must not re-grant the new meaning).
+        long bannedBits = Permission.JOIN_FULL_ROOMS.bit | Permission.RESERVED_USE_EXTERNAL_EMOJIS.bit;
         Role everyone = roleRepository.findByKind(RoleKind.EVERYONE).orElseThrow();
-        assertEquals(0L, everyone.getPermissions() & retiredBits);
+        assertEquals(0L, everyone.getPermissions() & bannedBits);
     }
 
     @Test

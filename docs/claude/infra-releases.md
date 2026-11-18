@@ -28,7 +28,7 @@ pom → **0.1.0** синхронно с package.json клиента; `finalName=
 
 ## Capability-механизм (ServerCapabilities)
 
-`ServerProfileResponse` += 8-е `version` ("dev" в IDE-ране) + 9-е `capabilities` (List<String>). Клиент ГРАЦИОЗНО деградирует против старого сервера; в версию-таблицы НЕ играем (юзер-решение). **Доктрина:** флаг только для фич ПОСЛЕ 0.1.0 (0.1.0 = безусловная база); отсутствие поля = база, НЕ бэкфорить флаги базовых фич; флаг не удаляется/не переименовывается. Флаги: `backups`, `server-migration`, `afk-roster`.
+`ServerProfileResponse` += 8-е `version` ("dev" в IDE-ране) + 9-е `capabilities` (List<String>). Клиент ГРАЦИОЗНО деградирует против старого сервера; в версию-таблицы НЕ играем (юзер-решение). **Доктрина:** флаг только для фич ПОСЛЕ 0.1.0 (0.1.0 = безусловная база); отсутствие поля = база, НЕ бэкфорить флаги базовых фич; флаг не удаляется/не переименовывается. Флаги: `backups`, `server-migration`, `afk-roster`, `presence-activity`, `share-congestion`, `share-source-state`, `roster-status`, `voice-user-limit` (лимит-комнаты V18 — решения в security-operations.md).
 
 ## Бэкап + restore сервера
 
