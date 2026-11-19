@@ -10,6 +10,7 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import tools.jackson.databind.JsonNode;
 
+import java.time.Clock;
 import java.time.Duration;
 
 /**
@@ -20,6 +21,12 @@ import java.time.Duration;
  * expiry or a settings change), a 429 backs off once for {@link #retryPauseMillis}
  * (the shared 4-requests-per-second budget — the match cache keeps collisions rare).
  * Everything else surfaces as {@link IgdbException} → HTTP 502.
+ *
+ * <p>The {@link IgdbCircuitBreaker} in front (user report 2026-11-19: the hosting may
+ * BLOCK or black-hole IGDB entirely): after consecutive upstream failures the door
+ * PARKS for a growing cooldown — parked calls fail in milliseconds without touching
+ * the network (a blocked host would otherwise burn the 5 s connect timeout on every
+ * fresh game forever), and the log carries ONE line per transition, not per request.
  */
 @Slf4j
 @Service
@@ -29,19 +36,26 @@ public class IgdbClient {
 
     private final IgdbAuthService authService;
     private final RestClient restClient;
+    private final IgdbCircuitBreaker breaker;
 
     /** 429 backoff; package-private so the unit test shrinks it. */
     long retryPauseMillis = 1_200;
 
     @Autowired
     public IgdbClient(IgdbAuthService authService) {
-        this(authService, defaultClient());
+        this(authService, defaultClient(), new IgdbCircuitBreaker(Clock.systemUTC()));
     }
 
     /** Test seam: a RestClient bound to a MockRestServiceServer. */
     IgdbClient(IgdbAuthService authService, RestClient restClient) {
+        this(authService, restClient, new IgdbCircuitBreaker(Clock.systemUTC()));
+    }
+
+    /** Test seam with an injected breaker (its clock drives the cooldown windows). */
+    IgdbClient(IgdbAuthService authService, RestClient restClient, IgdbCircuitBreaker breaker) {
         this.authService = authService;
         this.restClient = restClient;
+        this.breaker = breaker;
     }
 
     private static RestClient defaultClient() {
@@ -54,9 +68,33 @@ public class IgdbClient {
     /**
      * Runs one Apicalypse query against an IGDB endpoint and answers the parsed JSON
      * array. The body must already be sanitized where user input is embedded — the
-     * callers build it from {@link IgdbNames} output only.
+     * callers build it from {@link IgdbNames} output only. The circuit breaker wraps
+     * the whole attempt (token mint included): parked → instant {@link IgdbException},
+     * a failure may open the park, a success closes it.
      */
     public JsonNode query(String endpoint, String apicalypseBody) {
+        if (breaker.isOpen()) {
+            throw new IgdbException("IGDB unreachable — outbound paused for "
+                    + breaker.cooldownLeftMillis() / 1000 + " more s (the log notes when it parked)");
+        }
+        try {
+            JsonNode answer = queryWithRetries(endpoint, apicalypseBody);
+            int failedAttempts = breaker.onSuccess();
+            if (failedAttempts > 0) {
+                log.info("IGDB reachable again after {} failed attempt(s) — outbound resumed", failedAttempts);
+            }
+            return answer;
+        } catch (IgdbException failure) {
+            Long pausedForMillis = breaker.onFailure();
+            if (pausedForMillis != null) {
+                log.warn("IGDB unreachable ({}); outbound parked for {} s — cached games keep answering",
+                        failure.getMessage(), pausedForMillis / 1000);
+            }
+            throw failure;
+        }
+    }
+
+    private JsonNode queryWithRetries(String endpoint, String apicalypseBody) {
         try {
             return exchange(endpoint, apicalypseBody, true);
         } catch (HttpClientErrorException.Unauthorized staleToken) {
