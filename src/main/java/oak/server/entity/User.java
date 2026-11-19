@@ -49,6 +49,14 @@ public class User {
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 
+    /** The user's LAST SEEN moment (V22): stamped when they actually show up
+     *  online (the first STOMP connect of their session set) — the future
+     *  achievements' "was here" data. Null until the first visit after the
+     *  column appeared. Written by {@code LastSeenRecorder}; NEVER touches the
+     *  @UpdateTimestamp column (a direct UPDATE query, not a save()). */
+    @Column(name = "last_seen_at")
+    private Instant lastSeenAt;
+
     @UpdateTimestamp
     @Column(name = "updated_at")
     private Instant updatedAt;

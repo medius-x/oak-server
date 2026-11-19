@@ -1,8 +1,10 @@
 package oak.server.websocket;
 
-import lombok.RequiredArgsConstructor;
 import oak.server.dto.PresenceEvent;
 import oak.server.dto.PresenceStatus;
+import oak.server.dto.UserCameOnlineEvent;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
@@ -43,13 +45,25 @@ import java.util.Set;
  * <p>Publishing happens outside the lock so broker dispatch never blocks the registry.
  */
 @Component
-@RequiredArgsConstructor
 public class PresenceTracker {
 
     /** STOMP destination presence deltas are pushed to: {@code /topic/presence}. */
     public static final String PRESENCE_TOPIC = "/topic/presence";
 
     private final SimpMessagingTemplate messagingTemplate;
+    /** Fires {@link UserCameOnlineEvent} on a user's real visit (nullable — the
+     *  one-argument constructor used by plain unit tests). */
+    private final ApplicationEventPublisher eventPublisher;
+
+    @Autowired
+    public PresenceTracker(SimpMessagingTemplate messagingTemplate, ApplicationEventPublisher eventPublisher) {
+        this.messagingTemplate = messagingTemplate;
+        this.eventPublisher = eventPublisher;
+    }
+
+    PresenceTracker(SimpMessagingTemplate messagingTemplate) {
+        this(messagingTemplate, null);
+    }
 
     private final Map<String, String> sessionToUsername = new HashMap<>();
     private final Map<String, Integer> usernameCount = new HashMap<>();
@@ -68,13 +82,20 @@ public class PresenceTracker {
         String sessionId = accessor.getSessionId();
 
         PresenceEvent toPublish;
+        boolean cameOnline;
         synchronized (lock) {
             // A duplicate CONNECT for the same session must not double-count.
             if (sessionToUsername.putIfAbsent(sessionId, username) != null) {
                 return;
             }
             int openSessions = usernameCount.merge(username, 1, Integer::sum);
-            if (openSessions != 1 || maskedUsernames.contains(username)) {
+            cameOnline = openSessions == 1;
+            if (cameOnline && eventPublisher != null) {
+                // The LAST SEEN bookkeeping (V22): a real visit, INVISIBLE mask
+                // notwithstanding — it hides the user from the world, not this fact.
+                eventPublisher.publishEvent(new UserCameOnlineEvent(username));
+            }
+            if (!cameOnline || maskedUsernames.contains(username)) {
                 return; // already online through another session — or hidden on purpose
             }
             toPublish = new PresenceEvent(username, PresenceStatus.ONLINE);

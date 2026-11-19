@@ -43,8 +43,25 @@ class PresenceTrackerTest {
     @Mock
     private SimpMessagingTemplate messagingTemplate;
 
+    @Mock
+    private org.springframework.context.ApplicationEventPublisher eventPublisher;
+
     @InjectMocks
     private PresenceTracker tracker;
+
+    @Test
+    void aRealVisitFiresTheCameOnlineEventOnceAndDespiteTheMask() {
+        tracker.onConnect(connect("s1", "alice"));
+        tracker.onConnect(connect("s2", "alice")); // a second client: not a new visit
+        verify(eventPublisher, times(1)).publishEvent(any(oak.server.dto.UserCameOnlineEvent.class));
+
+        // an INVISIBLE user still VISITED — the mask hides them from the world, not this fact
+        tracker.onDisconnect(disconnect("s1"));
+        tracker.onDisconnect(disconnect("s2"));
+        tracker.setMasked("bob", true);
+        tracker.onConnect(connect("s3", "bob"));
+        verify(eventPublisher, times(1)).publishEvent(new oak.server.dto.UserCameOnlineEvent("bob"));
+    }
 
     @Test
     void multiSessionLifecyclePublishesOnlineOnFirstAndOfflineOnLast() {

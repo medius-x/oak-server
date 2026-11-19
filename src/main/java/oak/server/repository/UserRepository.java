@@ -3,10 +3,12 @@ package oak.server.repository;
 import oak.server.entity.RoleKind;
 import oak.server.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -49,4 +51,12 @@ public interface UserRepository extends JpaRepository<User, Long> {
     /** Members holding a given role (used to clear assignments before deleting a role). */
     @Query("select u from User u join u.roles r where r.id = :roleId")
     List<User> findUsersByRoleId(@Param("roleId") Long roleId);
+
+    /** Stamps the user's LAST SEEN moment (V22) — monotonic (never moves a
+     *  newer stamp backwards) and never touches the @UpdateTimestamp column
+     *  (a direct UPDATE, not an entity save). */
+    @Modifying
+    @Query("update User u set u.lastSeenAt = :at where u.username = :username "
+            + "and (u.lastSeenAt is null or u.lastSeenAt < :at)")
+    void touchLastSeen(@Param("username") String username, @Param("at") Instant at);
 }
