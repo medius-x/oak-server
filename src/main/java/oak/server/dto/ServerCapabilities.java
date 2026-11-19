@@ -1,6 +1,7 @@
 package oak.server.dto;
 
 import oak.server.entity.ServerProfile;
+import oak.server.service.igdb.IgdbAuthService;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -42,18 +43,23 @@ public final class ServerCapabilities {
      *  /topic/roster.status flips and the GET /api/presence/status snapshot; the
      *  legacy boolean AFK wire keeps working either way. Without the flag the
      *  client keeps the 2026-11-04 away-only model and hides the menu.
+     *  {@code igdb-settings} — the IGDB SETTINGS endpoints (2026-11-19):
+     *  {@code GET/PATCH /api/server/igdb} (the Twitch application credentials,
+     *  MANAGE_SERVER). UNCONDITIONAL on purpose — the endpoints work with or
+     *  without credentials, and the client needs the flag BEFORE any pair is
+     *  set to show the settings screen at all; the DETECT side is the separate
+     *  conditional {@link #IGDB_GAMES}.
      *  {@code voice-user-limit} — the VOICE room participant limit (2026-11-18):
      *  {@code ChannelResponse.userLimit} + {@code PATCH /api/channels/{id}/user-limit}
      *  + the 403 full-room gate on {@code GET /room} + the JOIN_FULL_ROOMS bypass
      *  permission (rides the regular /api/permissions catalog). Without the flag the
      *  client hides the limit editor — the 403 of an old client hitting a full room
      *  is handled by its generic error path anyway. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit");
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings");
 
     /** CONDITIONAL flag — deliberately NOT a member of {@link #FEATURES}: the IGDB
      *  game auto-detect ladder (2026-11-19): {@code GET /api/games/lookup} +
-     *  {@code GET /api/games/{id}} + {@code POST /api/games/confirm} + the Server
-     *  Settings credential endpoints ({@code GET/PATCH /api/server/igdb}). Reported
+     *  {@code GET /api/games/{id}} + {@code POST /api/games/confirm}. Reported
      *  by {@link #featuresFor} ONLY while both Twitch application credentials are
      *  configured: without them every /api/games endpoint answers 503, so lighting
      *  the client's auto-detect UI up would be a dead button. Like every flag, once
@@ -63,9 +69,7 @@ public final class ServerCapabilities {
     /** The runtime list for {@code GET /api/server}: the unconditional {@link #FEATURES}
      *  plus the conditional flags the instance's configuration currently earns. */
     public static List<String> featuresFor(ServerProfile profile) {
-        if (profile == null
-                || profile.getIgdbClientId() == null || profile.getIgdbClientId().isBlank()
-                || profile.getIgdbClientSecret() == null || profile.getIgdbClientSecret().isBlank()) {
+        if (!IgdbAuthService.isIntegrationActive(profile)) {
             return FEATURES;
         }
         List<String> out = new ArrayList<>(FEATURES);

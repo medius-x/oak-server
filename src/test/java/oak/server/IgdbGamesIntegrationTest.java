@@ -226,6 +226,53 @@ class IgdbGamesIntegrationTest {
     }
 
     @Test
+    void pausingTheIntegrationKeepsTheCredentialsAndAnswers503() throws Exception {
+        String memberToken = memberToken();
+        configure(); // credentials stored, the pause switch untouched (null = not paused)
+
+        // pause: the ladder goes 503 and the capability disappears…
+        mockMvc.perform(patch("/api/server/igdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"paused\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.clientId").value("cid123"))   // credentials KEPT
+                .andExpect(jsonPath("$.configured").value(true))
+                .andExpect(jsonPath("$.paused").value(true));
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "292030"))
+                .andExpect(status().isServiceUnavailable());
+        String capabilities = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(capabilities.contains("igdb-games"));
+        verify(igdbClient, times(0)).query(anyString(), anyString()); // never left the gate
+
+        // …and a one-click restore brings everything back (credentials never moved)
+        mockMvc.perform(patch("/api/server/igdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"paused\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.configured").value(true))
+                .andExpect(jsonPath("$.paused").value(false));
+        String restored = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertTrue(restored.contains("igdb-games"));
+    }
+
+    @Test
+    void disconnectKeepsThePausePositionSoFreshKeysRestoreTheExactState() throws Exception {
+        configure();
+        // park first, then disconnect: the switch position must survive
+        mockMvc.perform(patch("/api/server/igdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"paused\":true}"))
+                .andExpect(jsonPath("$.paused").value(true));
+        mockMvc.perform(patch("/api/server/igdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"clientId\":\"\",\"clientSecret\":\"\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.configured").value(false))
+                .andExpect(jsonPath("$.paused").value(true)); // the switch did NOT move
+    }
+
+    @Test
     void confirmOfANeverSeenGameIsRejected() throws Exception {
         String memberToken = memberToken();
         configure();

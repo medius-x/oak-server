@@ -113,6 +113,13 @@ public class ServerProfile {
     @Column(name = "igdb_client_secret", length = 128)
     private String igdbClientSecret;
 
+    /** The integration's PAUSE switch (2026-11-19): false = the ladder answers 503
+     *  and the {@code igdb-games} capability is not reported, while BOTH credentials
+     *  stay stored (re-enabling restores detection with its whole match cache). Null
+     *  on rows predating the column resolves to enabled. */
+    @Column(name = "igdb_enabled")
+    private Boolean igdbEnabled;
+
     public ServerProfile(String name) {
         this.name = name;
     }

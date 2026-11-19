@@ -69,15 +69,32 @@ public class IgdbAuthService {
         return RestClient.builder().requestFactory(factory).build();
     }
 
-    /** Both Twitch credentials present — the integration's on/off switch. */
+    /** Both Twitch credentials present — the SETTINGS state (the fields are filled
+     *  in), independent of the pause switch. */
     public static boolean isConfigured(ServerProfile profile) {
         return profile != null
                 && profile.getIgdbClientId() != null && !profile.getIgdbClientId().isBlank()
                 && profile.getIgdbClientSecret() != null && !profile.getIgdbClientSecret().isBlank();
     }
 
-    public boolean configured() {
-        return isConfigured(profiles.singleton());
+    /** The PAUSE switch position, INDEPENDENT of the credentials: the admin may
+     *  park the integration, disconnect the keys, later paste a fresh pair —
+     *  the switch keeps its position. Null (rows predating the column) = not
+     *  paused. */
+    public static boolean isPaused(ServerProfile profile) {
+        return profile != null && Boolean.FALSE.equals(profile.getIgdbEnabled());
+    }
+
+    /** The LADDER's gate: credentials present AND not paused. This is what
+     *  {@code igdb-games} reporting and every /api/games request check — a
+     *  paused or unconfigured integration answers 503, but stored credentials
+     *  survive for a one-click restore. */
+    public static boolean isIntegrationActive(ServerProfile profile) {
+        return isConfigured(profile) && !isPaused(profile);
+    }
+
+    public boolean integrationActive() {
+        return isIntegrationActive(profiles.singleton());
     }
 
     /** A usable (clientId, token) pair, minting fresh when the cache is empty/near-expiry. */
@@ -98,8 +115,8 @@ public class IgdbAuthService {
 
     private CachedToken mint() {
         ServerProfile profile = profiles.singleton();
-        if (!isConfigured(profile)) {
-            throw new IgdbNotConfiguredException();
+        if (!isIntegrationActive(profile)) {
+            throw new IgdbNotConfiguredException(); // paused is 503, same as unconfigured
         }
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("client_id", profile.getIgdbClientId());

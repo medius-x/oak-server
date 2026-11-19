@@ -200,7 +200,7 @@ public class IgdbGameService {
     // --- helpers ---
 
     private void requireConfigured() {
-        if (!authService.configured()) {
+        if (!authService.integrationActive()) {
             throw new IgdbNotConfiguredException();
         }
     }

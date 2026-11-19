@@ -207,24 +207,26 @@ public class ServerProfileController {
     }
 
     /**
-     * The IGDB integration's settings view ({@code MANAGE_SERVER}): the Client ID and
-     * whether both credentials are set. The SECRET is deliberately absent — it is
-     * write-only through the API (and through the logs).
+     * The IGDB integration's settings view ({@code MANAGE_SERVER}): the Client ID,
+     * whether both credentials are stored, and the pause switch. The SECRET is
+     * deliberately absent — it is write-only through the API (and the logs).
      */
     @GetMapping("/igdb")
     public IgdbSettingsResponse igdbSettings(@AuthenticationPrincipal UserDetails principal) {
         requireManageServer(principal);
-        ServerProfile profile = profile();
-        return new IgdbSettingsResponse(profile.getIgdbClientId(),
-                IgdbAuthService.isConfigured(profile));
+        return responseFor(profile());
     }
 
     /**
-     * Writes the Twitch application credentials ({@code MANAGE_SERVER}). Null fields
-     * keep the stored value; an EMPTY STRING clears it — clearing either side
-     * switches the integration off (the {@code igdb-games} capability disappears and
-     * /api/games starts answering 503). A change drops the cached token and repushes
-     * the profile, so every connected client re-evaluates the capability live.
+     * Writes the Twitch application credentials and/or the pause switch
+     * ({@code MANAGE_SERVER}). Null credential fields keep the stored value; an
+     * EMPTY STRING clears it — the Disconnect button (both credentials gone).
+     * The PAUSE switch and the credentials are fully INDEPENDENT: disconnecting
+     * keeps the switch position, pausing keeps the pair; the working combination
+     * is configured-and-not-paused. Any change repushes the profile so every
+     * connected client re-evaluates the capability live; a credential change
+     * also drops the cached token (the pause switch does not — the same pair
+     * mints the same token).
      */
     @PatchMapping("/igdb")
     @Transactional
@@ -232,23 +234,36 @@ public class ServerProfileController {
                                                    @RequestBody @Valid UpdateIgdbCredentialsRequest request) {
         requireManageServer(principal);
         ServerProfile profile = profile();
-        boolean changed = false;
+        boolean credentialsChanged = false;
         if (request.clientId() != null) {
             profile.setIgdbClientId(blankToNull(request.clientId()));
-            changed = true;
+            credentialsChanged = true;
         }
         if (request.clientSecret() != null) {
             profile.setIgdbClientSecret(blankToNull(request.clientSecret()));
-            changed = true;
+            credentialsChanged = true;
         }
-        if (changed) {
+        boolean anyChange = credentialsChanged;
+        if (request.paused() != null) {
+            profile.setIgdbEnabled(!request.paused()); // the column keeps the NULL=enabled default
+            anyChange = true;
+        }
+        if (anyChange) {
             serverProfileRepository.save(profile);
-            igdbAuthService.invalidate(); // the cached token belongs to the OLD pair
-            log.info("IGDB credentials updated (configured: {})", IgdbAuthService.isConfigured(profile));
+            if (credentialsChanged) {
+                igdbAuthService.invalidate(); // the cached token belongs to the OLD pair
+            }
+            log.info("IGDB settings updated (configured: {}, active: {})",
+                    IgdbAuthService.isConfigured(profile), IgdbAuthService.isIntegrationActive(profile));
             publish(profile);
         }
+        return responseFor(profile);
+    }
+
+    private static IgdbSettingsResponse responseFor(ServerProfile profile) {
         return new IgdbSettingsResponse(profile.getIgdbClientId(),
-                IgdbAuthService.isConfigured(profile));
+                IgdbAuthService.isConfigured(profile),
+                IgdbAuthService.isPaused(profile));
     }
 
     private static String blankToNull(String raw) {
