@@ -105,6 +105,16 @@ public class PresenceTracker {
         publish(toPublish);
     }
 
+    /** Whether the user has at least one live STOMP session (their real liveness —
+     *  the INVISIBLE mask does not change it, it only hides the user from the
+     *  world). The game-session sweeper asks this: a killed client's sessions
+     *  close, an invisible-but-alive user's do not. */
+    public boolean isOnline(String username) {
+        synchronized (lock) {
+            return usernameCount.containsKey(username);
+        }
+    }
+
     /**
      * The INVISIBLE mask (the status menu): flip whether the user's live sessions
      * count as online for the world. Flipping ON while connected publishes OFFLINE

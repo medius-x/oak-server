@@ -1,8 +1,10 @@
 package oak.server.websocket;
 
 import lombok.extern.slf4j.Slf4j;
+import oak.server.dto.GameActivityChangedEvent;
 import oak.server.dto.PresenceActivity;
 import oak.server.dto.PresenceActivityEvent;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -46,9 +48,6 @@ public class PresenceActivityTracker {
     /** One published change per user per window — presence-class spam bound. */
     static final long FLIP_DAMPENING_MILLIS = 1_000;
 
-    private final SimpMessagingTemplate messagingTemplate;
-    private final Clock clock;
-
     /** Insertion-ordered: the first live report of a user wins deterministically. */
     private final Map<String, Report> reportsBySession = new LinkedHashMap<>();
     /** The derived truth per user (absent = no line) — the snapshot source. */
@@ -58,46 +57,89 @@ public class PresenceActivityTracker {
     private final Map<String, Long> lastChangeAt = new HashMap<>();
     private final Object lock = new Object();
 
-    // Two constructors (the Clock test seam) ⇒ Spring needs the intended one marked,
-    // or it hunts for a no-arg constructor and the context dies (the RosterAfk lesson).
+    private final SimpMessagingTemplate messagingTemplate;
+    private final Clock clock;
+    /** Fires {@link GameActivityChangedEvent} on every DERIVED move (nullable —
+     *  the plain unit tests build the tracker without Spring wiring). */
+    private final ApplicationEventPublisher eventPublisher;
+
+    // Four constructors (the Clock + publisher test seams) ⇒ Spring needs the
+    // intended one marked, or it hunts for a no-arg constructor and the context
+    // dies (the RosterAfk lesson).
     @Autowired
-    public PresenceActivityTracker(SimpMessagingTemplate messagingTemplate) {
-        this(messagingTemplate, Clock.systemUTC());
+    public PresenceActivityTracker(SimpMessagingTemplate messagingTemplate,
+                                   ApplicationEventPublisher eventPublisher) {
+        this(messagingTemplate, Clock.systemUTC(), eventPublisher);
+    }
+
+    PresenceActivityTracker(SimpMessagingTemplate messagingTemplate) {
+        this(messagingTemplate, Clock.systemUTC(), null);
     }
 
     PresenceActivityTracker(SimpMessagingTemplate messagingTemplate, Clock clock) {
+        this(messagingTemplate, clock, null);
+    }
+
+    PresenceActivityTracker(SimpMessagingTemplate messagingTemplate, Clock clock,
+                            ApplicationEventPublisher eventPublisher) {
         this.messagingTemplate = messagingTemplate;
         this.clock = clock;
+        this.eventPublisher = eventPublisher;
     }
 
     /** A session's explicit report; {@code activity == null} clears that session's say. */
     public void setActivity(String sessionId, String username, PresenceActivity activity) {
         PresenceActivityEvent toPublish;
+        GameActivityChangedEvent derivedChange;
         synchronized (lock) {
+            PresenceActivity before = liveByUsername.get(username);
             if (activity == null) {
                 reportsBySession.remove(sessionId);
             } else {
                 reportsBySession.put(sessionId, new Report(username, activity));
             }
             toPublish = applyDecision(username);
+            derivedChange = derivedEventOrNull(username, before);
         }
         publish(toPublish);
+        fire(derivedChange);
     }
 
     @EventListener
     public void onDisconnect(SessionDisconnectEvent event) {
         StompHeaderAccessor accessor = StompHeaderAccessor.wrap(event.getMessage());
         String sessionId = accessor.getSessionId();
+        PresenceActivityEvent toPublish = null;
+        GameActivityChangedEvent derivedChange = null;
         synchronized (lock) {
             Report report = reportsBySession.remove(sessionId); // idempotent by sessionId
             if (report == null) {
                 return;
             }
+            PresenceActivity before = liveByUsername.get(report.username());
             if (!hasLiveSession(report.username())) {
                 liveByUsername.remove(report.username()); // silent: OFFLINE told the story
-                return;
+                derivedChange = new GameActivityChangedEvent(report.username(), null);
+            } else {
+                toPublish = applyDecision(report.username());
+                derivedChange = derivedEventOrNull(report.username(), before);
             }
-            publish(applyDecision(report.username()));
+        }
+        publish(toPublish);
+        fire(derivedChange);
+    }
+
+    /** The derived-move event, or null when the line did not actually change
+     *  (the dampening may swallow the BROADCAST; the sessions must not miss it). */
+    private GameActivityChangedEvent derivedEventOrNull(String username, PresenceActivity before) {
+        PresenceActivity after = liveByUsername.get(username);
+        boolean changed = before == null ? after != null : !before.equals(after);
+        return changed ? new GameActivityChangedEvent(username, after) : null;
+    }
+
+    private void fire(GameActivityChangedEvent event) {
+        if (event != null && eventPublisher != null) {
+            eventPublisher.publishEvent(event);
         }
     }
 

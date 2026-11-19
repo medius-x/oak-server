@@ -1,12 +1,17 @@
 package oak.server;
 
 import com.jayway.jsonpath.JsonPath;
+import oak.server.dto.GameActivityChangedEvent;
+import oak.server.dto.PresenceActivity;
+import oak.server.entity.IgdbGame;
+import oak.server.repository.IgdbGameRepository;
 import oak.server.service.igdb.IgdbClient;
 import oak.server.service.igdb.IgdbLookupRateLimiter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.http.MediaType;
@@ -22,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -52,6 +58,13 @@ class IgdbGamesIntegrationTest {
 
     @Autowired
     private TestInvites testInvites;
+
+    /** Publishes tracker events directly (the session listener is synchronous). */
+    @Autowired
+    private ApplicationEventPublisher events;
+
+    @Autowired
+    private IgdbGameRepository igdbGamesCache;
 
     @MockitoBean
     private IgdbClient igdbClient;
@@ -223,6 +236,72 @@ class IgdbGamesIntegrationTest {
                 .andExpect(jsonPath("$.game.igdbId").value(2))
                 .andExpect(jsonPath("$.candidates").isEmpty());
         verify(igdbClient, times(1)).query(anyString(), anyString()); // only the first search
+    }
+
+    @Test
+    void playSessionsAccumulateFromTrackerEventsAndMyGamesServesThem() throws Exception {
+        configure();
+        when(igdbClient.query(anyString(), contains("external_games.external_game_source = 1")))
+                .thenReturn(igdb("[{\"id\":1942,\"name\":\"The Witcher 3: Wild Hunt\","
+                        + "\"cover\":{\"image_id\":\"co1tiw\"},\"genres\":[],\"first_release_date\":1431993600}]"));
+        String player = "player" + MEMBER_SEQ.incrementAndGet();
+        String playerToken = registerAndLogin(player, "supersecret");
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + playerToken)
+                        .param("appId", "292030"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game.igdbId").value(1942));
+
+        // the game line appears, then clears — exactly the tracker's derived events
+        events.publishEvent(new GameActivityChangedEvent(player,
+                new PresenceActivity("playing", "The Witcher 3: Wild Hunt", 1942L)));
+        events.publishEvent(new GameActivityChangedEvent(player, null));
+
+        mockMvc.perform(get("/api/games/my").header("Authorization", "Bearer " + playerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].igdbId").value(1942))
+                .andExpect(jsonPath("$[0].name").value("The Witcher 3: Wild Hunt"))
+                .andExpect(jsonPath("$[0].coverImageId").value("co1tiw"))
+                .andExpect(jsonPath("$[0].genres").isArray())
+                .andExpect(jsonPath("$[0].totalSeconds").isNumber())
+                .andExpect(jsonPath("$[0].lastPlayedAt").isNotEmpty());
+    }
+
+    @Test
+    void myGamesRequiresAuthenticationAndIsEmptyForANewcomer() throws Exception {
+        mockMvc.perform(get("/api/games/my"))
+                .andExpect(status().isUnauthorized());
+        String memberToken = memberToken();
+        configure();
+        mockMvc.perform(get("/api/games/my").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$").isEmpty());
+    }
+
+    @Test
+    void aStaleCachedCardRefreshesLazilyAfterACacheHit() throws Exception {
+        configure();
+        when(igdbClient.query(anyString(), contains("external_games.external_game_source = 1")))
+                .thenReturn(igdb("[{\"id\":1942,\"name\":\"The Witcher 3: Wild Hunt\","
+                        + "\"cover\":{\"image_id\":\"co1tiw\"},\"genres\":[],\"first_release_date\":1431993600}]"));
+        String memberToken = memberToken();
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "292030"))
+                .andExpect(status().isOk());
+        verify(igdbClient, times(1)).query(anyString(), anyString());
+
+        // age the cached card past the day TTL; the next lookup still answers
+        // from the CACHE while the refresh runs on the background lane
+        IgdbGame cached = igdbGamesCache.findById(1942L).orElseThrow();
+        cached.setCachedAt(java.time.Instant.now().minus(java.time.Duration.ofDays(2)));
+        igdbGamesCache.save(cached);
+        when(igdbClient.query(anyString(), contains("where id = 1942")))
+                .thenReturn(igdb("[{\"id\":1942,\"name\":\"The Witcher 3: Wild Hunt (Updated)\","
+                        + "\"cover\":{\"image_id\":\"coNEW\"},\"genres\":[],\"first_release_date\":1431993600}]"));
+        mockMvc.perform(get("/api/games/lookup").header("Authorization", "Bearer " + memberToken)
+                        .param("appId", "292030"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.game.coverImageId").value("co1tiw")); // cache answer, instant
+        verify(igdbClient, timeout(5_000)).query(anyString(), contains("where id = 1942"));
     }
 
     @Test

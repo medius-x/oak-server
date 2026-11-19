@@ -40,10 +40,27 @@ public class IgdbGameService {
     /** How long a recorded miss stays authoritative before IGDB is asked again. */
     static final Duration MISS_TTL = Duration.ofDays(7);
 
+    /** How long a cached card serves before a lazy refresh is queued ("once a
+     *  day when someone actually plays the game" — the anti-hammering rule:
+     *  IGDB is only touched by live interest, never on a schedule). */
+    static final Duration CARD_REFRESH_TTL = Duration.ofDays(1);
+
     /** Upstream search width — also the candidates cap of one lookup response. */
     private static final int SEARCH_LIMIT = 5;
 
     private static final String CARD_FIELDS = "fields name,cover.image_id,genres.name,first_release_date;";
+
+    /** The lazy refresh lane: one daemon thread — refreshes are rare (a day per
+     *  game) and must never delay a lookup's own answer. */
+    private final java.util.concurrent.ExecutorService refreshLane =
+            java.util.concurrent.Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "igdb-card-refresh");
+                thread.setDaemon(true);
+                return thread;
+            });
+    /** Card ids with a refresh already queued (a burst of lookups must not
+     *  queue the same card twice). */
+    private final java.util.Set<Long> refreshQueued = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     private final IgdbAuthService authService;
     private final IgdbClient igdbClient;
@@ -209,7 +226,41 @@ public class IgdbGameService {
         IgdbGame game = games.findById(igdbId).orElse(null);
         // A hit always points at a stored card (both are written together); a dangling
         // reference would mean a wiped igdb_games — degrade to "not found" then.
-        return game == null ? null : GameCard.from(game);
+        if (game == null) {
+            return null;
+        }
+        maybeQueueCardRefresh(game);
+        return GameCard.from(game);
+    }
+
+    /** The lazy card refresh: when a CACHE-HIT lookup touches a card older than
+     *  {@link #CARD_REFRESH_TTL}, the answer still comes from the cache at once —
+     *  the re-fetch (cover/genres/name drift on IGDB) runs on the background
+     *  lane and silently updates the row. Failures just wait for the next day. */
+    void maybeQueueCardRefresh(IgdbGame game) {
+        // MANUAL cards (negative ids, the phase-3 round) have no IGDB twin to
+        // re-fetch — the lazy refresh is for real catalogue rows only.
+        if (game.getIgdbId() <= 0
+                || Duration.between(game.getCachedAt(), now()).compareTo(CARD_REFRESH_TTL) < 0
+                || !refreshQueued.add(game.getIgdbId())) {
+            return;
+        }
+        long igdbId = game.getIgdbId();
+        refreshLane.execute(() -> {
+            try {
+                JsonNode fresh = igdbClient.query("games",
+                        CARD_FIELDS + " where id = " + igdbId + "; limit 1;");
+                if (fresh.isArray() && !fresh.isEmpty()) {
+                    saveCard(fresh.get(0)); // also stamps cachedAt — the TTL restarts
+                    log.info("IGDB card #{} lazily refreshed", igdbId);
+                }
+            } catch (Exception failure) {
+                log.info("IGDB card #{} refresh failed ({}), retrying no sooner than the next day",
+                        igdbId, failure.getMessage());
+            } finally {
+                refreshQueued.remove(igdbId);
+            }
+        });
     }
 
     private boolean isFresh(IgdbMatchCache entry) {

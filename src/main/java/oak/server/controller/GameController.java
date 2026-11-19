@@ -5,7 +5,9 @@ import lombok.RequiredArgsConstructor;
 import oak.server.dto.GameCard;
 import oak.server.dto.GameConfirmRequest;
 import oak.server.dto.GameLookupResponse;
+import oak.server.dto.MyGameInfo;
 import oak.server.service.AuthorizationService;
+import oak.server.service.igdb.GameSessionService;
 import oak.server.service.igdb.IgdbException;
 import oak.server.service.igdb.IgdbNames;
 import oak.server.service.igdb.IgdbGameService;
@@ -22,6 +24,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
+
+import java.util.List;
 
 /**
  * The IGDB game-database endpoints behind the {@code igdb-games} capability. All
@@ -40,6 +44,7 @@ public class GameController {
     private static final int MAX_NAME_LENGTH = 200;
 
     private final IgdbGameService gameService;
+    private final GameSessionService gameSessions;
     private final IgdbLookupRateLimiter rateLimiter;
     private final AuthorizationService auth;
 
@@ -95,6 +100,18 @@ public class GameController {
         } catch (IgdbException upstream) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, upstream.getMessage());
         }
+    }
+
+    /**
+     * The caller's play history aggregate (2026-11-19): every game with a
+     * session, card + summed playtime + last played, newest first (capped 30).
+     * Own-DB read only — no IGDB round, no rate limit; an unconfigured or
+     * paused integration simply has no sessions and answers empty.
+     */
+    @GetMapping("/my")
+    public List<MyGameInfo> myGames(@AuthenticationPrincipal UserDetails principal) {
+        auth.requireUser(principal.getUsername());
+        return gameSessions.myGames(principal.getUsername(), 30);
     }
 
     /** Pins the user's pick from an ambiguous lookup into the shared match cache. */
