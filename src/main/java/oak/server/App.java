@@ -33,6 +33,13 @@ public class App {
      *  actually depend on. */
     static final String IP_PROBE_HOST = "cdn2.steamgriddb.com";
 
+    /** The probe's verdict, replayed into the FILE log once Spring has
+     *  configured the appenders (2026-11-24): the probe runs in {@code main()}
+     *  before {@code logback-spring.xml} applies, so its own log lines reach
+     *  only the container console — invisible in {@code GET /api/server/logs}
+     *  exports exactly when they matter most. */
+    static volatile String ipProbeVerdict = null;
+
     public static void main(String[] args) {
         preferWorkingIpStack();
         SpringApplication.run(App.class, args);
@@ -61,18 +68,24 @@ public class App {
                 }
             }
             if (v6 == null) {
-                return; // the host is v4-only — nothing to prefer
+                ipProbeVerdict = IP_PROBE_HOST + " has no AAAA record — nothing to prefer";
+                log.info(ipProbeVerdict);
+                return;
             }
             if (ipv6Reachable(v6, 2_000)) {
-                log.info("IPv6 probe to {} passed — leaving the JVM's own stack choice alone", IP_PROBE_HOST);
+                ipProbeVerdict = "IPv6 probe to " + IP_PROBE_HOST + " passed — leaving the JVM's own stack choice alone";
+                log.info(ipProbeVerdict);
                 return;
             }
             System.setProperty("java.net.preferIPv4Stack", "true");
-            log.warn("IPv6 probe to {} failed — pinning the JVM to IPv4 for every outbound call", IP_PROBE_HOST);
+            ipProbeVerdict = "IPv6 probe to " + IP_PROBE_HOST
+                    + " failed — pinned the JVM to IPv4 (java.net.preferIPv4Stack=true) for every outbound call";
+            log.warn(ipProbeVerdict);
         } catch (java.net.UnknownHostException dns) {
             // DNS itself is down at boot — not a stack problem; the outbound
             // breakers own whatever follows.
-            log.warn("IPv6 probe skipped ({} did not resolve: {})", IP_PROBE_HOST, dns.getMessage());
+            ipProbeVerdict = "IPv6 probe skipped (" + IP_PROBE_HOST + " did not resolve: " + dns.getMessage() + ")";
+            log.warn(ipProbeVerdict);
         }
     }
 
@@ -95,6 +108,10 @@ public class App {
                     .toList();
             log.info("[JPA-OK] Connected to PostgreSQL via JPA — 'users' table accessible, {} row(s): {}",
                     total, usernames);
+            String verdict = ipProbeVerdict;
+            if (verdict != null) {
+                log.info("[ip-probe] {}", verdict); // the file-log leg (see ipProbeVerdict)
+            }
         };
     }
 }

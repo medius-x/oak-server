@@ -114,6 +114,21 @@ class SgdbIconServiceTest {
         verify(games, never()).findById(anyLong());
     }
 
+    @Test
+    void theStuckLaneWatchStaysQuietWithinBudgetAndNamesTheGamePastIt() {
+        long startedAtMillis = 1_000_000L;
+        // one second of business — nothing to say
+        assertNull(SgdbIconService.stuckLaneLine(startedAtMillis, startedAtMillis + 1_000L, 1942));
+        // ten minutes minus a hair — the last quiet tick
+        assertNull(SgdbIconService.stuckLaneLine(startedAtMillis,
+                startedAtMillis + SgdbIconService.LANE_STUCK_AFTER_MILLIS - 1, 1942));
+        // past the budget — the game and the age must both ride the line
+        String line = SgdbIconService.stuckLaneLine(startedAtMillis,
+                startedAtMillis + SgdbIconService.LANE_STUCK_AFTER_MILLIS + 5_000L, 1942);
+        assertTrue(line.contains("1942"));
+        assertTrue(line.contains("parked"));
+    }
+
     /** The single daemon lane drains fast (no I/O — everything is mocked). */
     private static boolean laneSettled() throws InterruptedException {
         Thread.sleep(50);

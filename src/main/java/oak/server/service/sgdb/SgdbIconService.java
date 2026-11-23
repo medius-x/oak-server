@@ -9,6 +9,7 @@ import oak.server.repository.ServerProfileRepository;
 import oak.server.service.igdb.IgdbException;
 import oak.server.service.igdb.IgdbNames;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -49,6 +50,18 @@ public class SgdbIconService {
         return thread;
     });
     private final Set<Long> queued = ConcurrentHashMap.newKeySet();
+
+    /** The lane's watch (2026-11-24, the silent-queue smoke): a wedged task
+     *  must not become silence — JVM DNS resolution has NO timeout at all, and
+     *  the CDN's slow transit can drag a read for minutes; on ONE lane thread
+     *  either parks the whole queue invisibly (a whole evening with zero SGDB
+     *  log lines, 2026-11-23 22:00). The watch only LOGS: an
+     *  HttpURLConnection read ignores interrupts, so there is nothing safe to
+     *  cancel — the line names the game and the age. */
+    static final long LANE_STUCK_AFTER_MILLIS = 10 * 60_000L;
+
+    private volatile long laneBusySinceMillis = 0L;
+    private volatile long laneBusyGameId = 0L;
 
     @Autowired
     public SgdbIconService(ServerProfileRepository profiles, IgdbGameRepository games,
@@ -120,6 +133,7 @@ public class SgdbIconService {
         if (!active() || appId == null || appId.isEmpty() || igdbId <= 0 || !queued.add(igdbId)) {
             return;
         }
+        log.info("queued a SteamGridDB icon resolution for game {} (appid {})", igdbId, appId);
         iconLane.execute(() -> {
             try {
                 resolve(igdbId, appId);
@@ -130,32 +144,66 @@ public class SgdbIconService {
     }
 
     private void resolve(long igdbId, String appId) {
-        Optional<IgdbGame> existing = games.findById(igdbId);
-        if (existing.isEmpty() || existing.get().getSgdbIconBytes() != null) {
-            return; // resolved earlier or the card vanished — nothing to do
-        }
-        String apiKey = apiKey();
-        if (apiKey == null || isPaused(profiles.singleton())) {
-            return; // switched off (or paused) between the queueing and the run
-        }
-        SgdbClient.SgdbIcon icon;
+        laneBusySinceMillis = System.currentTimeMillis();
+        laneBusyGameId = igdbId;
         try {
-            icon = client.bestOfficialIcon(apiKey, appId);
-        } catch (IgdbException upstream) {
-            // the breaker logged the transition; the card keeps the IGDB square,
-            // and the next card re-fetch re-queues (the breaker parks first)
-            return;
+            log.info("resolving the SteamGridDB icon for game {} (appid {})", igdbId, appId);
+            Optional<IgdbGame> existing = games.findById(igdbId);
+            if (existing.isEmpty() || existing.get().getSgdbIconBytes() != null) {
+                return; // resolved earlier or the card vanished — nothing to do
+            }
+            String apiKey = apiKey();
+            if (apiKey == null || isPaused(profiles.singleton())) {
+                return; // switched off (or paused) between the queueing and the run
+            }
+            SgdbClient.SgdbIcon icon;
+            try {
+                icon = client.bestOfficialIcon(apiKey, appId);
+            } catch (IgdbException upstream) {
+                // the breaker logged the transition; the card keeps the IGDB square,
+                // and the next card re-fetch re-queues (the breaker parks first)
+                return;
+            }
+            if (icon == null) {
+                log.info("no SteamGridDB icon for game {} (appid {}) — keeping the IGDB square", igdbId, appId);
+                return;
+            }
+            IgdbGame game = existing.get();
+            game.setSgdbIconUrl(icon.url());
+            game.setSgdbIconMime(icon.mime());
+            game.setSgdbIconBytes(icon.bytes());
+            games.save(game);
+            log.info("game {} got its SteamGridDB icon (appid {}, {} B)", igdbId, appId, icon.bytes().length);
+        } finally {
+            laneBusySinceMillis = 0L;
+            laneBusyGameId = 0L;
         }
-        if (icon == null) {
-            log.info("no SteamGridDB icon for game {} (appid {}) — keeping the IGDB square", igdbId, appId);
-            return;
+    }
+
+    /** The watch's tick: null while idle/fresh, a WARN line once a task has
+     *  held the lane past {@link #LANE_STUCK_AFTER_MILLIS}. Pure so the test
+     *  drives the clock. */
+    @Scheduled(fixedDelay = 60_000L)
+    void reportStuckLane() {
+        long busySinceMillis = laneBusySinceMillis;
+        long gameId = laneBusyGameId;
+        if (busySinceMillis == 0L || gameId <= 0L) {
+            return; // idle — nothing to complain about
         }
-        IgdbGame game = existing.get();
-        game.setSgdbIconUrl(icon.url());
-        game.setSgdbIconMime(icon.mime());
-        game.setSgdbIconBytes(icon.bytes());
-        games.save(game);
-        log.info("game {} got its SteamGridDB icon (appid {}, {} B)", igdbId, appId, icon.bytes().length);
+        String line = stuckLaneLine(busySinceMillis, System.currentTimeMillis(), gameId);
+        if (line != null) {
+            log.warn(line);
+        }
+    }
+
+    /** The verdict for {@link #reportStuckLane()}: null = still within budget. */
+    static String stuckLaneLine(long busySinceMillis, long nowMillis, long gameId) {
+        long busyForMillis = nowMillis - busySinceMillis;
+        if (busyForMillis < LANE_STUCK_AFTER_MILLIS) {
+            return null;
+        }
+        return "SteamGridDB icon lane busy for " + (busyForMillis / 1000) + " s on game " + gameId
+                + " — likely a wedged DNS/socket read; the queue is parked behind it";
     }
 
     private String apiKey() {
