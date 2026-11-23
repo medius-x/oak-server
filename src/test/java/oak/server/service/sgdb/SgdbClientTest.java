@@ -87,12 +87,19 @@ class SgdbClientTest {
                           {"mime":"image/vnd.microsoft.icon","width":0,"height":0,
                            "url":"https://cdn/two.ico"}
                         ]}""", MediaType.APPLICATION_JSON));
+        // The CDN's REAL content type (live probe 2026-11-23): the .ico files
+        // answer image/x-icon, not image/png — this exact shape broke the
+        // test server's download with "Error while extracting response for
+        // type [byte[]] and content type [image/x-icon]" while the old mocked
+        // IMAGE_PNG answer sailed through.
         server.expect(requestTo("https://cdn/one.ico"))
-                .andRespond(withSuccess(new byte[]{9}, MediaType.IMAGE_PNG));
+                .andRespond(withSuccess(new byte[]{9}, MediaType.parseMediaType("image/x-icon")));
 
         SgdbClient.SgdbIcon icon = client.bestOfficialIcon("k1", "578080");
         assertEquals("https://cdn/one.ico", icon.url());
-        assertEquals("image/vnd.microsoft.icon", icon.mime());
+        // The stored mime is the RESPONSE header's, verbatim — not the API
+        // metadata's "image/vnd.microsoft.icon" and not the URL's extension.
+        assertEquals("image/x-icon", icon.mime());
         server.verify();
     }
 

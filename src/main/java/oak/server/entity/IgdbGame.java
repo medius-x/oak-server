@@ -74,7 +74,9 @@ public class IgdbGame {
     @Column(name = "sgdb_icon_bytes", columnDefinition = "bytea")
     private byte[] sgdbIconBytes;
 
-    /** The bytes' content type ({@code image/png} / {@code image/vnd.microsoft.icon}). */
+    /** The bytes' content type — the CDN RESPONSE header verbatim
+     *  ({@code image/png} / {@code image/x-icon}; the API metadata's
+     *  {@code image/vnd.microsoft.icon} is not what the CDN sends). */
     @Column(name = "sgdb_icon_mime", length = 64)
     private String sgdbIconMime;
 

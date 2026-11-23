@@ -159,26 +159,47 @@ public class SgdbClient {
     }
 
     /** Downloads one candidate (the PUBLIC CDN — no key; the CDN host is fixed
-     *  and the path is the SGDB-served URL verbatim). Oversized answers are
-     *  refused (null) — the caller walks on to the next candidate. */
+     *  and the path is the SGDB-served URL verbatim). The body is read as a
+     *  RAW STREAM through {@code exchange} — deliberately past every
+     *  {@code HttpMessageConverter}: the test server's live run (2026-11-23)
+     *  died inside the converter machinery on the CDN's real
+     *  {@code image/x-icon} content type ("Error while extracting response
+     *  for type [byte[]]…"), while a locally mocked byte[] answer with the
+     *  same type sails through — no converter, no converter edge cases.
+     *  Oversized answers are refused (null) — first by the declared
+     *  Content-Length (a fat icon is not even read), then by the actual byte
+     *  count; the caller walks on to the next candidate. The mime rides the
+     *  RESPONSE header (the CDN says {@code image/x-icon}, whatever the API
+     *  metadata claimed), falling back to the URL extension. */
     private SgdbIcon download(String url) {
         try {
-            byte[] bytes = restClient.get()
+            return restClient.get()
                     .uri(java.net.URI.create(url))
-                    .retrieve()
-                    .body(byte[].class);
-            if (bytes == null || bytes.length == 0) {
-                return null;
-            }
-            if (bytes.length > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
-                log.warn("SteamGridDB icon over the cache cap ({} B) — trying the next candidate: {}",
-                        bytes.length, url);
-                return null;
-            }
-            String mime = url.endsWith(".ico")
-                    ? "image/vnd.microsoft.icon"
-                    : "image/png";
-            return new SgdbIcon(url, mime, bytes);
+                    .exchange((request, response) -> {
+                        if (response.getStatusCode().isError()) {
+                            throw new java.io.IOException("HTTP " + response.getStatusCode().value());
+                        }
+                        long declaredBytes = response.getHeaders().getContentLength();
+                        if (declaredBytes > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+                            log.warn("SteamGridDB icon over the cache cap ({} B declared) — trying the next candidate: {}",
+                                    declaredBytes, url);
+                            return null;
+                        }
+                        byte[] bytes = response.getBody().readAllBytes();
+                        if (bytes.length == 0) {
+                            return null;
+                        }
+                        if (bytes.length > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+                            log.warn("SteamGridDB icon over the cache cap ({} B) — trying the next candidate: {}",
+                                    bytes.length, url);
+                            return null;
+                        }
+                        MediaType contentType = response.getHeaders().getContentType();
+                        String mime = contentType != null
+                                ? contentType.toString()
+                                : url.endsWith(".ico") ? "image/vnd.microsoft.icon" : "image/png";
+                        return new SgdbIcon(url, mime, bytes);
+                    }, true);
         } catch (RestClientException failure) {
             throw new IgdbException("SteamGridDB icon download failed: " + failure.getMessage(), failure);
         }
