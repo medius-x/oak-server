@@ -177,7 +177,7 @@ class IgdbGamesIntegrationTest {
     // --- the room video codec setting (V24) ---
 
     @Test
-    void videoCodecSettingIsManagerGatedWhitelistedAndDefaultsToVp8() throws Exception {
+    void videoCodecSettingIsManagerGatedWhitelistedAndDefaultsToVp9() throws Exception {
         String memberToken = memberToken();
         // an ordinary member can neither read nor write the codec
         mockMvc.perform(get("/api/server/video").header("Authorization", "Bearer " + memberToken))
@@ -187,22 +187,22 @@ class IgdbGamesIntegrationTest {
                 .andExpect(status().isForbidden());
         mockMvc.perform(get("/api/server/video")).andExpect(status().isUnauthorized());
 
-        // a fresh row (predating V24's column fill) reads as the historical default
+        // a fresh row (an admin who never touched the picker) reads as the product default vp9
         mockMvc.perform(get("/api/server/video").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.codec").value("vp8"));
+                .andExpect(jsonPath("$.codec").value("vp9"));
 
         // the whitelist: a typo or an unsupported codec is a 400, never a room
         mockMvc.perform(patch("/api/server/video").header("Authorization", "Bearer " + ownerToken)
                         .contentType(JSON).content("{\"codec\":\"av1\"}"))
                 .andExpect(status().isBadRequest());
         mockMvc.perform(patch("/api/server/video").header("Authorization", "Bearer " + ownerToken)
-                        .contentType(JSON).content("{\"codec\":\"VP9 \"}"))
+                        .contentType(JSON).content("{\"codec\":\"H264 \"}"))
                 .andExpect(status().isOk()) // case/space tolerant
-                .andExpect(jsonPath("$.codec").value("vp9"));
+                .andExpect(jsonPath("$.codec").value("h264"));
         mockMvc.perform(get("/api/server/video").header("Authorization", "Bearer " + ownerToken))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.codec").value("vp9"));
+                .andExpect(jsonPath("$.codec").value("h264"));
 
         // the unconditional capability is always listed
         String capabilities = mockMvc

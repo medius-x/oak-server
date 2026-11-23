@@ -372,10 +372,13 @@ public class ServerProfileController {
     }
 
     /** The stored codec normalized to its EFFECTIVE value: null (a row older
-     *  than V24) means the historical default, VP8. */
+     *  than V24, or an admin who never touched the picker) means the product
+     *  default — VP9 (2026-11-24, the user's verdict after the live smoke:
+     *  "works superbly"; VP8's bitrate appetite could not carry 1080p
+     *  screen sharing, and every party of the chain handles VP9 fine). */
     public static String effectiveVideoCodec(ServerProfile profile) {
         String stored = profile.getVideoCodec();
-        return stored == null || stored.isBlank() ? "vp8" : stored;
+        return stored == null || stored.isBlank() ? "vp9" : stored;
     }
 
     private static String blankToNull(String raw) {

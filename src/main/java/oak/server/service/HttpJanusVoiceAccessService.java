@@ -172,7 +172,7 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
             create.put("publishers", 20);
             // The admin's codec pick (V24): offered by Janus in its SDP, so
             // every Chromium client answers with it — no client-side support
-            // needed. vp8 when unset (the historical default).
+            // needed. vp9 when unset (the product default, 2026-11-24).
             create.put("videocodec", oak.server.controller.ServerProfileController
                     .effectiveVideoCodec(serverProfileRepository.singleton()));
             JsonNode created = client.message(control.sessionId(), control.handleId(), create, control.token());

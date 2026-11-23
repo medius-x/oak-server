@@ -210,7 +210,7 @@ class JanusVoiceAccessServiceTest {
     }
 
     @Test
-    void roomCreationCarriesTheAdminsCodecOrNullDefaultsToVp8() {
+    void roomCreationCarriesTheAdminsCodecOrNullDefaultsToVp9() {
         when(client.addToken(anyString())).thenReturn(success());
         when(client.createSession(anyString())).thenReturn(1L);
         when(client.attach(anyLong(), anyString())).thenReturn(2L);
@@ -218,16 +218,17 @@ class JanusVoiceAccessServiceTest {
                 "{\"janus\":\"success\",\"plugindata\":{\"data\":{\"videoroom\":\"success\",\"exists\":false}}}"));
 
         service.ensureRoom(5L);
-        // NULL column (rows predating V24) = the historical default vp8.
-        verify(client).message(eq(1L), eq(2L),
-                argThat(body -> "create".equals(body.get("request")) && "vp8".equals(body.get("videocodec"))), anyString());
-
-        oak.server.entity.ServerProfile vp9 = new oak.server.entity.ServerProfile("unit");
-        vp9.setVideoCodec("vp9");
-        org.mockito.Mockito.when(serverProfileRepository.singleton()).thenReturn(vp9);
-        service.ensureRoom(6L);
+        // NULL column (an admin who never touched the picker) = the product
+        // default vp9 (2026-11-24).
         verify(client).message(eq(1L), eq(2L),
                 argThat(body -> "create".equals(body.get("request")) && "vp9".equals(body.get("videocodec"))), anyString());
+
+        oak.server.entity.ServerProfile h264 = new oak.server.entity.ServerProfile("unit");
+        h264.setVideoCodec("h264");
+        org.mockito.Mockito.when(serverProfileRepository.singleton()).thenReturn(h264);
+        service.ensureRoom(6L);
+        verify(client).message(eq(1L), eq(2L),
+                argThat(body -> "create".equals(body.get("request")) && "h264".equals(body.get("videocodec"))), anyString());
     }
 
     @Test
