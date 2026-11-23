@@ -58,7 +58,14 @@ public class SgdbClient {
     private static RestClient defaultClient() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(5));
-        factory.setReadTimeout(Duration.ofSeconds(8));
+        // 60 s (was 8 via the 2026-11-23 slow-transit post-mortem): the icon
+        // BYTES ride a ~20 KB/s v4 transit on some hostings — a near-cap
+        // 1 MB icon drips for ~55 s. The read timeout only fires on SILENCE
+        // between packets, and this client serves the BACKGROUND icon lane
+        // (nobody awaits the answer synchronously), so a long tail costs
+        // nothing but queue latency. Contrast IgdbCoverService: its endpoint
+        // is a synchronous client wait and stays at 20 s.
+        factory.setReadTimeout(Duration.ofSeconds(60));
         return RestClient.builder().requestFactory(factory).build();
     }
 

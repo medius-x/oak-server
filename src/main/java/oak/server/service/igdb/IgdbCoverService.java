@@ -93,7 +93,12 @@ public class IgdbCoverService {
     private static RestClient defaultClient() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(5));
-        factory.setReadTimeout(Duration.ofSeconds(8));
+        // 20 s (was 8, 2026-11-23): cover bytes ride the same slow-but-alive
+        // v4 transits the SGDB post-mortem found — see SgdbClient's longer
+        // note. Deliberately NOT the icon lane's 60 s: this endpoint is a
+        // SYNCHRONOUS client wait, and a minute-long answer would be worse
+        // than the cover fallback it serves.
+        factory.setReadTimeout(Duration.ofSeconds(20));
         return RestClient.builder().requestFactory(factory).build();
     }
 }
