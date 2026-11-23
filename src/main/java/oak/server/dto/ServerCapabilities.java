@@ -59,7 +59,7 @@ public final class ServerCapabilities {
      *  permission (rides the regular /api/permissions catalog). Without the flag the
      *  client hides the limit editor — the 403 of an old client hitting a full room
      *  is handled by its generic error path anyway. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings", "sgdb-settings");
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings", "sgdb-settings", "video-codec-setting");
 
     /** CONDITIONAL flag — deliberately NOT a member of {@link #FEATURES}: the IGDB
      *  game auto-detect ladder (2026-11-19): {@code GET /api/games/lookup} +

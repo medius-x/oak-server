@@ -49,7 +49,11 @@ desktop-клиент, `../space-client`; историческое имя `oak-cl
   (`CallSignalingHandler` → `/user/queue/call.signal`), **Janus-оркестрация** +
   token_auth с per-room pin/secret, принудительный mute/kick; голосовые комнаты
   с лимитом участников (V18: гейт в `/room`, 409 при полноте, байпас-право
-  JOIN_FULL_ROOMS — repurpose бита 14).
+  JOIN_FULL_ROOMS — repurpose бита 14); админский выбор видеокодека комнат
+  (V24: `server_profile.video_codec`, NULL=`vp8`; `GET/PATCH /api/server/video`,
+  whitelist vp8/vp9/h264; `ensureRoom` передаёт `videocodec` при СОЗДАНИИ —
+  живая комната живёт со своим кодеком до опустеет, убивать заполненные ради
+  переключения нельзя).
 - **MinIO-вложения**: presigned PUT/GET, переподписка `GET /api/attachments/link?key=`
   (стримовое воспроизведение переживает часовой URL); мультивложения 0..10
   (JSON-колонка `messages.attachments`, `AttachmentListCodec`); видео-превью —

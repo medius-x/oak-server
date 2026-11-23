@@ -15,6 +15,8 @@ import oak.server.dto.UpdateConnectionInfoRequest;
 import oak.server.dto.UpdateIgdbCredentialsRequest;
 import oak.server.dto.UpdateServerNameRequest;
 import oak.server.dto.UpdateSgdbKeyRequest;
+import oak.server.dto.UpdateVideoCodecRequest;
+import oak.server.dto.VideoSettingsResponse;
 import oak.server.entity.Permission;
 import oak.server.entity.ServerProfile;
 import oak.server.entity.User;
@@ -57,6 +59,13 @@ public class ServerProfileController {
 
     /** STOMP topic a live server-profile update (name/icon change) is pushed to. */
     public static final String SERVER_TOPIC = "/topic/server";
+
+    /** The ONLY codecs a room may be created with (2026-11-23, V24): the three
+     *  every party of the chain encodes/decodes well — Janus 1.1.4 (libvpx,
+     *  libavcodec) offers them, Chromium codes them. AV1's software encoder is
+     *  too heavy for realtime 1080p; H.265 encodes only on some GPUs — neither
+     *  is offered. */
+    public static final java.util.Set<String> VIDEO_CODECS = java.util.Set.of("vp8", "vp9", "h264");
 
     private final ServerProfileRepository serverProfileRepository;
     private final AttachmentUrlSigner attachmentUrlSigner;
@@ -322,6 +331,51 @@ public class ServerProfileController {
     private static SgdbSettingsResponse sgdbResponseFor(ServerProfile profile) {
         return new SgdbSettingsResponse(profile.getSgdbApiKey() != null,
                 SgdbIconService.isPaused(profile));
+    }
+
+    /**
+     * The voice-room video codec setting ({@code MANAGE_SERVER}, 2026-11-23):
+     * what Janus offers when a room is CREATED. The answer carries the
+     * EFFECTIVE codec — a null column (rows predating V24) reads as the
+     * historical default {@code vp8}.
+     */
+    @GetMapping("/video")
+    public VideoSettingsResponse videoSettings(@AuthenticationPrincipal UserDetails principal) {
+        requireManageServer(principal);
+        return new VideoSettingsResponse(effectiveVideoCodec(profile()));
+    }
+
+    /**
+     * Stores the room video codec ({@code MANAGE_SERVER}). Only the three
+     * whitelisted values pass — a typo must never reach Janus room creation
+     * (an unsupported codec fails the create and the room has nothing to fall
+     * back to). The setting lands on NEWLY created rooms: a live room keeps
+     * the codec it was born with until the last member leaves.
+     */
+    @PatchMapping("/video")
+    @Transactional
+    public VideoSettingsResponse updateVideoCodec(@AuthenticationPrincipal UserDetails principal,
+                                                  @RequestBody @Valid UpdateVideoCodecRequest request) {
+        requireManageServer(principal);
+        String codec = request.codec().trim().toLowerCase(Locale.ROOT);
+        if (!VIDEO_CODECS.contains(codec)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "codec must be one of " + VIDEO_CODECS);
+        }
+        ServerProfile profile = profile();
+        if (codec.equals(effectiveVideoCodec(profile))) {
+            return new VideoSettingsResponse(codec); // idempotent no-op — no log noise
+        }
+        profile.setVideoCodec(codec);
+        serverProfileRepository.save(profile);
+        log.info("Room video codec set to {} (applies to newly created rooms)", codec);
+        return new VideoSettingsResponse(codec);
+    }
+
+    /** The stored codec normalized to its EFFECTIVE value: null (a row older
+     *  than V24) means the historical default, VP8. */
+    public static String effectiveVideoCodec(ServerProfile profile) {
+        String stored = profile.getVideoCodec();
+        return stored == null || stored.isBlank() ? "vp8" : stored;
     }
 
     private static String blankToNull(String raw) {

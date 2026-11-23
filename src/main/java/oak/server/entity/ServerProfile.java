@@ -137,6 +137,13 @@ public class ServerProfile {
     @Column(name = "sgdb_enabled")
     private Boolean sgdbEnabled;
 
+    /** The video codec Janus offers in voice rooms (2026-11-23, V24):
+     *  {@code vp8} / {@code vp9} / {@code h264}. Null = the historical
+     *  default (VP8 — Janus's own when the field is absent). Applied when a
+     *  room is CREATED: a live room's codec is fixed until it empties. */
+    @Column(name = "video_codec", length = 16)
+    private String videoCodec;
+
     public ServerProfile(String name) {
         this.name = name;
     }

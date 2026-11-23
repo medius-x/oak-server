@@ -43,6 +43,9 @@ class JanusVoiceAccessServiceTest {
     @Mock
     private JanusAdminClient client;
 
+    @Mock
+    private oak.server.repository.ServerProfileRepository serverProfileRepository;
+
     private HttpJanusVoiceAccessService service;
 
     @BeforeEach
@@ -50,7 +53,12 @@ class JanusVoiceAccessServiceTest {
         JanusProperties properties = new JanusProperties(
                 "http://localhost:8088/janus", null, "ws://localhost:8188", "unit-secret",
                 "http://localhost:7088/admin", true);
-        service = new HttpJanusVoiceAccessService(client, properties);
+        // The room-creation path reads the profile for the admin's codec pick —
+        // lenient because most tests here never create a room.
+        org.mockito.Mockito.lenient()
+                .when(serverProfileRepository.singleton())
+                .thenReturn(new oak.server.entity.ServerProfile("unit"));
+        service = new HttpJanusVoiceAccessService(client, properties, serverProfileRepository);
     }
 
     private static JsonNode json(String fixture) {
@@ -199,6 +207,27 @@ class JanusVoiceAccessServiceTest {
 
         verify(client).message(eq(1L), eq(2L),
                 argThat(body -> "create".equals(body.get("request"))), anyString());
+    }
+
+    @Test
+    void roomCreationCarriesTheAdminsCodecOrNullDefaultsToVp8() {
+        when(client.addToken(anyString())).thenReturn(success());
+        when(client.createSession(anyString())).thenReturn(1L);
+        when(client.attach(anyLong(), anyString())).thenReturn(2L);
+        when(client.message(anyLong(), anyLong(), any(), anyString())).thenReturn(json(
+                "{\"janus\":\"success\",\"plugindata\":{\"data\":{\"videoroom\":\"success\",\"exists\":false}}}"));
+
+        service.ensureRoom(5L);
+        // NULL column (rows predating V24) = the historical default vp8.
+        verify(client).message(eq(1L), eq(2L),
+                argThat(body -> "create".equals(body.get("request")) && "vp8".equals(body.get("videocodec"))), anyString());
+
+        oak.server.entity.ServerProfile vp9 = new oak.server.entity.ServerProfile("unit");
+        vp9.setVideoCodec("vp9");
+        org.mockito.Mockito.when(serverProfileRepository.singleton()).thenReturn(vp9);
+        service.ensureRoom(6L);
+        verify(client).message(eq(1L), eq(2L),
+                argThat(body -> "create".equals(body.get("request")) && "vp9".equals(body.get("videocodec"))), anyString());
     }
 
     @Test

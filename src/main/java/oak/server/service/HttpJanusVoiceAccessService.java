@@ -68,6 +68,9 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
 
     private final JanusAdminClient client;
     private final JanusProperties properties;
+    /** The admin's room video codec choice (V24): read ONLY at room creation —
+     *  a live room's codec is fixed until it empties. */
+    private final oak.server.repository.ServerProfileRepository serverProfileRepository;
 
     /** username -> (channelId -> tokens, oldest first). Read on HTTP threads, mutated on the executor too. */
     private final Map<String, Map<Long, Deque<String>>> tokensByUserChannel = new HashMap<>();
@@ -167,6 +170,11 @@ public class HttpJanusVoiceAccessService implements JanusVoiceAccessService {
             create.put("pin", pin);
             create.put("permanent", false);
             create.put("publishers", 20);
+            // The admin's codec pick (V24): offered by Janus in its SDP, so
+            // every Chromium client answers with it — no client-side support
+            // needed. vp8 when unset (the historical default).
+            create.put("videocodec", oak.server.controller.ServerProfileController
+                    .effectiveVideoCodec(serverProfileRepository.singleton()));
             JsonNode created = client.message(control.sessionId(), control.handleId(), create, control.token());
             if (isJanusError(created) && !roomExists(control, channelId)) {
                 // Lost a create race only if the room materialised anyway; otherwise a real failure.

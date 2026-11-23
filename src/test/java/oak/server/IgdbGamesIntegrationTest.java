@@ -174,6 +174,43 @@ class IgdbGamesIntegrationTest {
         assertFalse(offAgain.contains("sgdb-icons"));
     }
 
+    // --- the room video codec setting (V24) ---
+
+    @Test
+    void videoCodecSettingIsManagerGatedWhitelistedAndDefaultsToVp8() throws Exception {
+        String memberToken = memberToken();
+        // an ordinary member can neither read nor write the codec
+        mockMvc.perform(get("/api/server/video").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(patch("/api/server/video").header("Authorization", "Bearer " + memberToken)
+                        .contentType(JSON).content("{\"codec\":\"vp9\"}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/server/video")).andExpect(status().isUnauthorized());
+
+        // a fresh row (predating V24's column fill) reads as the historical default
+        mockMvc.perform(get("/api/server/video").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.codec").value("vp8"));
+
+        // the whitelist: a typo or an unsupported codec is a 400, never a room
+        mockMvc.perform(patch("/api/server/video").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"codec\":\"av1\"}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/server/video").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"codec\":\"VP9 \"}"))
+                .andExpect(status().isOk()) // case/space tolerant
+                .andExpect(jsonPath("$.codec").value("vp9"));
+        mockMvc.perform(get("/api/server/video").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.codec").value("vp9"));
+
+        // the unconditional capability is always listed
+        String capabilities = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertTrue(capabilities.contains("video-codec-setting"));
+    }
+
     // --- the ladder -----
 
     @Test
