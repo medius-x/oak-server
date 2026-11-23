@@ -29,6 +29,12 @@ import java.time.Instant;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class IgdbGame {
 
+    /** The icon-bytes cache cap (1.1 MB, user decision 2026-11-23: a game whose
+     *  ONLY icon is a fat ~1 MB source must not lose it); icons are usually
+     *  30–300 KB, anything bigger is refused rather than stored (a hostile
+     *  upload cannot bloat the row). */
+    public static final int SGDB_ICON_MAX_BYTES = 1100 * 1024;
+
     /** The IGDB game id — this IS the natural key (IGDB ids are stable). An ASSIGNED
      *  id on purpose: no {@code @GeneratedValue}, or Hibernate would silently generate
      *  its own sequence and ignore the external id we hand it. */
@@ -54,6 +60,33 @@ public class IgdbGame {
 
     @Column(name = "cached_at", nullable = false)
     private Instant cachedAt;
+
+    /** The picked SteamGridDB icon's CDN URL (V23): provenance for the cached
+     *  bytes below (re-fetches, debugging). Null = not resolved, or SGDB is
+     *  off / has nothing for the game. */
+    @Column(name = "sgdb_icon_url", columnDefinition = "text")
+    private String sgdbIconUrl;
+
+    /** The icon's cached BYTES (V23): clients get them from
+     *  {@code GET /api/games/{id}/icon} — the CDN itself is unreachable from
+     *  some client machines (DPI/proxy), so the server is the only door. Icons
+     *  are 30–150 KB; a {@link #SGDB_ICON_MAX_BYTES} guard caps the row. */
+    @Column(name = "sgdb_icon_bytes", columnDefinition = "bytea")
+    private byte[] sgdbIconBytes;
+
+    /** The bytes' content type ({@code image/png} / {@code image/vnd.microsoft.icon}). */
+    @Column(name = "sgdb_icon_mime", length = 64)
+    private String sgdbIconMime;
+
+    /** The IGDB cover THUMBNAIL bytes (V23, the square {@code t_thumb} preset):
+     *  the panel's fallback picture — fetched ONCE from images.igdb.com and
+     *  served by {@code GET /api/games/{id}/cover}, because that CDN is
+     *  unreachable from some client machines exactly like SGDB's. */
+    @Column(name = "cover_thumb_bytes", columnDefinition = "bytea")
+    private byte[] coverThumbBytes;
+
+    @Column(name = "cover_thumb_mime", length = 64)
+    private String coverThumbMime;
 
     public IgdbGame(Long igdbId, String name, String coverImageId, String genres,
                     Long firstReleaseDate, Instant cachedAt) {

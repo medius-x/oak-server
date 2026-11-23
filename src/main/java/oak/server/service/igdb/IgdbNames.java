@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
 public final class IgdbNames {
 
     /** Match-cache key prefix of the exact Steam-appid route. */
-    static final String STEAM_KEY_PREFIX = "steam:";
+    public static final String STEAM_KEY_PREFIX = "steam:";
 
     /** Match-cache key prefix of the normalized-name search route. */
     static final String NAME_KEY_PREFIX = "name:";

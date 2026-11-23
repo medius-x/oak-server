@@ -8,11 +8,13 @@ import oak.server.dto.AttachmentUploadResponse;
 import oak.server.dto.AvatarKeysRequest;
 import oak.server.dto.AvatarOriginalResponse;
 import oak.server.dto.IgdbSettingsResponse;
+import oak.server.dto.SgdbSettingsResponse;
 import oak.server.dto.ServerCapabilities;
 import oak.server.dto.ServerProfileResponse;
 import oak.server.dto.UpdateConnectionInfoRequest;
 import oak.server.dto.UpdateIgdbCredentialsRequest;
 import oak.server.dto.UpdateServerNameRequest;
+import oak.server.dto.UpdateSgdbKeyRequest;
 import oak.server.entity.Permission;
 import oak.server.entity.ServerProfile;
 import oak.server.entity.User;
@@ -21,6 +23,7 @@ import oak.server.service.AttachmentSlotRegistry;
 import oak.server.service.AttachmentUrlSigner;
 import oak.server.service.AuthorizationService;
 import oak.server.service.igdb.IgdbAuthService;
+import oak.server.service.sgdb.SgdbIconService;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.info.BuildProperties;
 import org.springframework.http.HttpStatus;
@@ -61,6 +64,7 @@ public class ServerProfileController {
     private final SimpMessagingTemplate messagingTemplate;
     private final AttachmentSlotRegistry slotRegistry;
     private final IgdbAuthService igdbAuthService;
+    private final SgdbIconService sgdbIconService;
     /** Absent when the app runs unpackaged without build-info (an IDE run) — "dev" then. */
     private final ObjectProvider<BuildProperties> buildProperties;
 
@@ -264,6 +268,60 @@ public class ServerProfileController {
         return new IgdbSettingsResponse(profile.getIgdbClientId(),
                 IgdbAuthService.isConfigured(profile),
                 IgdbAuthService.isPaused(profile));
+    }
+
+    /**
+     * The SteamGridDB icon layer's settings view ({@code MANAGE_SERVER}): the
+     * configured flag and the pause switch — the key is write-only through the
+     * API (and the logs).
+     */
+    @GetMapping("/sgdb")
+    public SgdbSettingsResponse sgdbSettings(@AuthenticationPrincipal UserDetails principal) {
+        requireManageServer(principal);
+        return sgdbResponseFor(profile());
+    }
+
+    /**
+     * Writes the SteamGridDB API key and/or the pause switch
+     * ({@code MANAGE_SERVER}). Null {@code apiKey} keeps it; an EMPTY STRING
+     * clears it — the Disconnect button. The PAUSE switch and the key are
+     * INDEPENDENT: disconnecting keeps the switch position, pausing keeps the
+     * key (and the cached bytes — they just stop being SERVED while paused).
+     * Any change repushes the profile — the {@code sgdb-icons} capability
+     * flips live. A KEY change also heals the outbound breaker: a parked
+     * cooldown must not shadow a fresh key (the dead one's 401s counted as
+     * failures).
+     */
+    @PatchMapping("/sgdb")
+    @Transactional
+    public SgdbSettingsResponse updateSgdbKey(@AuthenticationPrincipal UserDetails principal,
+                                              @RequestBody @Valid UpdateSgdbKeyRequest request) {
+        requireManageServer(principal);
+        boolean keyChanged = request.apiKey() != null;
+        boolean anyChange = keyChanged || request.paused() != null;
+        if (!anyChange) {
+            return sgdbResponseFor(profile());
+        }
+        ServerProfile profile = profile();
+        if (keyChanged) {
+            profile.setSgdbApiKey(blankToNull(request.apiKey()));
+        }
+        if (request.paused() != null) {
+            profile.setSgdbEnabled(!request.paused()); // the column keeps the NULL=enabled default
+        }
+        serverProfileRepository.save(profile);
+        if (keyChanged) {
+            sgdbIconService.onKeyChanged();
+        }
+        log.info("SteamGridDB settings updated (configured: {}, active: {})",
+                profile.getSgdbApiKey() != null, SgdbIconService.isIntegrationActive(profile));
+        publish(profile);
+        return sgdbResponseFor(profile);
+    }
+
+    private static SgdbSettingsResponse sgdbResponseFor(ServerProfile profile) {
+        return new SgdbSettingsResponse(profile.getSgdbApiKey() != null,
+                SgdbIconService.isPaused(profile));
     }
 
     private static String blankToNull(String raw) {

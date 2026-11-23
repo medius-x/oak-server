@@ -34,6 +34,7 @@ import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -68,6 +69,10 @@ class IgdbGamesIntegrationTest {
 
     @MockitoBean
     private IgdbClient igdbClient;
+
+    /** The cover proxy is mocked: its fetch-on-miss leg would touch the real CDN. */
+    @MockitoBean
+    private oak.server.service.igdb.IgdbCoverService coverService;
 
     private String ownerToken;
 
@@ -130,7 +135,108 @@ class IgdbGamesIntegrationTest {
         assertTrue(capabilities.contains("igdb-games"));
     }
 
-    // --- the ladder ---
+    @Test
+    void sgdbSettingsAreWriteOnlyAndFlipTheIconCapability() throws Exception {
+        String memberToken = memberToken();
+        // an ordinary member can neither read nor write the icon key
+        mockMvc.perform(get("/api/server/sgdb").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + memberToken)
+                        .contentType(JSON).content("{\"apiKey\":\"nope\"}"))
+                .andExpect(status().isForbidden());
+
+        // the owner stores the key; the answer carries the configured flag ONLY
+        String settings = mockMvc
+                .perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"apiKey\":\"sgdb-key-123\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.configured").value(true))
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(settings.contains("sgdb-key-123"));
+        // the key never rides the server profile either
+        assertFalse(mockMvc.perform(get("/api/server").header("Authorization", "Bearer " + ownerToken))
+                .andReturn().getResponse().getContentAsString().contains("sgdb-key-123"));
+
+        // the icon capability lights up while the key is stored…
+        String litUp = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertTrue(litUp.contains("sgdb-icons"));
+
+        // …and an EMPTY string clears it (the Disconnect button) — off again
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"apiKey\":\"\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.configured").value(false));
+        String offAgain = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertFalse(offAgain.contains("sgdb-icons"));
+    }
+
+    // --- the ladder -----
+
+    @Test
+    void theIconEndpointServesTheCachedBytesAnd404sWithoutThem() throws Exception {
+        String memberToken = memberToken();
+        // The serving gate: the icon layer must be ON (key stored, not paused).
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"apiKey\":\"k1\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.configured").value(true));
+        IgdbGame withIcon = new IgdbGame(555_001L, "With Icon", null, "[]", null,
+                java.time.Instant.now());
+        withIcon.setSgdbIconUrl("https://cdn2.steamgriddb.com/icon/x.png");
+        withIcon.setSgdbIconMime("image/png");
+        withIcon.setSgdbIconBytes(new byte[]{1, 2, 3});
+        igdbGamesCache.save(withIcon);
+        IgdbGame withoutIcon = igdbGamesCache.save(new IgdbGame(555_002L, "Without Icon", null, "[]",
+                null, java.time.Instant.now()));
+
+        mockMvc.perform(get("/api/games/555001/icon").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.IMAGE_PNG))
+                .andExpect(content().bytes(new byte[]{1, 2, 3}));
+        mockMvc.perform(get("/api/games/555002/icon").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/games/555001/icon"))
+                .andExpect(status().isUnauthorized()); // no anonymous icon pulls
+
+        // PAUSE: the cached value deliberately stops being SERVED (user semantics)
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"paused\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.configured").value(true)) // the key is kept
+                .andExpect(jsonPath("$.paused").value(true));
+        mockMvc.perform(get("/api/games/555001/icon").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isNotFound());
+        // …and back on:
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"paused\":false}"))
+                .andExpect(jsonPath("$.paused").value(false));
+        mockMvc.perform(get("/api/games/555001/icon").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void theCoverEndpointProxiesTheThumbnailAndGatesOnTheGameIntegration() throws Exception {
+        String memberToken = memberToken();
+        igdbGamesCache.save(new IgdbGame(555_003L, "Covered", "co555003", "[]", null,
+                java.time.Instant.now()));
+        // Without IGDB credentials the whole game stack is off — 503, no proxying.
+        mockMvc.perform(get("/api/games/555003/cover").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isServiceUnavailable());
+
+        configure(); // the owner sets the Twitch pair → the stack is live
+        org.mockito.Mockito.when(coverService.coverThumb(555_003L)).thenReturn(new byte[]{7, 7});
+        mockMvc.perform(get("/api/games/555003/cover").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.IMAGE_JPEG))
+                .andExpect(content().bytes(new byte[]{7, 7}));
+        org.mockito.Mockito.when(coverService.coverThumb(555_004L)).thenReturn(null);
+        mockMvc.perform(get("/api/games/555004/cover").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isNotFound());
+    }
 
     @Test
     void steamAppidHitResolvesOnceThenServesFromCache() throws Exception {

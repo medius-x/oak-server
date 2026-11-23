@@ -21,7 +21,7 @@ import java.util.Deque;
  * <p>Thread-safety: guarded by {@code synchronized} on this — the query path
  * holds the lock for two integer reads, never for I/O.
  */
-public class IgdbCircuitBreaker {
+public class UpstreamCircuitBreaker {
 
     static final int FAILURE_THRESHOLD = 3;
     static final long BASE_COOLDOWN_MILLIS = 60_000;
@@ -33,7 +33,7 @@ public class IgdbCircuitBreaker {
     private long openUntilMillis = Long.MIN_VALUE;
     private final Deque<Long> openedAtMillis = new ArrayDeque<>();
 
-    public IgdbCircuitBreaker(Clock clock) {
+    public UpstreamCircuitBreaker(Clock clock) {
         this.clock = clock;
     }
 

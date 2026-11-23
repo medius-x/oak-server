@@ -22,7 +22,7 @@ import java.time.Duration;
  * (the shared 4-requests-per-second budget — the match cache keeps collisions rare).
  * Everything else surfaces as {@link IgdbException} → HTTP 502.
  *
- * <p>The {@link IgdbCircuitBreaker} in front (user report 2026-11-19: the hosting may
+ * <p>The {@link UpstreamCircuitBreaker} in front (user report 2026-11-19: the hosting may
  * BLOCK or black-hole IGDB entirely): after consecutive upstream failures the door
  * PARKS for a growing cooldown — parked calls fail in milliseconds without touching
  * the network (a blocked host would otherwise burn the 5 s connect timeout on every
@@ -36,23 +36,23 @@ public class IgdbClient {
 
     private final IgdbAuthService authService;
     private final RestClient restClient;
-    private final IgdbCircuitBreaker breaker;
+    private final UpstreamCircuitBreaker breaker;
 
     /** 429 backoff; package-private so the unit test shrinks it. */
     long retryPauseMillis = 1_200;
 
     @Autowired
     public IgdbClient(IgdbAuthService authService) {
-        this(authService, defaultClient(), new IgdbCircuitBreaker(Clock.systemUTC()));
+        this(authService, defaultClient(), new UpstreamCircuitBreaker(Clock.systemUTC()));
     }
 
     /** Test seam: a RestClient bound to a MockRestServiceServer. */
     IgdbClient(IgdbAuthService authService, RestClient restClient) {
-        this(authService, restClient, new IgdbCircuitBreaker(Clock.systemUTC()));
+        this(authService, restClient, new UpstreamCircuitBreaker(Clock.systemUTC()));
     }
 
     /** Test seam with an injected breaker (its clock drives the cooldown windows). */
-    IgdbClient(IgdbAuthService authService, RestClient restClient, IgdbCircuitBreaker breaker) {
+    IgdbClient(IgdbAuthService authService, RestClient restClient, UpstreamCircuitBreaker breaker) {
         this.authService = authService;
         this.restClient = restClient;
         this.breaker = breaker;

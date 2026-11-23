@@ -16,7 +16,7 @@ import java.util.List;
  * hours per genre ("100 hours in shooters"), so the card is self-sufficient offline.
  */
 public record GameCard(long igdbId, String name, String coverImageId,
-                       List<GenreCard> genres, Long firstReleaseDate) {
+                       List<GenreCard> genres, Long firstReleaseDate, String iconUrl) {
 
     /** The embedded genre projection ({@code genres.name} expand of /v4/games). */
     public record GenreCard(long id, String name) {
@@ -33,7 +33,7 @@ public record GameCard(long igdbId, String name, String coverImageId,
                     genre.path("name").asText(""))));
         }
         return new GameCard(game.getIgdbId(), game.getName(), game.getCoverImageId(),
-                List.copyOf(genres), game.getFirstReleaseDate());
+                List.copyOf(genres), game.getFirstReleaseDate(), game.getSgdbIconUrl());
     }
 
     /** Serializes the {@code /v4/games} genre expand into the storage JSON form. */

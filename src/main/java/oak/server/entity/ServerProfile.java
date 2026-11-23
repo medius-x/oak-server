@@ -120,6 +120,23 @@ public class ServerProfile {
     @Column(name = "igdb_enabled")
     private Boolean igdbEnabled;
 
+    /** The SteamGridDB API key (2026-11-19, V23): the square game ICONS source —
+     *  IGDB has no app icons, SGDB's official-style list answers directly by the
+     *  Steam appid. Write-only like the IGDB secret (the settings response carries
+     *  only a configured flag); null = the icon layer is off and every game card
+     *  keeps serving its IGDB {@code t_thumb} square. */
+    @Column(name = "sgdb_api_key", length = 128)
+    private String sgdbApiKey;
+
+    /** The icon layer's PAUSE switch (the IGDB pattern, 2026-11-23): false =
+     *  icons are neither resolved nor SERVED (cached bytes stay stored but
+     *  answer nothing — the user's explicit semantics); the KEY is kept, so
+     *  re-enabling restores icons instantly. Null = enabled. Pausing IGDB
+     *  mutes the whole game stack (the ladder answers 503), so its switch
+     *  implicitly parks this layer too — this column is the INDEPENDENT one. */
+    @Column(name = "sgdb_enabled")
+    private Boolean sgdbEnabled;
+
     public ServerProfile(String name) {
         this.name = name;
     }

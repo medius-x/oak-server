@@ -47,6 +47,9 @@ public class GameController {
     private final GameSessionService gameSessions;
     private final IgdbLookupRateLimiter rateLimiter;
     private final AuthorizationService auth;
+    private final oak.server.service.sgdb.SgdbIconService sgdbIcons;
+    private final oak.server.service.igdb.IgdbCoverService covers;
+    private final oak.server.repository.ServerProfileRepository serverProfiles;
 
     /**
      * Runs the match ladder: the exact Steam-appid route first (the client reads it
@@ -73,7 +76,14 @@ public class GameController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nothing to look up");
         }
         try {
-            return gameService.lookup(appId, exeName, folderName);
+            GameLookupResponse answer = gameService.lookup(appId, exeName, folderName);
+            // The icon lane rides along (background, once per game): a Steam-resolved
+            // card plus the request's appid is everything SGDB needs; the answer
+            // itself never waits on the second upstream.
+            if (answer.game() != null && appId != null) {
+                sgdbIcons.queueForAppId(answer.game().igdbId(), appId);
+            }
+            return answer;
         } catch (IgdbNotConfiguredException notConfigured) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "IGDB is not configured");
         } catch (IgdbException upstream) {
@@ -94,12 +104,71 @@ public class GameController {
             if (card == null) {
                 throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown game");
             }
+            if (card.iconUrl() == null && sgdbIcons.active()) {
+                // The backfill path: the client re-fetches cards whose icon is
+                // still absent — each fetch re-queues (the lane dedupes; a parked
+                // breaker or a miss simply keeps the IGDB square).
+                sgdbIcons.queueBackfill(card.igdbId());
+            }
             return card;
         } catch (IgdbNotConfiguredException notConfigured) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "IGDB is not configured");
         } catch (IgdbException upstream) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, upstream.getMessage());
         }
+    }
+
+    /**
+     * The game's cached SteamGridDB icon BYTES (V23): clients render this, not
+     * the CDN — the CDN host is unreachable from some client machines (DPI or
+     * a local proxy; the broken-picture smoke 2026-11-23), while the server's
+     * own reach was verified by the resolution itself. 404 = no icon, OR the
+     * icon layer is PAUSED — a cached value is deliberately NOT served while
+     * paused (user semantics, 2026-11-23) — the client falls back to the
+     * cover square. The bytes are immutable per game, so the response is
+     * fully cacheable.
+     */
+    @GetMapping("/{igdbId}/icon")
+    public org.springframework.http.ResponseEntity<byte[]> icon(@AuthenticationPrincipal UserDetails principal,
+                                                                @PathVariable long igdbId) {
+        auth.requireUser(principal.getUsername());
+        byte[] bytes = sgdbIcons.active() ? sgdbIcons.cachedIconBytes(igdbId) : null;
+        if (bytes == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No icon for this game");
+        }
+        return org.springframework.http.ResponseEntity.ok()
+                .header(org.springframework.http.HttpHeaders.CONTENT_TYPE, sgdbIcons.cachedIconMime(igdbId))
+                .header(org.springframework.http.HttpHeaders.CACHE_CONTROL, "private, max-age=604800, immutable")
+                .body(bytes);
+    }
+
+    /**
+     * The game's IGDB cover THUMBNAIL bytes (V23): the panel's fallback picture,
+     * proxied through the server for the same unreachable-CDN reason. Serves
+     * only while the game integration is ACTIVE — pausing IGDB mutes the whole
+     * game stack (the user's both-toggles rule). Fetch-on-miss: the very first
+     * request for a game pays one CDN round trip, everything after serves the
+     * cached row.
+     */
+    @GetMapping("/{igdbId}/cover")
+    public org.springframework.http.ResponseEntity<byte[]> cover(@AuthenticationPrincipal UserDetails principal,
+                                                                 @PathVariable long igdbId) {
+        auth.requireUser(principal.getUsername());
+        if (!rateLimiter.tryAcquire(principal.getUsername())) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many game requests");
+        }
+        if (!oak.server.service.igdb.IgdbAuthService.isIntegrationActive(
+                serverProfiles.singleton())) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "IGDB is not configured");
+        }
+        byte[] bytes = covers.coverThumb(igdbId);
+        if (bytes == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No cover for this game");
+        }
+        return org.springframework.http.ResponseEntity.ok()
+                .header(org.springframework.http.HttpHeaders.CONTENT_TYPE, "image/jpeg")
+                .header(org.springframework.http.HttpHeaders.CACHE_CONTROL, "private, max-age=604800, immutable")
+                .body(bytes);
     }
 
     /**

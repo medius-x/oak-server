@@ -146,7 +146,7 @@ class IgdbClientTest {
         server = MockRestServiceServer.bindTo(builder).build();
         RestClient shared = builder.build();
         IgdbClient wired = new IgdbClient(new IgdbAuthService(profiles, shared), shared,
-                new IgdbCircuitBreaker(clock));
+                new UpstreamCircuitBreaker(clock));
         wired.retryPauseMillis = 0;
 
         expectToken("tok1");
@@ -165,7 +165,7 @@ class IgdbClientTest {
 
         // Past the cooldown the next call probes the wire again; a healthy
         // answer closes the breaker (and further calls flow normally).
-        clock.advanceMillis(IgdbCircuitBreaker.BASE_COOLDOWN_MILLIS + 1);
+        clock.advanceMillis(UpstreamCircuitBreaker.BASE_COOLDOWN_MILLIS + 1);
         assertTrue(wired.query("games", "fields name;").isEmpty());
         server.verify();
     }
