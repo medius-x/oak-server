@@ -234,6 +234,35 @@ public class SgdbClient {
         return Resolution.miss(); // every candidate over the cap: honest miss
     }
 
+    /** Resumes a KNOWN target straight at the CDN, skipping the API leg
+     *  entirely (2026-11-24, the dead-window post-mortem): the API host and
+     *  the CDN die INDEPENDENTLY on a hostile transit (observed live: the
+     *  API answered while a download hung, and vice versa), so a retry whose
+     *  URL a past attempt already picked must not gate on the API's mood.
+     *  Returns the resolution of the direct chain, or null when the known
+     *  target turned out over the cap (the caller re-picks via the API). */
+    public Resolution resumeKnownTarget(String apiKey, String url, byte[] partialBytes) {
+        if (breaker.isOpen()) {
+            throw new IgdbException("SteamGridDB unreachable — outbound paused for "
+                    + breaker.cooldownLeftMillis() / 1000 + " more s");
+        }
+        try {
+            Resolution outcome = downloadChain(url, partialBytes);
+            int recoveredFrom = breaker.onSuccess();
+            if (recoveredFrom > 0) {
+                log.info("SteamGridDB reachable again after {} failed attempt(s)", recoveredFrom);
+            }
+            return outcome;
+        } catch (IgdbException failure) {
+            Long pausedForMillis = breaker.onFailure();
+            if (pausedForMillis != null) {
+                log.warn("SteamGridDB unreachable ({}); outbound parked for {} s — cards keep the IGDB square",
+                        failure.getMessage(), pausedForMillis / 1000);
+            }
+            throw failure;
+        }
+    }
+
     /** The ordered candidates (PNGs smallest-first, then the first ICO). */
     private List<String> orderedCandidates(JsonNode answer) {
         List<JsonNode> pngs = new ArrayList<>();

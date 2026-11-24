@@ -177,15 +177,26 @@ public class SgdbIconService {
             SgdbClient.Resolution outcome;
             try {
                 IgdbGame game = existing.get();
-                outcome = client.resolveIcon(apiKey, appId, game.getSgdbIconUrl(), game.getSgdbIconPartial(),
-                        pickedUrl -> {
-                            // Publish the target the MOMENT it is chosen, before
-                            // the burst chain even starts (2026-11-24 smoke: with
-                            // the URL written only at attempt-end, the client's
-                            // doglegs found nothing to fetch while our chain was
-                            // still dripping — the offer never had a chance).
-                            games.storePartialIfUndelivered(igdbId, pickedUrl, game.getSgdbIconPartial());
-                        });
+                outcome = null;
+                // A target a past attempt already picked: go STRAIGHT at the CDN —
+                // the API's dead windows must not gate a retry whose URL is known
+                // (the two hosts die independently on a hostile transit).
+                if (game.getSgdbIconUrl() != null && !game.getSgdbIconUrl().isEmpty()) {
+                    outcome = client.resumeKnownTarget(apiKey, game.getSgdbIconUrl(), game.getSgdbIconPartial());
+                }
+                if (outcome == null) {
+                    // no known target yet (or the known one is over the cap) —
+                    // ask the API, publish the pick, burst the chain
+                    outcome = client.resolveIcon(apiKey, appId, game.getSgdbIconUrl(), game.getSgdbIconPartial(),
+                            pickedUrl -> {
+                                // Publish the target the MOMENT it is chosen, before
+                                // the burst chain even starts (2026-11-24 smoke: with
+                                // the URL written only at attempt-end, the client's
+                                // doglegs found nothing to fetch while our chain was
+                                // still dripping — the offer never had a chance).
+                                games.storePartialIfUndelivered(igdbId, pickedUrl, game.getSgdbIconPartial());
+                            });
+                }
             } catch (IgdbException upstream) {
                 // Honest per-attempt logging (2026-11-24): the breaker logs only
                 // its PARKING transition, so its first two consecutive failures

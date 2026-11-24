@@ -113,17 +113,40 @@ class SgdbIconServiceTest {
         verify(games).storePartialIfUndelivered(1942L, "https://cdn/icon.png", partial);
         verify(games, never()).storeIconIfAbsent(anyLong(), anyString(), anyString(), any());
 
-        // and the NEXT attempt resumes exactly from it
+        // and the NEXT attempt (the URL is now known) resumes DIRECTLY — the
+        // API leg is skipped entirely (its dead windows must not gate a retry)
         game.setSgdbIconUrl("https://cdn/icon.png");
         game.setSgdbIconPartial(partial);
-        when(client.resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/icon.png"), eq(partial), any()))
+        when(client.resumeKnownTarget("k1", "https://cdn/icon.png", partial))
                 .thenReturn(SgdbClient.Resolution.done(
                         new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{9})));
         when(games.storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{9})).thenReturn(1);
         service.queueBackfill(1942);
         assertTrue(laneSettled());
-        verify(client).resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/icon.png"), eq(partial), any());
+        verify(client).resumeKnownTarget("k1", "https://cdn/icon.png", partial);
+        verify(client, never()).resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/icon.png"), eq(partial), any());
         verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{9});
+    }
+
+    @Test
+    void anOverCapKnownTargetFallsBackToAFreshApiPick() throws Exception {
+        when(profiles.singleton()).thenReturn(profileWithKey());
+        IgdbGame game = card(1942);
+        game.setSgdbIconUrl("https://cdn/fat.png"); // known, but the cap refuses it
+        when(games.findById(1942L)).thenReturn(Optional.of(game));
+        when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
+        when(client.resumeKnownTarget(eq("k1"), eq("https://cdn/fat.png"), any()))
+                .thenReturn(null); // the direct chain's over-cap verdict
+        when(client.resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/fat.png"), any(), any()))
+                .thenReturn(SgdbClient.Resolution.done(
+                        new SgdbClient.SgdbIcon("https://cdn/thin.png", "image/png", new byte[]{5})));
+        when(games.storeIconIfAbsent(anyLong(), anyString(), anyString(), any())).thenReturn(1);
+
+        service.queueBackfill(1942);
+        assertTrue(laneSettled());
+
+        verify(client).resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/fat.png"), any(), any());
+        verify(games).storeIconIfAbsent(1942L, "https://cdn/thin.png", "image/png", new byte[]{5});
     }
 
     @Test
