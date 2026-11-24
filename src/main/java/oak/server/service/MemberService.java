@@ -1,16 +1,19 @@
 package oak.server.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.AssignRolesRequest;
 import oak.server.dto.MemberEvent;
 import oak.server.dto.MemberResponse;
 import oak.server.dto.RenameMemberRequest;
 import oak.server.dto.UserSummary;
+import oak.server.controller.InviteController;
 import oak.server.controller.UserController;
 import oak.server.entity.Permission;
 import oak.server.entity.Role;
 import oak.server.entity.RoleKind;
 import oak.server.entity.User;
+import oak.server.repository.InviteRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.websocket.VoiceAccessEnforcer;
@@ -20,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +42,7 @@ import java.util.Set;
  * re-enforces CONNECT on that member's live voice sessions ({@link VoiceAccessEnforcer}) — only
  * their effective mask changed, so only their rooms recheck.
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class MemberService {
@@ -54,6 +59,7 @@ public class MemberService {
     private final SimpMessagingTemplate messagingTemplate;
     private final VoiceAccessEnforcer voiceEnforcer;
     private final OwnershipTransferService ownershipTransferService;
+    private final InviteRepository inviteRepository;
 
     @Transactional(readOnly = true)
     public List<MemberResponse> list() {
@@ -190,6 +196,7 @@ public class MemberService {
         // A pending ownership offer to or from the victim dies with them (inside the
         // same tx — a removed recipient could never accept).
         ownershipTransferService.cancelPendingFor(target);
+        burnInvitesOf(target, "removed");
         messagingTemplate.convertAndSendToUser(target.getUsername(), MEMBER_KICK_QUEUE,
                 Map.of("by", actor.getUsername(), "banned", false, "removed", true));
         voiceEnforcer.evictEverywhere(target.getUsername(), actor.getUsername());
@@ -233,6 +240,7 @@ public class MemberService {
         }
         // A banned recipient can never accept; a banned sender is no longer acting owner.
         ownershipTransferService.cancelPendingFor(target);
+        burnInvitesOf(target, "banned");
         target.setBanned(true);
         userRepository.save(target);
         messagingTemplate.convertAndSendToUser(target.getUsername(), MEMBER_KICK_QUEUE,
@@ -260,6 +268,21 @@ public class MemberService {
 
     private void publish(String type, Long userId) {
         messagingTemplate.convertAndSend(MEMBERS_TOPIC, new MemberEvent(type, userId));
+    }
+
+    /**
+     * The exile cascade (user decision): every ACTIVE invite the member has issued burns with
+     * them — a banned/removed author's links must not keep registering people. Admins' invite
+     * panes refetch off the {@link InviteController#INVITE_TOPIC} ping (scheduled after commit,
+     * so an aborted transaction never announces a phantom change).
+     */
+    private void burnInvitesOf(User target, String cause) {
+        int burned = inviteRepository.revokeActiveByCreator(target.getId(), Instant.now());
+        if (burned > 0) {
+            log.info("[invites] burned {} active invite(s) issued by {} ({})",
+                    burned, target.getUsername(), cause);
+            InviteController.publishPingAfterCommit(messagingTemplate);
+        }
     }
 
     private static ResponseStatusException notFound(String reason) {

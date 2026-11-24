@@ -5,6 +5,7 @@ import oak.server.dto.MemberEvent;
 import oak.server.dto.UserSummary;
 import oak.server.entity.Permission;
 import oak.server.entity.User;
+import oak.server.repository.InviteRepository;
 import oak.server.repository.RoleRepository;
 import oak.server.repository.UserRepository;
 import oak.server.websocket.VoiceAccessEnforcer;
@@ -52,6 +53,8 @@ class MemberServiceTest {
     private VoiceAccessEnforcer voiceEnforcer;
     @Mock
     private OwnershipTransferService ownershipTransferService;
+    @Mock
+    private InviteRepository inviteRepository;
 
     @InjectMocks
     private MemberService memberService;

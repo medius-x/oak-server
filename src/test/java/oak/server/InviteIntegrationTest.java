@@ -3,8 +3,10 @@ package oak.server;
 import com.jayway.jsonpath.JsonPath;
 import oak.server.entity.Invite;
 import oak.server.entity.ServerProfile;
+import oak.server.entity.User;
 import oak.server.repository.InviteRepository;
 import oak.server.repository.ServerProfileRepository;
+import oak.server.repository.UserRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -19,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -50,6 +53,9 @@ class InviteIntegrationTest {
 
     @Autowired
     private InviteRepository inviteRepository;
+
+    @Autowired
+    private UserRepository userRepository;
 
     @Autowired
     private ServerProfileRepository profileRepository;
@@ -306,6 +312,53 @@ class InviteIntegrationTest {
                 .andExpect(jsonPath("$.message").value("Nickname is already taken"));
     }
 
+    @Test
+    void banBurnsInvitesIssuedByTheBannedMember() throws Exception {
+        registerBootstrapOwner();
+        String ownerToken = login("first-owner");
+        registerAndLoginInvited("doomed-inviter");
+        // The member's own active invite, minted directly: the ban cascade is under test,
+        // not the permission to mint.
+        User doomed = userRepository.findByUsername("doomed-inviter").orElseThrow();
+        String doomedSecret = mintDirectlyFor(doomed);
+        String ownerSecret = createInvite(ownerToken);
+
+        mockMvc.perform(post("/api/members/" + doomed.getId() + "/ban")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk());
+
+        // The exiled author's link dies as revoked (reads "unknown"), the owner's keeps working.
+        mockMvc.perform(post("/api/auth/register").contentType(JSON)
+                        .content(regBody("taker-one", "supersecret", null, doomedSecret)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/auth/register").contentType(JSON)
+                        .content(regBody("taker-two", "supersecret", null, ownerSecret)))
+                .andExpect(status().isCreated());
+        mockMvc.perform(get("/api/invites").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.invites.length()").value(0));
+    }
+
+    @Test
+    void removalBurnsInvitesIssuedByTheRemovedMember() throws Exception {
+        registerBootstrapOwner();
+        String ownerToken = login("first-owner");
+        registerAndLoginInvited("doomed-inviter");
+        User doomed = userRepository.findByUsername("doomed-inviter").orElseThrow();
+        String doomedSecret = mintDirectlyFor(doomed);
+
+        mockMvc.perform(post("/api/members/" + doomed.getId() + "/remove")
+                        .header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post("/api/auth/register").contentType(JSON)
+                        .content(regBody("latecomer", "supersecret", null, doomedSecret)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/invites").header("Authorization", "Bearer " + ownerToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.invites.length()").value(0));
+    }
+
     // --- helpers ---
 
     /** The empty-instance bootstrap: the first user, no secret, becomes the OWNER. */
@@ -340,6 +393,14 @@ class InviteIntegrationTest {
                 .andReturn();
         String link = JsonPath.read(result.getResponse().getContentAsString(), "$.link");
         return link.substring(link.indexOf("=") + 1);
+    }
+
+    /** Saves a fresh active invite row attributed to the given member (bypassing the
+     *  MANAGE_MEMBERS gate — the exile cascade is under test, not mint permissions). */
+    private String mintDirectlyFor(User creator) {
+        String secret = "test-" + UUID.randomUUID().toString().replace("-", "");
+        inviteRepository.save(new Invite(secret, creator, Instant.now().plus(Duration.ofHours(1))));
+        return secret;
     }
 
     private static String regBody(String username, String password, String nickname, String inviteSecret) {

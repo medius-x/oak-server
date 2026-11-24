@@ -284,20 +284,26 @@ public class VoiceMembershipTracker {
             if (!changed) {
                 return;
             }
-            // Origin flags include the deafen-IMPLIED mute (a deafened member shows both marks, in
-            // the deafen's own colour); muted/deafened are the full unions (compliance semantics).
-            boolean selfMuted = stateIn(selfMutedByChannel, channelId, username)
-                    || stateIn(impliedSelfMutedByChannel, channelId, username);
-            boolean modMuted = stateIn(modMutedByChannel, channelId, username)
-                    || stateIn(impliedModMutedByChannel, channelId, username);
-            boolean selfDeafened = stateIn(selfDeafenedByChannel, channelId, username);
-            boolean modDeafened = stateIn(modDeafenedByChannel, channelId, username);
-            boolean permMuted = stateIn(permMutedByChannel, channelId, username);
-            state = new VoiceControlState(username, channelId,
-                    selfMuted || modMuted || permMuted, selfDeafened || modDeafened,
-                    selfMuted, selfDeafened, modMuted, modDeafened, permMuted);
+            state = stateOf(channelId, username);
         }
         messagingTemplate.convertAndSend(VOICE_STATE_TOPIC, state);
+    }
+
+    /** Must run under {@link #lock}: the member's full control state — the ONE formula behind
+     *  both the {@code /topic/voice.state} push and the members snapshot's {@code marks} seed.
+     *  Origin flags include the deafen-IMPLIED mute (a deafened member shows both marks, in
+     *  the deafen's own colour); muted/deafened are the full unions (compliance semantics). */
+    private VoiceControlState stateOf(Long channelId, String username) {
+        boolean selfMuted = stateIn(selfMutedByChannel, channelId, username)
+                || stateIn(impliedSelfMutedByChannel, channelId, username);
+        boolean modMuted = stateIn(modMutedByChannel, channelId, username)
+                || stateIn(impliedModMutedByChannel, channelId, username);
+        boolean selfDeafened = stateIn(selfDeafenedByChannel, channelId, username);
+        boolean modDeafened = stateIn(modDeafenedByChannel, channelId, username);
+        boolean permMuted = stateIn(permMutedByChannel, channelId, username);
+        return new VoiceControlState(username, channelId,
+                selfMuted || modMuted || permMuted, selfDeafened || modDeafened,
+                selfMuted, selfDeafened, modMuted, modDeafened, permMuted);
     }
 
     private static boolean stateIn(Map<Long, Set<String>> byChannel, Long channelId, String username) {
@@ -361,7 +367,10 @@ public class VoiceMembershipTracker {
         voiceAccess.revokeTokens(revocation.channelId(), revocation.username());
     }
 
-    /** Snapshot of every voice room's members, used to seed {@code GET /api/voice/members}. */
+    /** Snapshot of every voice room's members, used to seed {@code GET /api/voice/members}.
+     *  Carries each member's control state ({@code marks}) so a viewer who never entered the
+     *  room paints the mute/deafen icons from the pull alone — {@code /topic/voice.state} is
+     *  push-only with no other seed. */
     public List<VoiceChannelMembersDto> snapshot() {
         synchronized (lock) {
             List<VoiceChannelMembersDto> rooms = new ArrayList<>();
@@ -369,8 +378,12 @@ public class VoiceMembershipTracker {
                 if (room.getValue().isEmpty()) {
                     continue;
                 }
-                List<String> usernames = List.copyOf(new TreeMap<>(room.getValue()).keySet());
-                rooms.add(new VoiceChannelMembersDto(room.getKey(), usernames));
+                Map<String, Integer> members = new TreeMap<>(room.getValue());
+                Map<String, VoiceControlState> marks = new TreeMap<>();
+                for (String username : members.keySet()) {
+                    marks.put(username, stateOf(room.getKey(), username));
+                }
+                rooms.add(new VoiceChannelMembersDto(room.getKey(), List.copyOf(members.keySet()), marks));
             }
             return rooms;
         }

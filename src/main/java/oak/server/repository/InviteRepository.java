@@ -46,6 +46,14 @@ public interface InviteRepository extends JpaRepository<Invite, Long> {
     @Query("update Invite i set i.revoked = true where i.revoked = false and i.expiresAt > :now")
     int revokeAllActive(@Param("now") Instant now);
 
+    /** The exile cascade: burns every ACTIVE invite the member has issued — the links
+     *  must not outlive their author's ban/removal (user decision). Already-dead rows
+     *  (expired/revoked) are left for {@code InvitesCleanup}. */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("update Invite i set i.revoked = true "
+            + "where i.revoked = false and i.expiresAt > :now and i.createdBy.id = :userId")
+    int revokeActiveByCreator(@Param("userId") Long userId, @Param("now") Instant now);
+
     /** The cleanup sweep: every row that can never become active again (revoked, or
      *  expired). Returns how many were removed. */
     @Modifying(clearAutomatically = true, flushAutomatically = true)

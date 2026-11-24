@@ -21,6 +21,7 @@ import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -203,8 +204,36 @@ class VoiceMembershipTrackerTest {
                 .sorted(Comparator.comparing(VoiceChannelMembersDto::channelId))
                 .toList();
         assertEquals(List.of(
-                new VoiceChannelMembersDto(CHANNEL_A, List.of("alice", "carol")),
-                new VoiceChannelMembersDto(CHANNEL_B, List.of("bob"))), snapshot);
+                new VoiceChannelMembersDto(CHANNEL_A, List.of("alice", "carol"),
+                        Map.of("alice", unmarked("alice", CHANNEL_A),
+                                "carol", unmarked("carol", CHANNEL_A))),
+                new VoiceChannelMembersDto(CHANNEL_B, List.of("bob"),
+                        Map.of("bob", unmarked("bob", CHANNEL_B)))), snapshot);
+    }
+
+    @Test
+    void snapshotCarriesMarksMatchingTheLivePush() {
+        tracker.enter("s1", "alice", CHANNEL_A);
+        tracker.enter("s2", "bob", CHANNEL_A);
+        tracker.setSelfMuted(CHANNEL_A, "alice", true);
+        tracker.setMuted(CHANNEL_A, "bob", true);
+
+        // The marks a viewer OUTSIDE the room seeds from must agree with the
+        // /topic/voice.state pushes (one formula — stateOf): the last push per
+        // member equals the snapshot's entry.
+        List<VoiceControlState> states = captureStates(2);
+        List<VoiceChannelMembersDto> snapshot = tracker.snapshot();
+        Map<String, VoiceControlState> marks = snapshot.get(0).marks();
+        assertEquals(states.get(0), marks.get("alice"));
+        assertEquals(states.get(1), marks.get("bob"));
+        assertTrue(marks.get("alice").selfMuted());
+        assertTrue(marks.get("bob").modMuted());
+    }
+
+    /** The all-clear state a member with no toggles carries in the snapshot. */
+    private static VoiceControlState unmarked(String username, Long channelId) {
+        return new VoiceControlState(username, channelId, false, false,
+                false, false, false, false, false);
     }
 
     @Test
