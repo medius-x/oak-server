@@ -86,5 +86,28 @@ Capability `e2ee-*`; включение — явное действие влад
 Риски: UX потери ключей, деградация поиска, двойные смоук-раунды (до/после).
 Рекомендация раунда: браться только как принципиальная продуктовая позиция, старт с DM-only.
 
+## E. Ачивки: сбор телеметрии, фаза 1 (проработка — НЕ реализовано)
+
+Полная выкладка с решениями юзера и клиентской половиной —
+`../../../space-client/docs/claude/research-backlog.md` «Ачивки: сбор телеметрии».
+
+- Уже покрыто: `game_sessions` (V21) + `igdb_games.genres` → 12/31 ачивок бесплатно.
+- V28 (7 таблиц): `voice_sessions`, `voice_mute_intervals` (SELF-mute only), `share_intervals`,
+  `watch_intervals`, `presence_days`, `moderation_events`, `process_coincidence_episodes`.
+- Пассивные хуки (основная логика не трогается, ошибки не роняют путь): voice join/leave/
+  дисконнект; self-mute флипы; `UserCameOnlineEvent` → upsert дня; ban/unban → события.
+  Единый TelemetryRecorder: try-catch WARN с контекстом, пишущие методы @Transactional
+  (урок @Modifying-саги), часовая INFO-сводка recorded/dropped.
+- Новые STOMP-приёмники `/app/voice.share`, `/app/voice.watch`, `/app/process.coincidence`:
+  principal серверный, валидация по живому членству в канале, интервалы капаются членством,
+  демпфинг; capability `achievements`.
+- Timed-банов нет ⇒ любой unban = ручной by design («разбан после бана» = событие unban).
+- Сглаживание серий «подряд» — ПРИ ЧТЕНИИ (разрыв < 2 мин = та же серия, тот же канал);
+  суммарные часы = сумма фактических интервалов (gap не начисляется — накрутка невозможна).
+- Категории: жанры из кэша + кураторские константы (name-паттерны ILIKE по фактически
+  игравшим + ручные igdb_id: Soulslike, WH40k, PS-порты, франшизы). platforms НЕ тянуть.
+- Фаза 2 (потом): enum ачивок, `user_achievements`, расчётная джоба по закрытым интервалам,
+  together-аналитика (game_sessions × voice_sessions), пуш+тост, ручная выдача.
+
 ## SteamGridDB-значки — СНЕСЕНО (юзер-решение 2026-11-24, V27; история ниже и в security-operations.md)
 История раунда — урок оEndpoints: первый зонд по НЕДОКУМЕНТИРОВАННОМУ маршруту `/v2/icons/{game_id}` (без префикса платформы) дал «одну произвольную community-заливку, фильтры игнорируются» → преждевременный вердикт «отклонено». Юзер указал на доку и официальный node-клиент (github.com/SteamGridDB/node-steamgriddb): правильная форма — `GET /v2/icons/steam/{appid}?styles=official`, отдаёт СПИСОК официальных иконок напрямую по appid (lookup игры не нужен). Wardogs → 4 иконки, PUBG → 13 (мусор «XD» был custom-стилем и отфильтровывается). Правило: форму эндпоинтов брать из официального клиента/доки, не из зондирования 404/405.
