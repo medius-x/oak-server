@@ -14,9 +14,9 @@ import java.time.Duration;
 
 /**
  * The IGDB cover-THUMBNAIL proxy (V23, 2026-11-23): the square {@code t_thumb}
- * picture — the panel's fallback when a game has no SGDB icon — is fetched
+ * picture — the panel's corner image — is fetched
  * ONCE from {@code images.igdb.com} and cached as bytes, because that CDN is
- * unreachable from some CLIENT machines exactly like SGDB's (DPI/local proxy);
+ * unreachable from some CLIENT machines (DPI/local proxy);
  * clients get it from {@code GET /api/games/{id}/cover} and never leave home.
  *
  * <p>Fetch-on-miss (synchronous): the thumbnail is ~10–20 KB and one round
@@ -28,6 +28,10 @@ import java.time.Duration;
 @Slf4j
 @Service
 public class IgdbCoverService {
+
+    /** The cover-thumbnail cache cap — the former icon-cap value, kept: a
+     *  hostile/oversized answer must not bloat the row. */
+    private static final int COVER_THUMB_MAX_BYTES = 1100 * 1024;
 
     private static final String THUMB_URL = "https://images.igdb.com/igdb/image/upload/t_thumb/";
 
@@ -72,7 +76,7 @@ public class IgdbCoverService {
             if (bytes == null || bytes.length == 0) {
                 return null;
             }
-            if (bytes.length > IgdbGame.SGDB_ICON_MAX_BYTES) {
+            if (bytes.length > COVER_THUMB_MAX_BYTES) {
                 log.warn("IGDB cover thumbnail over the cache cap ({} B) — refused", bytes.length);
                 return null;
             }
@@ -94,7 +98,7 @@ public class IgdbCoverService {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(Duration.ofSeconds(5));
         // 20 s (was 8, 2026-11-23): cover bytes ride the same slow-but-alive
-        // v4 transits the SGDB post-mortem found — see SgdbClient's longer
+        // the raw leg avoids converter edge cases on odd content types
         // note. Deliberately NOT the icon lane's 60 s: this endpoint is a
         // SYNCHRONOUS client wait, and a minute-long answer would be worse
         // than the cover fallback it serves.

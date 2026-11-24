@@ -47,7 +47,6 @@ public class GameController {
     private final GameSessionService gameSessions;
     private final IgdbLookupRateLimiter rateLimiter;
     private final AuthorizationService auth;
-    private final oak.server.service.sgdb.SgdbIconService sgdbIcons;
     private final oak.server.service.igdb.IgdbCoverService covers;
     private final oak.server.repository.ServerProfileRepository serverProfiles;
 
@@ -77,12 +76,6 @@ public class GameController {
         }
         try {
             GameLookupResponse answer = gameService.lookup(appId, exeName, folderName);
-            // The icon lane rides along (background, once per game): a Steam-resolved
-            // card plus the request's appid is everything SGDB needs; the answer
-            // itself never waits on the second upstream.
-            if (answer.game() != null && appId != null) {
-                sgdbIcons.queueForAppId(answer.game().igdbId(), appId);
-            }
             return answer;
         } catch (IgdbNotConfiguredException notConfigured) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "IGDB is not configured");
@@ -104,83 +97,12 @@ public class GameController {
             if (card == null) {
                 throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Unknown game");
             }
-            if (card.iconUrl() == null && sgdbIcons.active()) {
-                // The backfill path: the client re-fetches cards whose icon is
-                // still absent — each fetch re-queues (the lane dedupes; a parked
-                // breaker or a miss simply keeps the IGDB square).
-                sgdbIcons.queueBackfill(card.igdbId());
-            }
             return card;
         } catch (IgdbNotConfiguredException notConfigured) {
             throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "IGDB is not configured");
         } catch (IgdbException upstream) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, upstream.getMessage());
         }
-    }
-
-    /**
-     * The game's cached SteamGridDB icon BYTES (V23): clients render this, not
-     * the CDN — the CDN host is unreachable from some client machines (DPI or
-     * a local proxy; the broken-picture smoke 2026-11-23), while the server's
-     * own reach was verified by the resolution itself. 404 = no icon, OR the
-     * icon layer is PAUSED — a cached value is deliberately NOT served while
-     * paused (user semantics, 2026-11-23) — the client falls back to the
-     * cover square. The bytes are immutable per game, so the response is
-     * fully cacheable.
-     */
-    @GetMapping("/{igdbId}/icon")
-    public org.springframework.http.ResponseEntity<byte[]> icon(@AuthenticationPrincipal UserDetails principal,
-                                                                @PathVariable long igdbId) {
-        auth.requireUser(principal.getUsername());
-        byte[] bytes = sgdbIcons.active() ? sgdbIcons.cachedIconBytes(igdbId) : null;
-        if (bytes == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No icon for this game");
-        }
-        return org.springframework.http.ResponseEntity.ok()
-                .header(org.springframework.http.HttpHeaders.CONTENT_TYPE, sgdbIcons.cachedIconMime(igdbId))
-                .header(org.springframework.http.HttpHeaders.CACHE_CONTROL, "private, max-age=604800, immutable")
-                .body(bytes);
-    }
-
-    /**
-     * A client's OFFER of the icon bytes it fetched itself (2026-11-24, the
-     * burst-throttled transit round): the card's {@code pendingIconUrl} told
-     * it what the server's lane is still fighting for, and a healthy member
-     * machine's network often delivers first. The bytes are UNTRUSTED: only
-     * PNG/ICO magic survives sniffing, the cache cap stands, and the store is
-     * the atomic first-wins UPDATE — this offer, our own lane's attempt or
-     * another client's, exactly one wins; losers answer 200 as idempotent
-     * no-ops (the icon is THERE either way). 201 = this offer became the
-     * icon, 200 = one already stood. Reading is capped at cap+1 bytes, so a
-     * lying Content-Length cannot balloon memory.
-     */
-    @PostMapping("/{igdbId}/icon")
-    public org.springframework.http.ResponseEntity<Void> offerIcon(@AuthenticationPrincipal UserDetails principal,
-                                                                   @PathVariable long igdbId,
-                                                                   jakarta.servlet.http.HttpServletRequest request)
-            throws java.io.IOException {
-        auth.requireUser(principal.getUsername());
-        if (!rateLimiter.tryAcquire(principal.getUsername())) {
-            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many game requests");
-        }
-        if (!sgdbIcons.active()) {
-            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "The icon layer is off or paused");
-        }
-        long declaredBytes = request.getContentLengthLong();
-        if (declaredBytes > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
-            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Icon over the cache cap");
-        }
-        byte[] bytes = request.getInputStream().readNBytes(oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES + 1);
-        if (bytes.length > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
-            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Icon over the cache cap");
-        }
-        if (oak.server.service.sgdb.SgdbIconService.sniffIconMime(bytes) == null) {
-            throw new ResponseStatusException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Only PNG and ICO icons are accepted");
-        }
-        boolean stored = sgdbIcons.acceptClientIcon(igdbId, bytes);
-        return stored
-                ? org.springframework.http.ResponseEntity.status(HttpStatus.CREATED).build()
-                : org.springframework.http.ResponseEntity.ok().build();
     }
 
     /**

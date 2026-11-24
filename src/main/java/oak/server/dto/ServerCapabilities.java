@@ -49,17 +49,13 @@ public final class ServerCapabilities {
      *  without credentials, and the client needs the flag BEFORE any pair is
      *  set to show the settings screen at all; the DETECT side is the separate
      *  conditional {@link #IGDB_GAMES}.
-     *  {@code sgdb-settings} — the SteamGridDB SETTINGS endpoints (2026-11-19,
-     *  V23): {@code GET/PATCH /api/server/sgdb} (the icon key, MANAGE_SERVER) —
-     *  the same unconditional settings-screen pattern; the ICON side is the
-     *  conditional {@link #SGDB_ICONS}.
      *  {@code voice-user-limit} — the VOICE room participant limit (2026-11-18):
      *  {@code ChannelResponse.userLimit} + {@code PATCH /api/channels/{id}/user-limit}
      *  + the 403 full-room gate on {@code GET /room} + the JOIN_FULL_ROOMS bypass
      *  permission (rides the regular /api/permissions catalog). Without the flag the
      *  client hides the limit editor — the 403 of an old client hitting a full room
      *  is handled by its generic error path anyway. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings", "sgdb-settings", "video-codec-setting");
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings", "video-codec-setting");
 
     /** CONDITIONAL flag — deliberately NOT a member of {@link #FEATURES}: the IGDB
      *  game auto-detect ladder (2026-11-19): {@code GET /api/games/lookup} +
@@ -70,34 +66,12 @@ public final class ServerCapabilities {
      *  reported the literal is frozen forever. */
     public static final String IGDB_GAMES = "igdb-games";
 
-    /** CONDITIONAL flag — the SteamGridDB ICON layer (2026-11-19, V23): game
-     *  cards may carry {@code iconUrl} and the server resolves icons by the
-     *  Steam appid in the background. Reported ONLY while the admin's SGDB key
-     *  is stored AND the layer is not paused — pausing hides icons entirely
-     *  (a cached value stops being served, user semantics 2026-11-23). The
-     *  literal is frozen forever. */
-    public static final String SGDB_ICONS = "sgdb-icons";
-
-    /** CONDITIONAL flag — the client-side icon FETCH+OFFER leg (2026-11-24,
-     *  the burst-throttling transit post-mortem): game cards may carry
-     *  {@code pendingIconUrl} (the SGDB CDN URL the server's own lane is
-     *  still fighting for) and clients may POST the fetched bytes to
-     *  {@code POST /api/games/{id}/icon} — first delivery wins atomically,
-     *  server or client, whoever gets there. Reported under the SAME
-     *  condition as {@link #SGDB_ICONS}: without the key the endpoint 503s
-     *  and a pending URL never exists. The literal is frozen forever. */
-    public static final String SGDB_ICON_UPLOAD = "sgdb-icon-upload";
-
     /** The runtime list for {@code GET /api/server}: the unconditional {@link #FEATURES}
      *  plus the conditional flags the instance's configuration currently earns. */
     public static List<String> featuresFor(ServerProfile profile) {
         List<String> out = new ArrayList<>(FEATURES);
         if (IgdbAuthService.isIntegrationActive(profile)) {
             out.add(IGDB_GAMES);
-        }
-        if (oak.server.service.sgdb.SgdbIconService.isIntegrationActive(profile)) {
-            out.add(SGDB_ICONS);
-            out.add(SGDB_ICON_UPLOAD);
         }
         return List.copyOf(out);
     }

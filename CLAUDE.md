@@ -71,7 +71,7 @@ desktop-клиент, `../space-client`; историческое имя `oak-cl
 - **Безопасность**: серия аудит-раундов — запрет STOMP SEND в брокерские топики,
   DirectContactGate (запрет ЛС по роли), Janus enforcement, SPEAK enforcement,
   REST/MinIO scoped-ключи и квоты, read-гейты метаданных, получатели личных пушей.
-- **IGDB-интеграция** (round 1, V19; SGDB-значки V23): Twitch-ключи + SGDB-ключ (значки игр, write-only, /api/server/sgdb) в Server Settings (`/api/server/igdb`,
+- **IGDB-интеграция** (round 1, V19): Twitch-ключи в Server Settings (`/api/server/igdb`,
   MANAGE_SERVER, секрет write-only), токен client_credentials в памяти с автореминтом;
   прокси к api.igdb.com (сервер-only, без CORS у IGDB); матчинг exe→игра: Steam appid →
   fuzzy search по нормализованным именам (точное совпадение / candidates + confirm);

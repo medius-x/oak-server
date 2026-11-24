@@ -77,7 +77,7 @@ class ServerProfileIntegrationTest {
                 // credentials and lights up in the IgdbGamesIntegrationTest).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(11))
+                .andExpect(jsonPath("$.capabilities.length()").value(10))
                 .andExpect(jsonPath("$.capabilities[0]").value("backups"))
                 .andExpect(jsonPath("$.capabilities[1]").value("server-migration"))
                 .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"))
@@ -87,8 +87,7 @@ class ServerProfileIntegrationTest {
                 .andExpect(jsonPath("$.capabilities[6]").value("roster-status"))
                 .andExpect(jsonPath("$.capabilities[7]").value("voice-user-limit"))
                 .andExpect(jsonPath("$.capabilities[8]").value("igdb-settings"))
-                .andExpect(jsonPath("$.capabilities[9]").value("sgdb-settings"))
-                .andExpect(jsonPath("$.capabilities[10]").value("video-codec-setting"));
+                .andExpect(jsonPath("$.capabilities[9]").value("video-codec-setting"));
     }
 
     @Test

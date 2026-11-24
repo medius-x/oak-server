@@ -5,7 +5,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 
 /**
- * The outbound circuit breaker for IGDB/SteamGridDB-class upstreams (user
+ * The outbound circuit breaker for IGDB-class upstreams (user
  * report 2026-11-19: the hosting may BLOCK or black-hole them — GitHub is
  * already unreachable from the box in question). Timeouts alone still mean
  * every fresh game burns a 5 s connect and a log line FOREVER; the breaker

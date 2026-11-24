@@ -29,11 +29,6 @@ import java.time.Instant;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class IgdbGame {
 
-    /** The icon-bytes cache cap (1.1 MB, user decision 2026-11-23: a game whose
-     *  ONLY icon is a fat ~1 MB source must not lose it); icons are usually
-     *  30–300 KB, anything bigger is refused rather than stored (a hostile
-     *  upload cannot bloat the row). */
-    public static final int SGDB_ICON_MAX_BYTES = 1100 * 1024;
 
     /** The IGDB game id — this IS the natural key (IGDB ids are stable). An ASSIGNED
      *  id on purpose: no {@code @GeneratedValue}, or Hibernate would silently generate
@@ -61,45 +56,15 @@ public class IgdbGame {
     @Column(name = "cached_at", nullable = false)
     private Instant cachedAt;
 
-    /** The picked SteamGridDB icon's CDN URL (V23): provenance for the cached
-     *  bytes below (re-fetches, debugging). Null = not resolved, or SGDB is
-     *  off / has nothing for the game. */
-    @Column(name = "sgdb_icon_url", columnDefinition = "text")
-    private String sgdbIconUrl;
 
-    /** The icon's cached BYTES (V23): clients get them from
-     *  {@code GET /api/games/{id}/icon} — the CDN itself is unreachable from
-     *  some client machines (DPI/proxy), so the server is the only door. Icons
-     *  are 30–150 KB; a {@link #SGDB_ICON_MAX_BYTES} guard caps the row. */
-    @Column(name = "sgdb_icon_bytes", columnDefinition = "bytea")
-    private byte[] sgdbIconBytes;
 
-    /** The bytes' content type — the CDN RESPONSE header verbatim
-     *  ({@code image/png} / {@code image/x-icon}; the API metadata's
-     *  {@code image/vnd.microsoft.icon} is not what the CDN sends). */
-    @Column(name = "sgdb_icon_mime", length = 64)
-    private String sgdbIconMime;
 
-    /** The honest miss marker (V25, 2026-11-24): SGDB ANSWERED "no official
-     *  icon for this game". Distinct from null bytes alone, which means
-     *  "not delivered yet" — the hourly sweep retries those and never these.
-     *  Cleared by a later success (SGDB's catalogue grows). */
-    @Column(name = "sgdb_icon_missing")
-    private Boolean sgdbIconMissing;
 
-    /** The Range-resume accumulator (V26, 2026-11-24): bytes the strangled
-     *  transit let through so far for {@link #sgdbIconUrl}; the next attempt
-     *  continues from {@code length}. Non-null together with a set
-     *  {@code sgdbIconUrl} and null {@code sgdbIconBytes} is the PENDING
-     *  marker the card exposes as {@code pendingIconUrl} (a healthy client
-     *  may fetch the URL itself and offer the bytes). Cleared on delivery. */
-    @Column(name = "sgdb_icon_partial", columnDefinition = "bytea")
-    private byte[] sgdbIconPartial;
 
     /** The IGDB cover THUMBNAIL bytes (V23, the square {@code t_thumb} preset):
      *  the panel's fallback picture — fetched ONCE from images.igdb.com and
      *  served by {@code GET /api/games/{id}/cover}, because that CDN is
-     *  unreachable from some client machines exactly like SGDB's. */
+     *  unreachable from some client machines. */
     @Column(name = "cover_thumb_bytes", columnDefinition = "bytea")
     private byte[] coverThumbBytes;
 
