@@ -75,7 +75,7 @@ class SgdbClientTest {
         // The trailing slash mirrors the production constant's shape — the
         // client concatenates iconsUrl + appId verbatim.
         iconsUrl = "http://127.0.0.1:" + server.getAddress().getPort() + "/api/v2/icons/steam/";
-        client = new SgdbClient(iconsUrl, Duration.ofSeconds(5),
+        client = new SgdbClient(iconsUrl, Duration.ofSeconds(5), Duration.ofSeconds(5),
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build(),
                 new UpstreamCircuitBreaker(Clock.systemUTC()));
     }
@@ -132,7 +132,7 @@ class SgdbClientTest {
     }
 
     @Test
-    void theLargestOfficialPngWinsAndItsBytesRideAlong() {
+    void theSmallestOfficialPngWinsAndTheFatOneIsNeverTouched() {
         serveJson(apiPath(), 200, """
                 {"success":true,"data":[
                   {"mime":"image/vnd.microsoft.icon","width":0,"height":0,
@@ -142,14 +142,17 @@ class SgdbClientTest {
                   {"mime":"image/png","width":1024,"height":1024,
                    "url":"%s1024.png"}
                 ]}""".formatted(iconsUrl, iconsUrl, iconsUrl));
-        serveBytes("/api/v2/icons/steam/1024.png", 200, "image/png", new byte[]{1, 2, 3});
         serveBytes("/api/v2/icons/steam/256.png", 200, "image/png", new byte[]{7});
+        // The fat 1024² has NO route at all: ascending order (user decision
+        // 2026-11-24, the throttled-transit post-mortem) must never even
+        // request it — an unrouted hit lands in the 404 router below.
         serveBytes("/api/v2/icons/steam/a.ico", 200, "image/x-icon", new byte[]{9});
 
         SgdbClient.SgdbIcon icon = client.bestOfficialIcon("k1", "578080");
-        assertEquals(iconsUrl + "1024.png", icon.url());
+        assertEquals(iconsUrl + "256.png", icon.url());
         assertEquals("image/png", icon.mime());
-        assertArrayEquals(new byte[]{1, 2, 3}, icon.bytes());
+        assertArrayEquals(new byte[]{7}, icon.bytes());
+        assertEquals(0, unknownHits.get()); // the 1024² was never asked for
     }
 
     @Test
@@ -174,17 +177,18 @@ class SgdbClientTest {
     }
 
     @Test
-    void anOverCapWinnerFallsBackToTheNextPngThatFits() {
+    void anOverCapSmallestFallsBackUpToTheNextPngThatFits() {
         serveJson(apiPath(), 200, """
                 {"success":true,"data":[
-                  {"mime":"image/png","width":1024,"height":1024,
-                   "url":"%s1024.png"},
+                  {"mime":"image/png","width":256,"height":256,
+                   "url":"%s256.png"},
                   {"mime":"image/png","width":512,"height":512,
                    "url":"%s512.png"}
                 ]}""".formatted(iconsUrl, iconsUrl));
-        // Heavy Rain's shape (2026-11-23): the 1024² is 725 KB — over the cap;
-        // its 512² fits. The pick must walk on instead of refusing the game.
-        serveBytes("/api/v2/icons/steam/1024.png", 200, "image/png",
+        // The ascending walk's safety net: when the SMALLEST candidate turns
+        // out over the cache cap, the next one up serves (refusing the whole
+        // game was the 2026-11-23 bug).
+        serveBytes("/api/v2/icons/steam/256.png", 200, "image/png",
                 new byte[oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES + 1]);
         serveBytes("/api/v2/icons/steam/512.png", 200, "image/png", new byte[]{4});
 
@@ -224,7 +228,7 @@ class SgdbClientTest {
         // arrives — no silence-timeout can catch a trickling upstream, only
         // the hard total budget can. A short budget keeps the test fast.
         CountDownLatch releaseNeverAnsweringHandler = new CountDownLatch(1);
-        SgdbClient quickBudgetClient = new SgdbClient(iconsUrl, Duration.ofMillis(300),
+        SgdbClient quickBudgetClient = new SgdbClient(iconsUrl, Duration.ofMillis(300), Duration.ofMillis(300),
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build(),
                 new UpstreamCircuitBreaker(Clock.systemUTC()));
         routes.put(apiPath(), exchange -> {

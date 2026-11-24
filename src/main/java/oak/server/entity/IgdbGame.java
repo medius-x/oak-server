@@ -80,6 +80,13 @@ public class IgdbGame {
     @Column(name = "sgdb_icon_mime", length = 64)
     private String sgdbIconMime;
 
+    /** The honest miss marker (V25, 2026-11-24): SGDB ANSWERED "no official
+     *  icon for this game". Distinct from null bytes alone, which means
+     *  "not delivered yet" — the hourly sweep retries those and never these.
+     *  Cleared by a later success (SGDB's catalogue grows). */
+    @Column(name = "sgdb_icon_missing")
+    private Boolean sgdbIconMissing;
+
     /** The IGDB cover THUMBNAIL bytes (V23, the square {@code t_thumb} preset):
      *  the panel's fallback picture — fetched ONCE from images.igdb.com and
      *  served by {@code GET /api/games/{id}/cover}, because that CDN is

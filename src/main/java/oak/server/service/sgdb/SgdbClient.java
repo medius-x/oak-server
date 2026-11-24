@@ -56,21 +56,27 @@ public class SgdbClient {
 
     private static final String PROD_ICONS_URL = "https://www.steamgriddb.com/api/v2/icons/steam/";
 
-    /** The hard ceiling per HTTP request (headers + body, both legs): a slow
-     * -but-alive transit (~2 KB/s, the observed v4 path) still fits a real
-     *  icon inside; anything wedged or trickling is cut off and counted by
-     *  the breaker. Generous on purpose — this is a background lane. */
-    static final Duration DEFAULT_REQUEST_BUDGET = Duration.ofSeconds(120);
+    /** The API (JSON) leg's budget: the catalogue host is either fast (1.4 s
+     *  live) or dead — no middle ground worth waiting for. */
+    static final Duration API_REQUEST_BUDGET = Duration.ofSeconds(120);
+
+    /** The icon-download leg's budget (2026-11-24, measured): the hosting's
+     *  transit to the CDN throttles to ~325 B/s on bad days — the observed
+     *  147 KB Wardogs icon needs ~7.5 MINUTES then (yesterday's ~2 KB/s
+     *  needed 75 s). 15 minutes covers both regimes; a background lane pays
+     *  for the leash only with queue latency. */
+    static final Duration DOWNLOAD_REQUEST_BUDGET = Duration.ofSeconds(900);
 
     private final String iconsUrl;
-    private final Duration requestBudget;
+    private final Duration apiRequestBudget;
+    private final Duration downloadRequestBudget;
     private final HttpClient http;
     private final UpstreamCircuitBreaker breaker;
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Autowired
     public SgdbClient() {
-        this(PROD_ICONS_URL, DEFAULT_REQUEST_BUDGET,
+        this(PROD_ICONS_URL, API_REQUEST_BUDGET, DOWNLOAD_REQUEST_BUDGET,
                 HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(5))
                         .followRedirects(HttpClient.Redirect.NORMAL)
@@ -78,10 +84,12 @@ public class SgdbClient {
                 new UpstreamCircuitBreaker(Clock.systemUTC()));
     }
 
-    /** Test seam: a local HttpServer's base URL, a short budget and a fresh breaker. */
-    SgdbClient(String iconsUrl, Duration requestBudget, HttpClient http, UpstreamCircuitBreaker breaker) {
+    /** Test seam: a local HttpServer's base URL, short budgets and a fresh breaker. */
+    SgdbClient(String iconsUrl, Duration apiRequestBudget, Duration downloadRequestBudget,
+               HttpClient http, UpstreamCircuitBreaker breaker) {
         this.iconsUrl = iconsUrl;
-        this.requestBudget = requestBudget;
+        this.apiRequestBudget = apiRequestBudget;
+        this.downloadRequestBudget = downloadRequestBudget;
         this.http = http;
         this.breaker = breaker;
     }
@@ -92,6 +100,18 @@ public class SgdbClient {
         breaker.onSuccess();
     }
 
+    /** Whether the outbound door is parked right now — the retry sweep checks
+     *  this FIRST, so a dead path costs one log line instead of a wave of
+     *  instant fast-fails. */
+    boolean parked() {
+        return breaker.isOpen();
+    }
+
+    /** Seconds left in the current park, for the sweep's skip line. */
+    long parkedForSeconds() {
+        return breaker.cooldownLeftMillis() / 1000;
+    }
+
     /** The picked icon: its origin URL plus the cached bytes (clients fetch
      *  through OUR server — the CDN is unreachable from some client machines). */
     public record SgdbIcon(String url, String mime, byte[] bytes) {
@@ -99,13 +119,17 @@ public class SgdbClient {
 
     /**
      * The game's best OFFICIAL icon with its BYTES, or null when SGDB has none.
-     * Pick policy: PNGs by DESCENDING width (the panel renders ~40px, but big
-     * sources stay crisp), then the first ICO (SGDB metadata carries no ICO
-     * dimensions, yet the files hold multiple sizes inside — Chromium renders
-     * them all). Candidates download in that order and the FIRST ONE FITTING
-     * the cache cap wins — Heavy Rain's 1024² is 725 KB, over the cap, and
-     * refusing the whole game (the 2026-11-23 "fallback again" smoke) instead
-     * of taking its 327 KB 512² was simply wrong.
+     * Pick policy (user decision 2026-11-24, the throttled-transit
+     * post-mortem): PNGs by ASCENDING width — the panel renders ~40px, where
+     * a small source is visually identical to a big one, while its bytes fit
+     * a strangled transit that would never deliver a 725 KB "crisp" source;
+     * Heavy Rain's shape (1024² over the cap, 512² fitting) now lands the
+     * 512² first without ever touching the big one. The first ICO follows
+     * (SGDB metadata carries no ICO dimensions, yet the files hold multiple
+     * sizes inside — Chromium renders them all). Candidates download in that
+     * order and the FIRST ONE FITTING the cache cap wins — an over-cap
+     * candidate walks on to the next instead of refusing the whole game (the
+     * 2026-11-23 "fallback again" smoke).
      */
     public SgdbIcon bestOfficialIcon(String apiKey, String steamAppId) {
         if (breaker.isOpen()) {
@@ -151,7 +175,7 @@ public class SgdbClient {
                 firstIcoUrl = url;
             }
         }
-        pngs.sort((left, right) -> Long.compare(right.path("width").asLong(0), left.path("width").asLong(0)));
+        pngs.sort((left, right) -> Long.compare(left.path("width").asLong(0), right.path("width").asLong(0)));
         for (JsonNode png : pngs) {
             SgdbIcon icon = download(png.path("url").asText());
             if (icon != null) {
@@ -169,7 +193,7 @@ public class SgdbClient {
                 .GET()
                 .build();
         try {
-            HttpResponse<String> response = send(request, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = send(request, HttpResponse.BodyHandlers.ofString(), apiRequestBudget);
             if (response.statusCode() == 404) {
                 return null; // no icons for the game — an answer, not an outage
             }
@@ -206,7 +230,7 @@ public class SgdbClient {
                 .GET()
                 .build();
         try {
-            HttpResponse<byte[]> response = send(request, HttpResponse.BodyHandlers.ofByteArray());
+            HttpResponse<byte[]> response = send(request, HttpResponse.BodyHandlers.ofByteArray(), downloadRequestBudget);
             if (response.statusCode() >= 400) {
                 throw new IOException("HTTP " + response.statusCode());
             }
@@ -243,14 +267,14 @@ public class SgdbClient {
      *  cancels the future, which closes the underlying connection (the whole
      *  point of the 2026-11-24 migration: a wedged read must die, not outlive
      *  the queue). */
-    private <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler)
+    private <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler, Duration budget)
             throws IOException, InterruptedException {
         CompletableFuture<HttpResponse<T>> inFlight = http.sendAsync(request, bodyHandler);
         try {
-            return inFlight.get(requestBudget.toMillis(), TimeUnit.MILLISECONDS);
+            return inFlight.get(budget.toMillis(), TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException budgetExceeded) {
             inFlight.cancel(true);
-            throw new IOException("exceeded the " + requestBudget.toSeconds() + " s budget (wedged or trickling upstream)");
+            throw new IOException("exceeded the " + budget.toSeconds() + " s budget (wedged or trickling upstream)");
         } catch (java.util.concurrent.ExecutionException failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
             if (cause instanceof IOException io) {

@@ -21,11 +21,17 @@ import java.util.concurrent.Executors;
 
 /**
  * The icon layer over the cached game cards (V23, 2026-11-19): asks SteamGridDB
- * ONCE per game for its official square icon and stores the picked URL on the
- * card forever. Deliberately a BACKGROUND lane — a lookup's own answer must
- * never wait on a second upstream (the card ships without the icon, and the
- * client's re-fetch picks it up); and deliberately ONE daemon thread with an
- * in-flight set — icon fetches are rare (once per game) and must not stampede.
+ * for the game's official square icon and stores the picked URL on the card
+ * forever. Deliberately a BACKGROUND lane — a lookup's own answer must never
+ * wait on a second upstream (the card ships without the icon, and the client's
+ * re-fetch picks it up); and deliberately ONE daemon thread with an in-flight
+ * set — icon fetches are rare (once per game) and must not stampede.
+ *
+ * <p>Delivery is RETRIED hourly for undelivered icons (2026-11-24): the CDN
+ * transit from some hostings swings between ~2 KB/s and a strangled ~325 B/s,
+ * so a single dogleg-moment attempt is a lottery — the sweep buys every game
+ * its window eventually. Honest misses (SGDB answered "no official icon")
+ * carry the V25 marker and are never re-asked.
  *
  * <p>The appid comes from the match cache itself: every {@code steam:<appid>}
  * key row points at the game it resolved to, so the service can backfill any
@@ -53,12 +59,11 @@ public class SgdbIconService {
 
     /** The lane's watch (2026-11-24, the silent-queue smoke): a wedged task
      *  must not become silence — JVM DNS resolution has NO timeout at all, and
-     *  the CDN's slow transit can drag a read for minutes; on ONE lane thread
-     *  either parks the whole queue invisibly (a whole evening with zero SGDB
-     *  log lines, 2026-11-23 22:00). The watch only LOGS: an
-     *  HttpURLConnection read ignores interrupts, so there is nothing safe to
-     *  cancel — the line names the game and the age. */
-    static final long LANE_STUCK_AFTER_MILLIS = 10 * 60_000L;
+     *  a slow-but-legit download may run up to the download budget (15 min);
+     *  on ONE lane thread either parks the whole queue invisibly (a whole
+     *  evening with zero SGDB log lines, 2026-11-23 22:00). Warns only PAST
+     *  the budget's worst case, so a legitimate slow crawl never trips it. */
+    static final long LANE_STUCK_AFTER_MILLIS = 20 * 60_000L;
 
     private volatile long laneBusySinceMillis = 0L;
     private volatile long laneBusyGameId = 0L;
@@ -96,14 +101,15 @@ public class SgdbIconService {
 
     /** Queues the icon resolution for a game whose appid is recovered from the
      *  match cache (the backfill path — every {@code steam:*} row pointing at
-     *  the game carries one). No-op for manual cards, resolved cards and games
-     *  no Steam key ever pointed at. */
+     *  the game carries one). No-op for manual cards, resolved cards, ANSWERED
+     *  misses (the V25 marker) and games no Steam key ever pointed at. */
     public void queueBackfill(long igdbId) {
         if (igdbId <= 0) {
             return; // manual cards have no IGDB identity and no Steam appid
         }
         Optional<IgdbGame> game = games.findById(igdbId);
-        if (game.isEmpty() || game.get().getSgdbIconBytes() != null) {
+        if (game.isEmpty() || game.get().getSgdbIconBytes() != null
+                || Boolean.TRUE.equals(game.get().getSgdbIconMissing())) {
             return;
         }
         List<String> steamKeys = matches.findSteamKeys(igdbId);
@@ -149,8 +155,9 @@ public class SgdbIconService {
         try {
             log.info("resolving the SteamGridDB icon for game {} (appid {})", igdbId, appId);
             Optional<IgdbGame> existing = games.findById(igdbId);
-            if (existing.isEmpty() || existing.get().getSgdbIconBytes() != null) {
-                return; // resolved earlier or the card vanished — nothing to do
+            if (existing.isEmpty() || existing.get().getSgdbIconBytes() != null
+                    || Boolean.TRUE.equals(existing.get().getSgdbIconMissing())) {
+                return; // resolved earlier, answered miss, or the card vanished
             }
             String apiKey = apiKey();
             if (apiKey == null || isPaused(profiles.singleton())) {
@@ -160,23 +167,57 @@ public class SgdbIconService {
             try {
                 icon = client.bestOfficialIcon(apiKey, appId);
             } catch (IgdbException upstream) {
-                // the breaker logged the transition; the card keeps the IGDB square,
-                // and the next card re-fetch re-queues (the breaker parks first)
-                return;
-            }
-            if (icon == null) {
-                log.info("no SteamGridDB icon for game {} (appid {}) — keeping the IGDB square", igdbId, appId);
+                // Honest per-attempt logging (2026-11-24): the breaker logs only
+                // its PARKING transition, so its first two consecutive failures
+                // used to vanish — a whole evening of budget deaths with zero
+                // lines (the 22:47 smoke). The sweep retries later regardless.
+                log.warn("SteamGridDB icon attempt for game {} (appid {}) failed: {} — will retry later",
+                        igdbId, appId, upstream.getMessage());
                 return;
             }
             IgdbGame game = existing.get();
+            if (icon == null) {
+                game.setSgdbIconMissing(true); // the V25 marker: an ANSWER, never re-asked
+                games.save(game);
+                log.info("no SteamGridDB icon for game {} (appid {}) — keeping the IGDB square", igdbId, appId);
+                return;
+            }
             game.setSgdbIconUrl(icon.url());
             game.setSgdbIconMime(icon.mime());
             game.setSgdbIconBytes(icon.bytes());
+            game.setSgdbIconMissing(false); // heal (the catalogue may have grown since a miss)
             games.save(game);
             log.info("game {} got its SteamGridDB icon (appid {}, {} B)", igdbId, appId, icon.bytes().length);
         } finally {
             laneBusySinceMillis = 0L;
             laneBusyGameId = 0L;
+        }
+    }
+
+    /** The hourly catch-up sweep (2026-11-24, the throttled-transit
+     *  post-mortem): the hosting's route to the SGDB CDN swings between
+     *  ~2 KB/s and ~325 B/s (measured on the same URL a day apart) — client
+     *  doglegs sample only moments of that. Re-queue every undelivered icon
+     *  hourly; while the outbound is parked the whole sweep is skipped for
+     *  one log line, and the first breathable window delivers the bytes into
+     *  the cache forever. */
+    @Scheduled(fixedDelay = 3_600_000L)
+    void sweepUndeliveredIcons() {
+        if (client.parked()) {
+            log.info("icon sweep skipped — SteamGridDB outbound parked ({} s left)",
+                    client.parkedForSeconds());
+            return;
+        }
+        int requeued = 0;
+        for (IgdbGame game : games.findBySgdbIconBytesIsNull()) {
+            if (Boolean.TRUE.equals(game.getSgdbIconMissing())) {
+                continue; // an answered miss — nothing to deliver, ever
+            }
+            queueBackfill(game.getIgdbId()); // dedupes and drops no-steam-key games inside
+            requeued += 1;
+        }
+        if (requeued > 0) {
+            log.info("icon sweep: re-queued {} undelivered icon(s)", requeued);
         }
     }
 

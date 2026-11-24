@@ -65,6 +65,57 @@ class SgdbIconServiceTest {
         assertEquals("https://cdn/icon.png", game.getSgdbIconUrl());
         assertEquals("image/png", game.getSgdbIconMime());
         org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[]{1, 2}, game.getSgdbIconBytes());
+        assertEquals(Boolean.FALSE, game.getSgdbIconMissing()); // a success heals an old miss
+    }
+
+    @Test
+    void anHonestMissIsMarkedAndNeverReAsked() throws Exception {
+        when(profiles.singleton()).thenReturn(profileWithKey());
+        IgdbGame game = card(1942);
+        when(games.findById(1942L)).thenReturn(Optional.of(game));
+        when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
+        when(client.bestOfficialIcon("k1", "292030")).thenReturn(null); // SGDB ANSWERED: none
+
+        service.queueBackfill(1942);
+        assertTrue(laneSettled());
+        assertEquals(Boolean.TRUE, game.getSgdbIconMissing());
+        verify(games).save(game);
+
+        // The sweep and any later dogleg skip the answered miss entirely.
+        when(games.findBySgdbIconBytesIsNull()).thenReturn(List.of(game));
+        service.sweepUndeliveredIcons();
+        assertTrue(laneSettled());
+        verify(client, org.mockito.Mockito.times(1)).bestOfficialIcon(anyString(), anyString());
+    }
+
+    @Test
+    void theSweepRequeuesUndeliveredIcons() throws Exception {
+        when(profiles.singleton()).thenReturn(profileWithKey());
+        IgdbGame owed = card(1942);            // transport-starved, not answered
+        IgdbGame answered = card(1943);        // the V25 marker says: no icon exists
+        answered.setSgdbIconMissing(true);
+        IgdbGame noSteamKey = card(1944);      // resolved by name — nothing to ask SGDB
+        when(games.findBySgdbIconBytesIsNull()).thenReturn(List.of(owed, answered, noSteamKey));
+        when(games.findById(1942L)).thenReturn(Optional.of(owed));
+        when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
+        when(client.bestOfficialIcon("k1", "292030"))
+                .thenReturn(new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1}));
+
+        service.sweepUndeliveredIcons();
+        assertTrue(laneSettled());
+
+        verify(client, org.mockito.Mockito.times(1)).bestOfficialIcon(anyString(), anyString());
+        verify(games).save(owed); // the deliverable one got its bytes
+    }
+
+    @Test
+    void theSweepIsSkippedEntirelyWhileTheOutboundIsParked() {
+        when(client.parked()).thenReturn(true);
+
+        service.sweepUndeliveredIcons();
+
+        verify(games, never()).findBySgdbIconBytesIsNull(); // one log line, zero work
+        verify(client, never()).bestOfficialIcon(anyString(), anyString());
     }
 
     @Test

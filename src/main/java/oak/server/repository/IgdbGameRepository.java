@@ -18,4 +18,8 @@ public interface IgdbGameRepository extends JpaRepository<IgdbGame, Long> {
     /** The lowest manual id (absent when no manual card exists yet). */
     @Query("SELECT MIN(g.igdbId) FROM IgdbGame g WHERE g.igdbId < 0")
     Optional<Long> lowestManualId();
+
+    /** Cards whose SGDB icon bytes have not landed yet — the hourly retry
+     *  sweep's input (the miss marker filters the answered ones out). */
+    java.util.List<IgdbGame> findBySgdbIconBytesIsNull();
 }
