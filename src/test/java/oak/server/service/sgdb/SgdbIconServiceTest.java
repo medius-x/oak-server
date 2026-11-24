@@ -14,12 +14,15 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -27,10 +30,12 @@ import static org.mockito.Mockito.when;
 
 /**
  * The icon lane's queue and resolve policy, all collaborators mocked (the lane
- * itself is the only thread — the assertions wait for it briefly). Covers: the
- * backfill recovers the appid from the match cache and SAVES the icon; a card
- * that already has one is never re-asked; an upstream failure leaves the card
- * as-is; manual (negative-id) cards are out of scope entirely.
+ * itself is the only thread — the assertions wait for it briefly). Covers:
+ * the backfill recovers the appid from the match cache and STORES the icon
+ * atomically; a burst attempt's PARTIAL is persisted for the Range resume; a
+ * card that already has one is never re-asked; an upstream failure leaves the
+ * card as-is; manual (negative-id) cards are out of scope entirely; and the
+ * CLIENT-offer acceptance (first-wins, magic-sniffed).
  */
 class SgdbIconServiceTest {
 
@@ -50,22 +55,74 @@ class SgdbIconServiceTest {
         return new IgdbGame(igdbId, "Game", null, "[]", null, Instant.EPOCH);
     }
 
+    private static final byte[] PNG_BYTES = new byte[]{
+            (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2};
+
     @Test
-    void backfillRecoversTheAppidFromTheMatchCacheAndSavesTheIcon() throws Exception {
+    void backfillRecoversTheAppidAndStoresTheIconAtomically() throws Exception {
         when(profiles.singleton()).thenReturn(profileWithKey());
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.bestOfficialIcon("k1", "292030"))
-                .thenReturn(new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1, 2}));
+        when(client.resolveIcon("k1", "292030", null, null))
+                .thenReturn(SgdbClient.Resolution.done(
+                        new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1, 2})));
+        when(games.storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{1, 2}))
+                .thenReturn(1);
 
         service.queueBackfill(1942);
         assertTrue(laneSettled());
-        verify(games).save(game);
-        assertEquals("https://cdn/icon.png", game.getSgdbIconUrl());
-        assertEquals("image/png", game.getSgdbIconMime());
-        org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[]{1, 2}, game.getSgdbIconBytes());
-        assertEquals(Boolean.FALSE, game.getSgdbIconMissing()); // a success heals an old miss
+
+        verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{1, 2});
+    }
+
+    @Test
+    void aLosingRacesCopyIsDroppedSilently() throws Exception {
+        // a client offer won mid-attempt: the atomic UPDATE answers 0 — our
+        // bytes are discarded with a log line, no overwrite, no error
+        when(profiles.singleton()).thenReturn(profileWithKey());
+        IgdbGame game = card(1942);
+        when(games.findById(1942L)).thenReturn(Optional.of(game));
+        when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
+        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any()))
+                .thenReturn(SgdbClient.Resolution.done(
+                        new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1})));
+        when(games.storeIconIfAbsent(anyLong(), anyString(), anyString(), any())).thenReturn(0);
+
+        service.queueBackfill(1942);
+        assertTrue(laneSettled());
+
+        verify(games, never()).save(any(IgdbGame.class)); // nothing else touched
+    }
+
+    @Test
+    void aBurstPartialIsPersistedForTheRangeResume() throws Exception {
+        when(profiles.singleton()).thenReturn(profileWithKey());
+        IgdbGame game = card(1942);
+        when(games.findById(1942L)).thenReturn(Optional.of(game));
+        when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
+        byte[] partial = new byte[20_000];
+        when(client.resolveIcon("k1", "292030", null, null))
+                .thenReturn(SgdbClient.Resolution.partial("https://cdn/icon.png", partial));
+
+        service.queueBackfill(1942);
+        assertTrue(laneSettled());
+
+        // the partial lands as Range-resume material, keyed by its URL
+        verify(games).storePartialIfUndelivered(1942L, "https://cdn/icon.png", partial);
+        verify(games, never()).storeIconIfAbsent(anyLong(), anyString(), anyString(), any());
+
+        // and the NEXT attempt resumes exactly from it
+        game.setSgdbIconUrl("https://cdn/icon.png");
+        game.setSgdbIconPartial(partial);
+        when(client.resolveIcon("k1", "292030", "https://cdn/icon.png", partial))
+                .thenReturn(SgdbClient.Resolution.done(
+                        new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{9})));
+        when(games.storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{9})).thenReturn(1);
+        service.queueBackfill(1942);
+        assertTrue(laneSettled());
+        verify(client).resolveIcon("k1", "292030", "https://cdn/icon.png", partial);
+        verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{9});
     }
 
     @Test
@@ -74,7 +131,8 @@ class SgdbIconServiceTest {
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.bestOfficialIcon("k1", "292030")).thenReturn(null); // SGDB ANSWERED: none
+        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any()))
+                .thenReturn(SgdbClient.Resolution.miss());
 
         service.queueBackfill(1942);
         assertTrue(laneSettled());
@@ -85,7 +143,7 @@ class SgdbIconServiceTest {
         when(games.findBySgdbIconBytesIsNull()).thenReturn(List.of(game));
         service.sweepUndeliveredIcons();
         assertTrue(laneSettled());
-        verify(client, org.mockito.Mockito.times(1)).bestOfficialIcon(anyString(), anyString());
+        verify(client, org.mockito.Mockito.times(1)).resolveIcon(anyString(), anyString(), any(), any());
     }
 
     @Test
@@ -98,14 +156,16 @@ class SgdbIconServiceTest {
         when(games.findBySgdbIconBytesIsNull()).thenReturn(List.of(owed, answered, noSteamKey));
         when(games.findById(1942L)).thenReturn(Optional.of(owed));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.bestOfficialIcon("k1", "292030"))
-                .thenReturn(new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1}));
+        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any()))
+                .thenReturn(SgdbClient.Resolution.done(
+                        new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1})));
+        when(games.storeIconIfAbsent(anyLong(), anyString(), anyString(), any())).thenReturn(1);
 
         service.sweepUndeliveredIcons();
         assertTrue(laneSettled());
 
-        verify(client, org.mockito.Mockito.times(1)).bestOfficialIcon(anyString(), anyString());
-        verify(games).save(owed); // the deliverable one got its bytes
+        verify(client, org.mockito.Mockito.times(1)).resolveIcon(anyString(), anyString(), any(), any());
+        verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{1});
     }
 
     @Test
@@ -115,7 +175,7 @@ class SgdbIconServiceTest {
         service.sweepUndeliveredIcons();
 
         verify(games, never()).findBySgdbIconBytesIsNull(); // one log line, zero work
-        verify(client, never()).bestOfficialIcon(anyString(), anyString());
+        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any());
     }
 
     @Test
@@ -127,7 +187,7 @@ class SgdbIconServiceTest {
 
         service.queueBackfill(1942);
         assertTrue(laneSettled());
-        verify(client, never()).bestOfficialIcon(anyString(), anyString());
+        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any());
         verify(games, never()).save(any(IgdbGame.class));
     }
 
@@ -137,7 +197,7 @@ class SgdbIconServiceTest {
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.bestOfficialIcon("k1", "292030")).thenThrow(new IgdbException("parked"));
+        when(client.resolveIcon(anyString(), anyString(), any(), any())).thenThrow(new IgdbException("parked"));
 
         service.queueBackfill(1942);
         assertTrue(laneSettled());
@@ -154,7 +214,7 @@ class SgdbIconServiceTest {
         service.queueBackfill(1942);
         service.queueBackfill(-1L); // a manual card — no IGDB identity at all
         assertTrue(laneSettled());
-        verify(client, never()).bestOfficialIcon(anyString(), anyString());
+        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any());
     }
 
     @Test
@@ -165,12 +225,43 @@ class SgdbIconServiceTest {
         verify(games, never()).findById(anyLong());
     }
 
+    // --- the client-offer acceptance ---
+
+    @Test
+    void aClientOfferWinsAtomicallyAndKeepsThePendingUrlAsProvenance() {
+        IgdbGame game = card(1942);
+        game.setSgdbIconUrl("https://cdn/icon.png"); // the pending target the client fetched
+        when(games.findById(1942L)).thenReturn(Optional.of(game));
+        when(games.storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", PNG_BYTES)).thenReturn(1);
+
+        assertTrue(service.acceptClientIcon(1942, PNG_BYTES));
+        verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", PNG_BYTES);
+    }
+
+    @Test
+    void aClientOfferLosesToAnExistingIconWithoutSideEffects() {
+        IgdbGame resolved = card(1942);
+        resolved.setSgdbIconBytes(new byte[]{7});
+        when(games.findById(1942L)).thenReturn(Optional.of(resolved));
+
+        assertFalse(service.acceptClientIcon(1942, PNG_BYTES));
+        verify(games, never()).storeIconIfAbsent(anyLong(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void nonIconBytesAreRefusedBeforeAnyStorage() {
+        assertFalse(service.acceptClientIcon(1942, "not an icon at all..".getBytes()));
+        verify(games, never()).findById(anyLong());
+    }
+
+    // --- the stuck-lane watch ---
+
     @Test
     void theStuckLaneWatchStaysQuietWithinBudgetAndNamesTheGamePastIt() {
         long startedAtMillis = 1_000_000L;
         // one second of business — nothing to say
         assertNull(SgdbIconService.stuckLaneLine(startedAtMillis, startedAtMillis + 1_000L, 1942));
-        // ten minutes minus a hair — the last quiet tick
+        // the budget minus a hair — the last quiet tick
         assertNull(SgdbIconService.stuckLaneLine(startedAtMillis,
                 startedAtMillis + SgdbIconService.LANE_STUCK_AFTER_MILLIS - 1, 1942));
         // past the budget — the game and the age must both ride the line

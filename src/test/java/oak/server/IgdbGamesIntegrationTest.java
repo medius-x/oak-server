@@ -256,6 +256,57 @@ class IgdbGamesIntegrationTest {
     }
 
     @Test
+    void theClientIconOfferIsSniffedCappedAndFirstWins() throws Exception {
+        String memberToken = memberToken();
+        // the icon layer must be ON for offers
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"apiKey\":\"k1\"}"))
+                .andExpect(status().isOk());
+        IgdbGame pending = new IgdbGame(555_010L, "Pending", null, "[]", null, java.time.Instant.now());
+        pending.setSgdbIconUrl("https://cdn2.steamgriddb.com/icon/p.png"); // the pending marker
+        igdbGamesCache.save(pending);
+
+        byte[] pngBytes = new byte[]{
+                (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3};
+
+        // anonymous offers are rejected before anything else
+        mockMvc.perform(post("/api/games/555010/icon").content(pngBytes))
+                .andExpect(status().isUnauthorized());
+
+        // non-icon bytes are refused by the magic sniff
+        mockMvc.perform(post("/api/games/555010/icon").header("Authorization", "Bearer " + memberToken)
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                        .content("<svg onload=alert(1)>".getBytes()))
+                .andExpect(status().isUnsupportedMediaType());
+
+        // the winner's offer becomes THE icon; the served bytes/mime are sniffed
+        mockMvc.perform(post("/api/games/555010/icon").header("Authorization", "Bearer " + memberToken)
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM).content(pngBytes))
+                .andExpect(status().isCreated());
+        mockMvc.perform(get("/api/games/555010/icon").header("Authorization", "Bearer " + memberToken))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType(MediaType.IMAGE_PNG))
+                .andExpect(content().bytes(pngBytes));
+
+        // a second offer (racing client, or our own lane's late copy) is an
+        // idempotent no-op — the standing icon never changes
+        mockMvc.perform(post("/api/games/555010/icon").header("Authorization", "Bearer " + memberToken)
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM).content(new byte[]{
+                        (byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 9}))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/games/555010/icon").header("Authorization", "Bearer " + memberToken))
+                .andExpect(content().bytes(pngBytes)); // still the FIRST delivery
+
+        // PAUSED: offers stop too (same semantics as the serving gate)
+        mockMvc.perform(patch("/api/server/sgdb").header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON).content("{\"paused\":true}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/games/555010/icon").header("Authorization", "Bearer " + memberToken)
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM).content(pngBytes))
+                .andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
     void theCoverEndpointProxiesTheThumbnailAndGatesOnTheGameIntegration() throws Exception {
         String memberToken = memberToken();
         igdbGamesCache.save(new IgdbGame(555_003L, "Covered", "co555003", "[]", null,

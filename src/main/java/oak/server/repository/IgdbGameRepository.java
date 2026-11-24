@@ -2,7 +2,9 @@ package oak.server.repository;
 
 import oak.server.entity.IgdbGame;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
 import java.util.Optional;
 
@@ -22,4 +24,25 @@ public interface IgdbGameRepository extends JpaRepository<IgdbGame, Long> {
     /** Cards whose SGDB icon bytes have not landed yet — the hourly retry
      *  sweep's input (the miss marker filters the answered ones out). */
     java.util.List<IgdbGame> findBySgdbIconBytesIsNull();
+
+    /** The FIRST-WINS icon store (2026-11-24): exactly one delivery — the
+     *  server lane's own attempt OR the first client's offer — may fill the
+     *  bytes; the WHERE clause makes the race atomic and every loser a
+     *  harmless no-op. Also clears the pending residue (partial bytes, miss
+     *  marker). Returns 1 when THIS call stored the icon, 0 when one was
+     *  already there. */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE IgdbGame g SET g.sgdbIconUrl = :url, g.sgdbIconMime = :mime, g.sgdbIconBytes = :bytes, "
+            + "g.sgdbIconMissing = false, g.sgdbIconPartial = NULL "
+            + "WHERE g.igdbId = :igdbId AND g.sgdbIconBytes IS NULL")
+    int storeIconIfAbsent(@Param("igdbId") long igdbId, @Param("url") String url,
+                          @Param("mime") String mime, @Param("bytes") byte[] bytes);
+
+    /** Persists a burst attempt's partial bytes — Range-resume material for
+     *  the next attempt; a no-op once ANY source delivered the icon. */
+    @Modifying(clearAutomatically = true)
+    @Query("UPDATE IgdbGame g SET g.sgdbIconUrl = :url, g.sgdbIconPartial = :partial "
+            + "WHERE g.igdbId = :igdbId AND g.sgdbIconBytes IS NULL")
+    int storePartialIfUndelivered(@Param("igdbId") long igdbId, @Param("url") String url,
+                                  @Param("partial") byte[] partial);
 }

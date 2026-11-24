@@ -143,6 +143,47 @@ public class GameController {
     }
 
     /**
+     * A client's OFFER of the icon bytes it fetched itself (2026-11-24, the
+     * burst-throttled transit round): the card's {@code pendingIconUrl} told
+     * it what the server's lane is still fighting for, and a healthy member
+     * machine's network often delivers first. The bytes are UNTRUSTED: only
+     * PNG/ICO magic survives sniffing, the cache cap stands, and the store is
+     * the atomic first-wins UPDATE — this offer, our own lane's attempt or
+     * another client's, exactly one wins; losers answer 200 as idempotent
+     * no-ops (the icon is THERE either way). 201 = this offer became the
+     * icon, 200 = one already stood. Reading is capped at cap+1 bytes, so a
+     * lying Content-Length cannot balloon memory.
+     */
+    @PostMapping("/{igdbId}/icon")
+    public org.springframework.http.ResponseEntity<Void> offerIcon(@AuthenticationPrincipal UserDetails principal,
+                                                                   @PathVariable long igdbId,
+                                                                   jakarta.servlet.http.HttpServletRequest request)
+            throws java.io.IOException {
+        auth.requireUser(principal.getUsername());
+        if (!rateLimiter.tryAcquire(principal.getUsername())) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many game requests");
+        }
+        if (!sgdbIcons.active()) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "The icon layer is off or paused");
+        }
+        long declaredBytes = request.getContentLengthLong();
+        if (declaredBytes > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Icon over the cache cap");
+        }
+        byte[] bytes = request.getInputStream().readNBytes(oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES + 1);
+        if (bytes.length > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+            throw new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "Icon over the cache cap");
+        }
+        if (oak.server.service.sgdb.SgdbIconService.sniffIconMime(bytes) == null) {
+            throw new ResponseStatusException(HttpStatus.UNSUPPORTED_MEDIA_TYPE, "Only PNG and ICO icons are accepted");
+        }
+        boolean stored = sgdbIcons.acceptClientIcon(igdbId, bytes);
+        return stored
+                ? org.springframework.http.ResponseEntity.status(HttpStatus.CREATED).build()
+                : org.springframework.http.ResponseEntity.ok().build();
+    }
+
+    /**
      * The game's IGDB cover THUMBNAIL bytes (V23): the panel's fallback picture,
      * proxied through the server for the same unreachable-CDN reason. Serves
      * only while the game integration is ACTIVE — pausing IGDB mutes the whole

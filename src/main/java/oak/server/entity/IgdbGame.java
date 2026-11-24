@@ -87,6 +87,15 @@ public class IgdbGame {
     @Column(name = "sgdb_icon_missing")
     private Boolean sgdbIconMissing;
 
+    /** The Range-resume accumulator (V26, 2026-11-24): bytes the strangled
+     *  transit let through so far for {@link #sgdbIconUrl}; the next attempt
+     *  continues from {@code length}. Non-null together with a set
+     *  {@code sgdbIconUrl} and null {@code sgdbIconBytes} is the PENDING
+     *  marker the card exposes as {@code pendingIconUrl} (a healthy client
+     *  may fetch the URL itself and offer the bytes). Cleared on delivery. */
+    @Column(name = "sgdb_icon_partial", columnDefinition = "bytea")
+    private byte[] sgdbIconPartial;
+
     /** The IGDB cover THUMBNAIL bytes (V23, the square {@code t_thumb} preset):
      *  the panel's fallback picture — fetched ONCE from images.igdb.com and
      *  served by {@code GET /api/games/{id}/cover}, because that CDN is

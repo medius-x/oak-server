@@ -9,7 +9,9 @@ import oak.server.service.igdb.UpstreamCircuitBreaker;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -39,16 +41,23 @@ import java.util.concurrent.TimeUnit;
  * junk uploads are {@code custom}-styled and never requested at all.
  *
  * <p><b>Transport (2026-11-24, the silent-wedge post-mortem).</b> Runs on
- * {@link HttpClient} with a HARD total budget per request
- * ({@code sendAsync + get(budget)}). The previous HttpURLConnection-based
- * stack cannot bound a request's total duration: its read timeout only fires
- * on SILENCE between packets, so a trickling CDN (a packet every few seconds)
- * keeps the socket alive forever while delivering nothing — observed live as
- * an icon task wedged for hours with zero log lines, parking the whole
- * single-thread icon lane (2026-11-23 22:00 smoke). The JDK client's
- * {@code sendAsync} future is cancellable: on budget exhaustion
- * {@code cancel(true)} closes the underlying connection, the task fails, the
- * breaker parks, the lane moves on. Worst case per request: the budget.
+ * {@link HttpClient} with a HARD budget on every phase: {@code sendAsync +
+ * get(budget)} for the headers, and a per-read stall deadline for the body —
+ * the previous HttpURLConnection stack could not bound a request's total
+ * duration at all (its read timeout only fires on SILENCE between packets,
+ * so a trickling upstream parked the lane forever, observed live as hours of
+ * zero log lines). A timed-out read CLOSES the connection, the attempt ends,
+ * the breaker parks, the lane moves on.
+ *
+ * <p><b>Burst-resume (2026-11-24, the throttled-transit measurements).</b>
+ * Some hostings' route to the CDN lets ~20 KB through per connection fast
+ * and then strangles the flow to ~4 B/s (measured: 20075 B/10 s, then
+ * +430 B in 110 s; a Range request at a fresh offset got 20 KB in 0.16 s —
+ * the bucket is per connection). So a download is a CHAIN of short
+ * connections: read until the stall deadline, keep the partial bytes,
+ * reconnect with {@code Range: <offset>-}, repeat — every wait is bounded,
+ * and the partial bytes survive between attempts (see
+ * {@code igdb_games.sgdb_icon_partial}) so even the hourly sweep accretes.
  */
 @Slf4j
 @Service
@@ -60,23 +69,40 @@ public class SgdbClient {
      *  live) or dead — no middle ground worth waiting for. */
     static final Duration API_REQUEST_BUDGET = Duration.ofSeconds(120);
 
-    /** The icon-download leg's budget (2026-11-24, measured): the hosting's
-     *  transit to the CDN throttles to ~325 B/s on bad days — the observed
-     *  147 KB Wardogs icon needs ~7.5 MINUTES then (yesterday's ~2 KB/s
-     *  needed 75 s). 15 minutes covers both regimes; a background lane pays
-     *  for the leash only with queue latency. */
-    static final Duration DOWNLOAD_REQUEST_BUDGET = Duration.ofSeconds(900);
+    /** The response-headers budget per download connection: a live CDN
+     *  answers in well under a second; headers that never come are a dead
+     *  path, not a slow one. */
+    static final Duration HEADERS_BUDGET = Duration.ofSeconds(60);
+
+    /** One read may block this long with ZERO bytes before the connection is
+     *  declared strangled: the observed burst arrives in ~10 s, so 25 s of
+     *  pure silence means the token bucket is spent — reconnect (Range) or
+     *  end the attempt with the partial bytes. */
+    static final long STALL_AFTER_MILLIS = 25_000L;
+
+    /** Connections per attempt: each strangled connection still delivers its
+     *  ~20 KB burst, so 12 connections ≈ 240 KB of progress per attempt —
+     *  the observed 147 KB Wardogs icon lands in ONE attempt, and fatter
+     *  files accrete across the hourly sweep. */
+    static final int MAX_CONNECTIONS_PER_ATTEMPT = 12;
+
+    /** The whole attempt's wall clock — the lane must never be held hostage:
+     *  bounded reads, bounded connections, bounded attempt, hourly retries. */
+    static final long ATTEMPT_CAP_MILLIS = 10 * 60_000L;
 
     private final String iconsUrl;
     private final Duration apiRequestBudget;
-    private final Duration downloadRequestBudget;
+    private final Duration headersBudget;
+    private final long stallAfterMillis;
+    private final long attemptCapMillis;
     private final HttpClient http;
     private final UpstreamCircuitBreaker breaker;
     private final ObjectMapper mapper = new ObjectMapper();
 
     @Autowired
     public SgdbClient() {
-        this(PROD_ICONS_URL, API_REQUEST_BUDGET, DOWNLOAD_REQUEST_BUDGET,
+        this(PROD_ICONS_URL, API_REQUEST_BUDGET, HEADERS_BUDGET,
+                STALL_AFTER_MILLIS, ATTEMPT_CAP_MILLIS,
                 HttpClient.newBuilder()
                         .connectTimeout(Duration.ofSeconds(5))
                         .followRedirects(HttpClient.Redirect.NORMAL)
@@ -84,12 +110,15 @@ public class SgdbClient {
                 new UpstreamCircuitBreaker(Clock.systemUTC()));
     }
 
-    /** Test seam: a local HttpServer's base URL, short budgets and a fresh breaker. */
-    SgdbClient(String iconsUrl, Duration apiRequestBudget, Duration downloadRequestBudget,
+    /** Test seam: a local HttpServer's base URL, short deadlines and a fresh breaker. */
+    SgdbClient(String iconsUrl, Duration apiRequestBudget, Duration headersBudget,
+               long stallAfterMillis, long attemptCapMillis,
                HttpClient http, UpstreamCircuitBreaker breaker) {
         this.iconsUrl = iconsUrl;
         this.apiRequestBudget = apiRequestBudget;
-        this.downloadRequestBudget = downloadRequestBudget;
+        this.headersBudget = headersBudget;
+        this.stallAfterMillis = stallAfterMillis;
+        this.attemptCapMillis = attemptCapMillis;
         this.http = http;
         this.breaker = breaker;
     }
@@ -117,33 +146,49 @@ public class SgdbClient {
     public record SgdbIcon(String url, String mime, byte[] bytes) {
     }
 
+    /** One resolution attempt's outcome. Exactly one of: DONE (the icon),
+     *  PARTIAL (bytes accumulated so far for the URL — the transit strangled
+     *  the transfer; the next attempt Range-resumes from them) or MISS (SGDB
+     *  answered "no official icon"). A transport failure THROWS instead — it
+     *  counts against the breaker. */
+    public record Resolution(SgdbIcon icon, String partialUrl, byte[] partialBytes) {
+        static Resolution miss() {
+            return new Resolution(null, null, null);
+        }
+
+        static Resolution done(SgdbIcon icon) {
+            return new Resolution(icon, null, null);
+        }
+
+        static Resolution partial(String url, byte[] bytes) {
+            return new Resolution(null, url, bytes);
+        }
+    }
+
     /**
-     * The game's best OFFICIAL icon with its BYTES, or null when SGDB has none.
-     * Pick policy (user decision 2026-11-24, the throttled-transit
-     * post-mortem): PNGs by ASCENDING width — the panel renders ~40px, where
-     * a small source is visually identical to a big one, while its bytes fit
-     * a strangled transit that would never deliver a 725 KB "crisp" source;
-     * Heavy Rain's shape (1024² over the cap, 512² fitting) now lands the
-     * 512² first without ever touching the big one. The first ICO follows
-     * (SGDB metadata carries no ICO dimensions, yet the files hold multiple
-     * sizes inside — Chromium renders them all). Candidates download in that
-     * order and the FIRST ONE FITTING the cache cap wins — an over-cap
-     * candidate walks on to the next instead of refusing the whole game (the
-     * 2026-11-23 "fallback again" smoke).
+     * Resolves the game's best OFFICIAL icon. Pick policy (user decision
+     * 2026-11-24, the throttled-transit post-mortem): PNGs by ASCENDING width
+     * — the panel renders ~40px, where a small source is visually identical
+     * to a big one, while its bytes fit a strangled transit that would never
+     * deliver a 725 KB "crisp" source; the first ICO follows (SGDB metadata
+     * carries no ICO dimensions, yet the files hold multiple sizes inside —
+     * Chromium renders them all). An over-cap candidate walks on to the next
+     * instead of refusing the whole game (the 2026-11-23 "fallback again"
+     * smoke). When {@code resumeUrl} is among the candidates, THAT one
+     * continues from {@code resumeBytes} — a partial from an earlier attempt.
      */
-    public SgdbIcon bestOfficialIcon(String apiKey, String steamAppId) {
+    public Resolution resolveIcon(String apiKey, String steamAppId, String resumeUrl, byte[] resumeBytes) {
         if (breaker.isOpen()) {
             throw new IgdbException("SteamGridDB unreachable — outbound paused for "
                     + breaker.cooldownLeftMillis() / 1000 + " more s");
         }
         try {
-            JsonNode answer = request(apiKey, steamAppId);
-            SgdbIcon icon = pickAndDownload(answer);
+            Resolution outcome = attempt(apiKey, steamAppId, resumeUrl, resumeBytes);
             int recoveredFrom = breaker.onSuccess();
             if (recoveredFrom > 0) {
                 log.info("SteamGridDB reachable again after {} failed attempt(s)", recoveredFrom);
             }
-            return icon;
+            return outcome;
         } catch (IgdbException failure) {
             Long pausedForMillis = breaker.onFailure();
             if (pausedForMillis != null) {
@@ -154,35 +199,195 @@ public class SgdbClient {
         }
     }
 
-    /** The ordered candidates (PNGs widest-first, then the first ICO) walked
-     *  until one fits the cache cap; the downloads share the breaker's success
-     *  accounting (any result is upstream proof). */
-    private SgdbIcon pickAndDownload(JsonNode answer) {
-        if (answer == null || !answer.path("data").isArray()) {
-            return null;
+    private Resolution attempt(String apiKey, String steamAppId, String resumeUrl, byte[] resumeBytes)
+            throws IgdbException {
+        JsonNode answer = request(apiKey, steamAppId);
+        List<String> candidates = orderedCandidates(answer);
+        if (candidates.isEmpty()) {
+            return Resolution.miss();
         }
+        int startIndex = resumeUrl != null ? candidates.indexOf(resumeUrl) : -1;
+        if (startIndex < 0) {
+            resumeBytes = null; // the list changed under us — start the pick anew
+        }
+        for (int candidateIndex = Math.max(startIndex, 0); candidateIndex < candidates.size(); candidateIndex++) {
+            String url = candidates.get(candidateIndex);
+            byte[] startBytes = candidateIndex == startIndex && resumeBytes != null ? resumeBytes : null;
+            Resolution outcome = downloadChain(url, startBytes);
+            if (outcome != null) {
+                return outcome; // DONE, or PARTIAL progress worth keeping
+            } // over-cap candidate — the warn landed, walk to the next
+        }
+        return Resolution.miss(); // every candidate over the cap: honest miss
+    }
+
+    /** The ordered candidates (PNGs smallest-first, then the first ICO). */
+    private List<String> orderedCandidates(JsonNode answer) {
         List<JsonNode> pngs = new ArrayList<>();
         String firstIcoUrl = null;
-        for (JsonNode icon : answer.path("data")) {
-            String url = icon.path("url").asText("");
-            String mime = icon.path("mime").asText("");
-            if (url.isEmpty()) {
-                continue;
-            }
-            if (mime.contains("png")) {
-                pngs.add(icon);
-            } else if (firstIcoUrl == null && mime.contains("icon")) {
-                firstIcoUrl = url;
+        if (answer != null && answer.path("data").isArray()) {
+            for (JsonNode icon : answer.path("data")) {
+                String url = icon.path("url").asText("");
+                String mime = icon.path("mime").asText("");
+                if (url.isEmpty()) {
+                    continue;
+                }
+                if (mime.contains("png")) {
+                    pngs.add(icon);
+                } else if (firstIcoUrl == null && mime.contains("icon")) {
+                    firstIcoUrl = url;
+                }
             }
         }
         pngs.sort((left, right) -> Long.compare(left.path("width").asLong(0), right.path("width").asLong(0)));
-        for (JsonNode png : pngs) {
-            SgdbIcon icon = download(png.path("url").asText());
-            if (icon != null) {
-                return icon;
-            } // over the cap — the warn landed, the next candidate gets its chance
+        List<String> ordered = new ArrayList<>();
+        pngs.forEach(png -> ordered.add(png.path("url").asText()));
+        if (firstIcoUrl != null) {
+            ordered.add(firstIcoUrl);
         }
-        return firstIcoUrl == null ? null : download(firstIcoUrl);
+        return ordered;
+    }
+
+    /** The burst chain for ONE candidate: read until strangled, keep the
+     *  partial, reconnect with Range, repeat — until EOF (DONE, null-and-log
+     *  on over-cap), the attempt cap, or the connection cap (PARTIAL). Never
+     *  blocks forever: every read has a stall deadline, every phase a budget. */
+    private Resolution downloadChain(String url, byte[] resumeBytes) {
+        long attemptDeadline = System.currentTimeMillis() + attemptCapMillis;
+        ByteArrayOutputStream received = new ByteArrayOutputStream();
+        if (resumeBytes != null && resumeBytes.length > 0) {
+            received.writeBytes(resumeBytes);
+        }
+        for (int connection = 0; connection < MAX_CONNECTIONS_PER_ATTEMPT; connection++) {
+            if (System.currentTimeMillis() >= attemptDeadline) {
+                break;
+            }
+            long offset = received.size();
+            HttpRequest.Builder request = HttpRequest.newBuilder().uri(URI.create(url)).GET();
+            if (offset > 0) {
+                request.header("Range", "bytes=" + offset + "-");
+            }
+            try {
+                HttpResponse<InputStream> response = send(request.build(),
+                        HttpResponse.BodyHandlers.ofInputStream(),
+                        Math.min(headersBudget.toMillis(),
+                                Math.max(1_000L, attemptDeadline - System.currentTimeMillis())));
+                if (response.statusCode() >= 400) {
+                    throw new IOException("HTTP " + response.statusCode());
+                }
+                if (offset > 0 && response.statusCode() != 206) {
+                    // the server ignored Range and restarts from zero — accept its truth
+                    received.reset();
+                    offset = 0;
+                }
+                long declaredBytes = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+                if (declaredBytes >= 0 && declaredBytes + offset > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+                    log.warn("SteamGridDB icon over the cache cap ({} B total) — trying the next candidate: {}",
+                            declaredBytes + offset, url);
+                    return null;
+                }
+                // the file's full size as THIS response declares it (offset + remainder)
+                long expectedTotal = declaredBytes >= 0 ? declaredBytes + offset : -1;
+                if (!readUntilStrangled(response.body(), received)) {
+                    continue; // strangled mid-transfer — reconnect (Range) for the next burst
+                }
+                byte[] bytes = received.toByteArray();
+                if (bytes.length == 0) {
+                    return null; // an empty answer — the next candidate gets its chance
+                }
+                if (bytes.length > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+                    log.warn("SteamGridDB icon over the cache cap ({} B) — trying the next candidate: {}",
+                            bytes.length, url);
+                    return null;
+                }
+                if (expectedTotal >= 0 && bytes.length < expectedTotal) {
+                    // a strangled connection often CLOSES early, which reads as EOF —
+                    // only the declared length proves completeness, never the stream's end
+                    continue;
+                }
+                String mime = response.headers().firstValue("Content-Type")
+                        .map(MediaType::parseMediaType)
+                        .map(MediaType::toString)
+                        .orElse(url.endsWith(".ico") ? "image/vnd.microsoft.icon" : "image/png");
+                return Resolution.done(new SgdbIcon(url, mime, bytes));
+            } catch (IOException failure) {
+                if (received.size() > 0) {
+                    // the transit gave us something before breaking — keep it,
+                    // the next attempt continues from the offset
+                    return Resolution.partial(url, received.toByteArray());
+                }
+                throw new IgdbException("SteamGridDB icon download failed: " + failure.getMessage(), failure);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IgdbException("SteamGridDB icon download interrupted", interrupted);
+            }
+        }
+        if (received.size() == 0) {
+            // not even one byte across every connection — the path is dead, the
+            // breaker must see a failure, not a "partial" of nothing
+            throw new IgdbException("SteamGridDB icon download made no progress");
+        }
+        return Resolution.partial(url, received.toByteArray());
+    }
+
+    /** Reads the body into {@code target} with a per-read stall deadline.
+     *  Returns false when the transfer was strangled short of EOF (the
+     *  partial stays in {@code target}); true at clean EOF or cap exit. */
+    private boolean readUntilStrangled(InputStream body, ByteArrayOutputStream target) {
+        byte[] buffer = new byte[16 * 1024];
+        while (target.size() < oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
+            int read;
+            try {
+                read = readWithStall(body, buffer);
+            } catch (IOException strangled) {
+                return false; // silence on the wire — keep the partial, let the chain reconnect
+            }
+            if (read < 0) {
+                return true; // EOF — the transfer completed
+            }
+            if (read > 0) {
+                target.write(buffer, 0, read);
+            }
+        }
+        return true; // over the cap mid-read — the caller's size check refuses it
+    }
+
+    /** One bounded read: a byte count, -1 at EOF; an IOException when no byte
+     *  arrived within the stall deadline (the connection is closed — the
+     *  blocked pool reader unblocks and the partial bytes stay ours). */
+    private int readWithStall(InputStream stream, byte[] buffer) throws IOException {
+        CompletableFuture<Integer> pending = CompletableFuture.supplyAsync(() -> {
+            try {
+                return stream.read(buffer);
+            } catch (IOException failure) {
+                throw new RuntimeException(failure);
+            }
+        });
+        try {
+            return pending.get(stallAfterMillis, TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException stalled) {
+            pending.cancel(true);
+            closeQuietly(stream); // unblocks the pooled reader stuck in read()
+            throw new IOException("stalled: no bytes for " + stallAfterMillis + " ms");
+        } catch (java.util.concurrent.ExecutionException failure) {
+            Throwable cause = failure.getCause() == null ? failure : failure.getCause();
+            if (cause instanceof IOException io) {
+                throw io;
+            }
+            throw new IOException(cause);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            closeQuietly(stream);
+            throw new IOException("interrupted");
+        }
+    }
+
+    private static void closeQuietly(InputStream stream) {
+        try {
+            stream.close();
+        } catch (IOException ignored) {
+            // already broken — the point was to unblock the reader
+        }
     }
 
     private JsonNode request(String apiKey, String steamAppId) {
@@ -193,7 +398,7 @@ public class SgdbClient {
                 .GET()
                 .build();
         try {
-            HttpResponse<String> response = send(request, HttpResponse.BodyHandlers.ofString(), apiRequestBudget);
+            HttpResponse<String> response = send(request, HttpResponse.BodyHandlers.ofString(), apiRequestBudget.toMillis());
             if (response.statusCode() == 404) {
                 return null; // no icons for the game — an answer, not an outage
             }
@@ -211,70 +416,18 @@ public class SgdbClient {
         }
     }
 
-    /** Downloads one candidate (the PUBLIC CDN — no key; the CDN host is fixed
-     *  and the path is the SGDB-served URL verbatim). The body is read as RAW
-     *  BYTES straight off the JDK client — no converter machinery at all (the
-     *  converter layer is what died on the CDN's real {@code image/x-icon}
-     *  content type, 2026-11-23). Oversized answers are refused (null) — by
-     *  the declared Content-Length first, then by the actual byte count; the
-     *  caller walks on to the next candidate. The mime rides the RESPONSE
-     *  header (the CDN says {@code image/x-icon}, whatever the API metadata
-     *  claimed), falling back to the URL extension. */
-    private SgdbIcon download(String url) {
-        // The candidate line (2026-11-24): a silent gap between "resolving"
-        // and this line = the API request is the wedged leg; a gap AFTER it =
-        // the CDN transfer itself.
-        log.info("downloading the SteamGridDB icon candidate {}", url);
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .GET()
-                .build();
-        try {
-            HttpResponse<byte[]> response = send(request, HttpResponse.BodyHandlers.ofByteArray(), downloadRequestBudget);
-            if (response.statusCode() >= 400) {
-                throw new IOException("HTTP " + response.statusCode());
-            }
-            long declaredBytes = response.headers().firstValueAsLong("Content-Length").orElse(-1);
-            if (declaredBytes > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
-                log.warn("SteamGridDB icon over the cache cap ({} B declared) — trying the next candidate: {}",
-                        declaredBytes, url);
-                return null;
-            }
-            byte[] bytes = response.body();
-            if (bytes.length == 0) {
-                return null;
-            }
-            if (bytes.length > oak.server.entity.IgdbGame.SGDB_ICON_MAX_BYTES) {
-                log.warn("SteamGridDB icon over the cache cap ({} B) — trying the next candidate: {}",
-                        bytes.length, url);
-                return null;
-            }
-            String mime = response.headers().firstValue("Content-Type")
-                    .map(MediaType::parseMediaType)
-                    .map(MediaType::toString)
-                    .orElse(url.endsWith(".ico") ? "image/vnd.microsoft.icon" : "image/png");
-            return new SgdbIcon(url, mime, bytes);
-        } catch (IOException failure) {
-            throw new IgdbException("SteamGridDB icon download failed: " + failure.getMessage(), failure);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new IgdbException("SteamGridDB icon download interrupted", interrupted);
-        }
-    }
-
     /** The hard-budget send: {@code sendAsync} keeps the lane thread free to
-     *  walk away — {@code get(budget)} bounds headers AND body, and a timeout
-     *  cancels the future, which closes the underlying connection (the whole
-     *  point of the 2026-11-24 migration: a wedged read must die, not outlive
-     *  the queue). */
-    private <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler, Duration budget)
+     *  walk away — {@code get(budget)} bounds the phase, and a timeout cancels
+     *  the future, which closes the underlying connection (a wedged phase
+     *  must die, not outlive the queue). */
+    private <T> HttpResponse<T> send(HttpRequest request, HttpResponse.BodyHandler<T> bodyHandler, long budgetMillis)
             throws IOException, InterruptedException {
         CompletableFuture<HttpResponse<T>> inFlight = http.sendAsync(request, bodyHandler);
         try {
-            return inFlight.get(budget.toMillis(), TimeUnit.MILLISECONDS);
+            return inFlight.get(budgetMillis, TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException budgetExceeded) {
             inFlight.cancel(true);
-            throw new IOException("exceeded the " + budget.toSeconds() + " s budget (wedged or trickling upstream)");
+            throw new IOException("exceeded the " + budgetMillis / 1000 + " s budget (wedged or trickling upstream)");
         } catch (java.util.concurrent.ExecutionException failure) {
             Throwable cause = failure.getCause() == null ? failure : failure.getCause();
             if (cause instanceof IOException io) {

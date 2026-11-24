@@ -78,6 +78,16 @@ public final class ServerCapabilities {
      *  literal is frozen forever. */
     public static final String SGDB_ICONS = "sgdb-icons";
 
+    /** CONDITIONAL flag — the client-side icon FETCH+OFFER leg (2026-11-24,
+     *  the burst-throttling transit post-mortem): game cards may carry
+     *  {@code pendingIconUrl} (the SGDB CDN URL the server's own lane is
+     *  still fighting for) and clients may POST the fetched bytes to
+     *  {@code POST /api/games/{id}/icon} — first delivery wins atomically,
+     *  server or client, whoever gets there. Reported under the SAME
+     *  condition as {@link #SGDB_ICONS}: without the key the endpoint 503s
+     *  and a pending URL never exists. The literal is frozen forever. */
+    public static final String SGDB_ICON_UPLOAD = "sgdb-icon-upload";
+
     /** The runtime list for {@code GET /api/server}: the unconditional {@link #FEATURES}
      *  plus the conditional flags the instance's configuration currently earns. */
     public static List<String> featuresFor(ServerProfile profile) {
@@ -87,6 +97,7 @@ public final class ServerCapabilities {
         }
         if (oak.server.service.sgdb.SgdbIconService.isIntegrationActive(profile)) {
             out.add(SGDB_ICONS);
+            out.add(SGDB_ICON_UPLOAD);
         }
         return List.copyOf(out);
     }

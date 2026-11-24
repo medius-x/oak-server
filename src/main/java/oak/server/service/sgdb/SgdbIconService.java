@@ -157,15 +157,16 @@ public class SgdbIconService {
             Optional<IgdbGame> existing = games.findById(igdbId);
             if (existing.isEmpty() || existing.get().getSgdbIconBytes() != null
                     || Boolean.TRUE.equals(existing.get().getSgdbIconMissing())) {
-                return; // resolved earlier, answered miss, or the card vanished
+                return; // delivered already (our lane or a client offer), answered miss, or the card vanished
             }
             String apiKey = apiKey();
             if (apiKey == null || isPaused(profiles.singleton())) {
                 return; // switched off (or paused) between the queueing and the run
             }
-            SgdbClient.SgdbIcon icon;
+            SgdbClient.Resolution outcome;
             try {
-                icon = client.bestOfficialIcon(apiKey, appId);
+                IgdbGame game = existing.get();
+                outcome = client.resolveIcon(apiKey, appId, game.getSgdbIconUrl(), game.getSgdbIconPartial());
             } catch (IgdbException upstream) {
                 // Honest per-attempt logging (2026-11-24): the breaker logs only
                 // its PARKING transition, so its first two consecutive failures
@@ -175,23 +176,66 @@ public class SgdbIconService {
                         igdbId, appId, upstream.getMessage());
                 return;
             }
-            IgdbGame game = existing.get();
-            if (icon == null) {
-                game.setSgdbIconMissing(true); // the V25 marker: an ANSWER, never re-asked
-                games.save(game);
-                log.info("no SteamGridDB icon for game {} (appid {}) — keeping the IGDB square", igdbId, appId);
+            if (outcome.icon() != null) {
+                SgdbClient.SgdbIcon icon = outcome.icon();
+                int stored = games.storeIconIfAbsent(igdbId, icon.url(), icon.mime(), icon.bytes());
+                if (stored > 0) {
+                    log.info("game {} got its SteamGridDB icon (appid {}, {} B)", igdbId, appId, icon.bytes().length);
+                } else {
+                    // a client offer won the race mid-attempt — its bytes stand
+                    log.info("game {} icon already delivered by another source — dropping our copy", igdbId);
+                }
                 return;
             }
-            game.setSgdbIconUrl(icon.url());
-            game.setSgdbIconMime(icon.mime());
-            game.setSgdbIconBytes(icon.bytes());
-            game.setSgdbIconMissing(false); // heal (the catalogue may have grown since a miss)
+            if (outcome.partialBytes() != null) {
+                games.storePartialIfUndelivered(igdbId, outcome.partialUrl(), outcome.partialBytes());
+                log.info("game {} icon in transit: {} B accumulated (appid {}) — the next attempt continues",
+                        igdbId, outcome.partialBytes().length, appId);
+                return;
+            }
+            IgdbGame game = existing.get();
+            game.setSgdbIconMissing(true); // the V25 marker: an ANSWER, never re-asked
             games.save(game);
-            log.info("game {} got its SteamGridDB icon (appid {}, {} B)", igdbId, appId, icon.bytes().length);
+            log.info("no SteamGridDB icon for game {} (appid {}) — keeping the IGDB square", igdbId, appId);
         } finally {
             laneBusySinceMillis = 0L;
             laneBusyGameId = 0L;
         }
+    }
+
+    /** Accepts a CLIENT's fetched icon bytes (2026-11-24): on hostings whose
+     *  transit strangles the CDN, a healthy-networked member's machine often
+     *  delivers first. The bytes are UNTRUSTED input — magic-byte sniffing
+     *  decides the mime (never the client's claim), PNG and ICO only (no SVG:
+     *  scripts), and the size cap stands. The store itself is the atomic
+     *  first-wins UPDATE, so our own lane and racing clients settle without
+     *  coordination. Returns true when THIS offer became the game's icon. */
+    public boolean acceptClientIcon(long igdbId, byte[] bytes) {
+        String mime = sniffIconMime(bytes);
+        if (mime == null) {
+            return false;
+        }
+        IgdbGame game = games.findById(igdbId).orElse(null);
+        if (game == null || game.getSgdbIconBytes() != null) {
+            return false; // unknown game, or an icon already stands
+        }
+        String provenanceUrl = game.getSgdbIconUrl(); // the pending URL the client fetched
+        return games.storeIconIfAbsent(igdbId, provenanceUrl, mime, bytes) > 0;
+    }
+
+    /** PNG/ICO detection by magic bytes; null = anything else (refused). */
+    public static String sniffIconMime(byte[] bytes) {
+        if (bytes == null || bytes.length < 8) {
+            return null;
+        }
+        if ((bytes[0] & 0xFF) == 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G'
+                && bytes[4] == 0x0D && bytes[5] == 0x0A && bytes[6] == 0x1A && bytes[7] == 0x0A) {
+            return "image/png";
+        }
+        if (bytes.length >= 4 && bytes[0] == 0 && bytes[1] == 0 && bytes[2] == 1 && bytes[3] == 0) {
+            return "image/x-icon";
+        }
+        return null;
     }
 
     /** The hourly catch-up sweep (2026-11-24, the throttled-transit
