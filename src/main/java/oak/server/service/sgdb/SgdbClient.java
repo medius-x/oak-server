@@ -132,7 +132,7 @@ public class SgdbClient {
     /** Whether the outbound door is parked right now — the retry sweep checks
      *  this FIRST, so a dead path costs one log line instead of a wave of
      *  instant fast-fails. */
-    boolean parked() {
+    public boolean parked() {
         return breaker.isOpen();
     }
 
@@ -152,15 +152,15 @@ public class SgdbClient {
      *  answered "no official icon"). A transport failure THROWS instead — it
      *  counts against the breaker. */
     public record Resolution(SgdbIcon icon, String partialUrl, byte[] partialBytes) {
-        static Resolution miss() {
+        public static Resolution miss() {
             return new Resolution(null, null, null);
         }
 
-        static Resolution done(SgdbIcon icon) {
+        public static Resolution done(SgdbIcon icon) {
             return new Resolution(icon, null, null);
         }
 
-        static Resolution partial(String url, byte[] bytes) {
+        public static Resolution partial(String url, byte[] bytes) {
             return new Resolution(null, url, bytes);
         }
     }
@@ -178,12 +178,22 @@ public class SgdbClient {
      * continues from {@code resumeBytes} — a partial from an earlier attempt.
      */
     public Resolution resolveIcon(String apiKey, String steamAppId, String resumeUrl, byte[] resumeBytes) {
+        return resolveIcon(apiKey, steamAppId, resumeUrl, resumeBytes, pickedUrl -> { });
+    }
+
+    /** The full form: {@code onTargetPicked} fires the moment this attempt's
+     *  target URL is chosen — BEFORE the burst chain starts — so the caller
+     *  can publish the pending URL and a healthy client may offer the bytes
+     *  while our own download is still dripping (2026-11-24 smoke: a URL
+     *  written only at attempt-end left the client nothing to fetch). */
+    public Resolution resolveIcon(String apiKey, String steamAppId, String resumeUrl, byte[] resumeBytes,
+                                  java.util.function.Consumer<String> onTargetPicked) {
         if (breaker.isOpen()) {
             throw new IgdbException("SteamGridDB unreachable — outbound paused for "
                     + breaker.cooldownLeftMillis() / 1000 + " more s");
         }
         try {
-            Resolution outcome = attempt(apiKey, steamAppId, resumeUrl, resumeBytes);
+            Resolution outcome = attempt(apiKey, steamAppId, resumeUrl, resumeBytes, onTargetPicked);
             int recoveredFrom = breaker.onSuccess();
             if (recoveredFrom > 0) {
                 log.info("SteamGridDB reachable again after {} failed attempt(s)", recoveredFrom);
@@ -199,8 +209,8 @@ public class SgdbClient {
         }
     }
 
-    private Resolution attempt(String apiKey, String steamAppId, String resumeUrl, byte[] resumeBytes)
-            throws IgdbException {
+    private Resolution attempt(String apiKey, String steamAppId, String resumeUrl, byte[] resumeBytes,
+                               java.util.function.Consumer<String> onTargetPicked) {
         JsonNode answer = request(apiKey, steamAppId);
         List<String> candidates = orderedCandidates(answer);
         if (candidates.isEmpty()) {
@@ -213,6 +223,9 @@ public class SgdbClient {
         for (int candidateIndex = Math.max(startIndex, 0); candidateIndex < candidates.size(); candidateIndex++) {
             String url = candidates.get(candidateIndex);
             byte[] startBytes = candidateIndex == startIndex && resumeBytes != null ? resumeBytes : null;
+            if (candidateIndex == Math.max(startIndex, 0)) {
+                onTargetPicked.accept(url); // publish before the first byte moves
+            }
             Resolution outcome = downloadChain(url, startBytes);
             if (outcome != null) {
                 return outcome; // DONE, or PARTIAL progress worth keeping

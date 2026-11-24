@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -64,7 +65,7 @@ class SgdbIconServiceTest {
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.resolveIcon("k1", "292030", null, null))
+        when(client.resolveIcon(eq("k1"), eq("292030"), isNull(), isNull(), any()))
                 .thenReturn(SgdbClient.Resolution.done(
                         new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1, 2})));
         when(games.storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{1, 2}))
@@ -84,7 +85,7 @@ class SgdbIconServiceTest {
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any()))
+        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any(), any()))
                 .thenReturn(SgdbClient.Resolution.done(
                         new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1})));
         when(games.storeIconIfAbsent(anyLong(), anyString(), anyString(), any())).thenReturn(0);
@@ -102,7 +103,7 @@ class SgdbIconServiceTest {
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
         byte[] partial = new byte[20_000];
-        when(client.resolveIcon("k1", "292030", null, null))
+        when(client.resolveIcon(eq("k1"), eq("292030"), isNull(), isNull(), any()))
                 .thenReturn(SgdbClient.Resolution.partial("https://cdn/icon.png", partial));
 
         service.queueBackfill(1942);
@@ -115,13 +116,13 @@ class SgdbIconServiceTest {
         // and the NEXT attempt resumes exactly from it
         game.setSgdbIconUrl("https://cdn/icon.png");
         game.setSgdbIconPartial(partial);
-        when(client.resolveIcon("k1", "292030", "https://cdn/icon.png", partial))
+        when(client.resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/icon.png"), eq(partial), any()))
                 .thenReturn(SgdbClient.Resolution.done(
                         new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{9})));
         when(games.storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{9})).thenReturn(1);
         service.queueBackfill(1942);
         assertTrue(laneSettled());
-        verify(client).resolveIcon("k1", "292030", "https://cdn/icon.png", partial);
+        verify(client).resolveIcon(eq("k1"), eq("292030"), eq("https://cdn/icon.png"), eq(partial), any());
         verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{9});
     }
 
@@ -131,7 +132,7 @@ class SgdbIconServiceTest {
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any()))
+        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any(), any()))
                 .thenReturn(SgdbClient.Resolution.miss());
 
         service.queueBackfill(1942);
@@ -143,7 +144,7 @@ class SgdbIconServiceTest {
         when(games.findBySgdbIconBytesIsNull()).thenReturn(List.of(game));
         service.sweepUndeliveredIcons();
         assertTrue(laneSettled());
-        verify(client, org.mockito.Mockito.times(1)).resolveIcon(anyString(), anyString(), any(), any());
+        verify(client, org.mockito.Mockito.times(1)).resolveIcon(anyString(), anyString(), any(), any(), any());
     }
 
     @Test
@@ -156,7 +157,7 @@ class SgdbIconServiceTest {
         when(games.findBySgdbIconBytesIsNull()).thenReturn(List.of(owed, answered, noSteamKey));
         when(games.findById(1942L)).thenReturn(Optional.of(owed));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any()))
+        when(client.resolveIcon(eq("k1"), eq("292030"), any(), any(), any()))
                 .thenReturn(SgdbClient.Resolution.done(
                         new SgdbClient.SgdbIcon("https://cdn/icon.png", "image/png", new byte[]{1})));
         when(games.storeIconIfAbsent(anyLong(), anyString(), anyString(), any())).thenReturn(1);
@@ -164,7 +165,7 @@ class SgdbIconServiceTest {
         service.sweepUndeliveredIcons();
         assertTrue(laneSettled());
 
-        verify(client, org.mockito.Mockito.times(1)).resolveIcon(anyString(), anyString(), any(), any());
+        verify(client, org.mockito.Mockito.times(1)).resolveIcon(anyString(), anyString(), any(), any(), any());
         verify(games).storeIconIfAbsent(1942L, "https://cdn/icon.png", "image/png", new byte[]{1});
     }
 
@@ -175,7 +176,7 @@ class SgdbIconServiceTest {
         service.sweepUndeliveredIcons();
 
         verify(games, never()).findBySgdbIconBytesIsNull(); // one log line, zero work
-        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any());
+        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any(), any());
     }
 
     @Test
@@ -187,7 +188,7 @@ class SgdbIconServiceTest {
 
         service.queueBackfill(1942);
         assertTrue(laneSettled());
-        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any());
+        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any(), any());
         verify(games, never()).save(any(IgdbGame.class));
     }
 
@@ -197,7 +198,7 @@ class SgdbIconServiceTest {
         IgdbGame game = card(1942);
         when(games.findById(1942L)).thenReturn(Optional.of(game));
         when(matches.findSteamKeys(1942L)).thenReturn(List.of("steam:292030"));
-        when(client.resolveIcon(anyString(), anyString(), any(), any())).thenThrow(new IgdbException("parked"));
+        when(client.resolveIcon(anyString(), anyString(), any(), any(), any())).thenThrow(new IgdbException("parked"));
 
         service.queueBackfill(1942);
         assertTrue(laneSettled());
@@ -214,7 +215,7 @@ class SgdbIconServiceTest {
         service.queueBackfill(1942);
         service.queueBackfill(-1L); // a manual card — no IGDB identity at all
         assertTrue(laneSettled());
-        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any());
+        verify(client, never()).resolveIcon(anyString(), anyString(), any(), any(), any());
     }
 
     @Test

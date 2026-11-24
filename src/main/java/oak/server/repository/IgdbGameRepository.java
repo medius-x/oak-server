@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Optional;
 
@@ -30,8 +31,14 @@ public interface IgdbGameRepository extends JpaRepository<IgdbGame, Long> {
      *  bytes; the WHERE clause makes the race atomic and every loser a
      *  harmless no-op. Also clears the pending residue (partial bytes, miss
      *  marker). Returns 1 when THIS call stored the icon, 0 when one was
-     *  already there. */
+     *  already there. {@code @Transactional} is LOAD-BEARING (the 2026-11-24
+     *  production crash): a {@code @Modifying} query demands a transaction,
+     *  and the icon lane's background thread has none — without this
+     *  annotation every store from the lane threw
+     *  TransactionRequiredException, silently (the executor swallows
+     *  uncaught throwables). */
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("UPDATE IgdbGame g SET g.sgdbIconUrl = :url, g.sgdbIconMime = :mime, g.sgdbIconBytes = :bytes, "
             + "g.sgdbIconMissing = false, g.sgdbIconPartial = NULL "
             + "WHERE g.igdbId = :igdbId AND g.sgdbIconBytes IS NULL")
@@ -39,8 +46,10 @@ public interface IgdbGameRepository extends JpaRepository<IgdbGame, Long> {
                           @Param("mime") String mime, @Param("bytes") byte[] bytes);
 
     /** Persists a burst attempt's partial bytes — Range-resume material for
-     *  the next attempt; a no-op once ANY source delivered the icon. */
+     *  the next attempt; a no-op once ANY source delivered the icon. Same
+     *  load-bearing {@code @Transactional} as {@link #storeIconIfAbsent}. */
     @Modifying(clearAutomatically = true)
+    @Transactional
     @Query("UPDATE IgdbGame g SET g.sgdbIconUrl = :url, g.sgdbIconPartial = :partial "
             + "WHERE g.igdbId = :igdbId AND g.sgdbIconBytes IS NULL")
     int storePartialIfUndelivered(@Param("igdbId") long igdbId, @Param("url") String url,

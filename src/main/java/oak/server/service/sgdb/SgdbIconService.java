@@ -143,6 +143,17 @@ public class SgdbIconService {
         iconLane.execute(() -> {
             try {
                 resolve(igdbId, appId);
+            } catch (RuntimeException | Error unexpected) {
+                // A lane task must never die silently (the 2026-11-24 lesson:
+                // a missing @Transactional killed every store with ZERO log
+                // lines for a whole day — the executor's FutureTask swallows
+                // uncaught throwables whole). Errors still propagate after
+                // the line lands.
+                log.error("SteamGridDB icon lane task for game {} (appid {}) crashed unexpectedly",
+                        igdbId, appId, unexpected);
+                if (unexpected instanceof Error fatal) {
+                    throw fatal;
+                }
             } finally {
                 queued.remove(igdbId);
             }
@@ -166,7 +177,15 @@ public class SgdbIconService {
             SgdbClient.Resolution outcome;
             try {
                 IgdbGame game = existing.get();
-                outcome = client.resolveIcon(apiKey, appId, game.getSgdbIconUrl(), game.getSgdbIconPartial());
+                outcome = client.resolveIcon(apiKey, appId, game.getSgdbIconUrl(), game.getSgdbIconPartial(),
+                        pickedUrl -> {
+                            // Publish the target the MOMENT it is chosen, before
+                            // the burst chain even starts (2026-11-24 smoke: with
+                            // the URL written only at attempt-end, the client's
+                            // doglegs found nothing to fetch while our chain was
+                            // still dripping — the offer never had a chance).
+                            games.storePartialIfUndelivered(igdbId, pickedUrl, game.getSgdbIconPartial());
+                        });
             } catch (IgdbException upstream) {
                 // Honest per-attempt logging (2026-11-24): the breaker logs only
                 // its PARKING transition, so its first two consecutive failures
@@ -220,7 +239,11 @@ public class SgdbIconService {
             return false; // unknown game, or an icon already stands
         }
         String provenanceUrl = game.getSgdbIconUrl(); // the pending URL the client fetched
-        return games.storeIconIfAbsent(igdbId, provenanceUrl, mime, bytes) > 0;
+        boolean stored = games.storeIconIfAbsent(igdbId, provenanceUrl, mime, bytes) > 0;
+        if (stored) {
+            log.info("game {} got its SteamGridDB icon from a client offer ({} B)", igdbId, bytes.length);
+        }
+        return stored;
     }
 
     /** PNG/ICO detection by magic bytes; null = anything else (refused). */
