@@ -48,8 +48,10 @@ import java.util.regex.Pattern;
  * Hibernate session — {@link AuthorizationService#findUser} eager-fetches roles for exactly that.
  *
  * <p>The pattern covers the channel's whole topic family — the base message topic plus the
- * {@code .edited}, {@code .deleted}, {@code .reactions} and {@code .discussions} variants
- * pushed by {@code MessageService} / {@code DiscussionService}. A DISCUSSION channel id in the
+ * {@code .edited}, {@code .deleted}, {@code .reactions}, {@code .poll} and {@code .discussions}
+ * variants pushed by {@code MessageService} / {@code PollService} / {@code DiscussionService}
+ * (the {@code .poll} suffix joined late, 2026-11-25 — its absence made poll headline events
+ * world-readable by id enumeration until the security round caught it). A DISCUSSION channel id in the
  * base family resolves through the PARENT channel (the delegation branch in
  * {@code AuthorizationService.hasInChannel}); the {@code .discussions} suffix lives on the
  * PARENT's id and is gated by the same READ check. A new per-channel topic MUST be added here
@@ -61,7 +63,7 @@ import java.util.regex.Pattern;
 public class ChannelSubscriptionInterceptor implements ChannelInterceptor {
 
     private static final Pattern CHANNEL_TOPIC =
-            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted|\\.reactions|\\.discussions)?$");
+            Pattern.compile("^/topic/channel\\.(\\d+)(?:\\.edited|\\.deleted|\\.reactions|\\.poll|\\.discussions)?$");
 
     private final ChannelRepository channelRepository;
     private final ChannelParticipantRepository participantRepository;

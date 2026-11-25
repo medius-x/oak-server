@@ -26,9 +26,9 @@ import static org.mockito.Mockito.when;
 
 /**
  * SUBSCRIBE-gating unit tests over real STOMP frames (the regex + the type branches; the WS
- * transport itself stays a manual-smoke surface — MockMvc has no WS layer). Covers the new
- * {@code .discussions} suffix and a DISCUSSION channel id in the base family (delegated to the
- * parent by the mocked {@code hasInChannel}).
+ * transport itself stays a manual-smoke surface — MockMvc has no WS layer). Covers the
+ * {@code .discussions} and {@code .poll} suffixes and a DISCUSSION channel id in the base family
+ * (delegated to the parent by the mocked {@code hasInChannel}).
  */
 @ExtendWith(MockitoExtension.class)
 class ChannelSubscriptionInterceptorTest {
@@ -66,6 +66,25 @@ class ChannelSubscriptionInterceptorTest {
 
         assertNotNull(interceptor.preSend(subscribeFrame("/topic/channel.7.discussions", "bob"), null));
         assertNull(interceptor.preSend(subscribeFrame("/topic/channel.7.discussions", "eve"), null));
+    }
+
+    @Test
+    void pollSuffixPassesForReadersAndDropsTheRest() {
+        // The 2026-11-25 security round: .poll was missing from the regex, so poll headline
+        // events (totalVoters flips, closes) leaked out of hidden channels to any
+        // authenticated member who enumerated the channel id.
+        Channel hidden = new Channel("secret-plans", ChannelType.TEXT);
+        hidden.setId(7L);
+        when(channelRepository.findById(7L)).thenReturn(Optional.of(hidden));
+        User reader = new User("bob", "hash");
+        User stranger = new User("eve", "hash");
+        when(auth.findUser("bob")).thenReturn(Optional.of(reader));
+        when(auth.findUser("eve")).thenReturn(Optional.of(stranger));
+        when(auth.hasInChannel(reader, hidden, Permission.READ_MESSAGE_HISTORY)).thenReturn(true);
+        when(auth.hasInChannel(stranger, hidden, Permission.READ_MESSAGE_HISTORY)).thenReturn(false);
+
+        assertNotNull(interceptor.preSend(subscribeFrame("/topic/channel.7.poll", "bob"), null));
+        assertNull(interceptor.preSend(subscribeFrame("/topic/channel.7.poll", "eve"), null));
     }
 
     @Test
