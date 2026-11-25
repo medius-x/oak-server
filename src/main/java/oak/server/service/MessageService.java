@@ -5,12 +5,14 @@ import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.AttachmentRef;
 import oak.server.dto.AttachmentResponse;
 import oak.server.dto.CreateMessageRequest;
+import oak.server.dto.CreatePollRequest;
 import oak.server.dto.EditMessageRequest;
 import oak.server.dto.ForwardInfo;
 import oak.server.dto.ForwardMessageRequest;
 import oak.server.dto.DiscussionHit;
 import oak.server.dto.MessageResponse;
 import oak.server.dto.MentionResponse;
+import oak.server.dto.PollInfo;
 import oak.server.dto.QuoteImage;
 import oak.server.dto.ReactionEvent;
 import oak.server.dto.ReactionSummary;
@@ -74,6 +76,11 @@ public class MessageService {
     /** Appended to {@link #CHANNEL_TOPIC_PREFIX}{id} for reaction pushes (body: a
      *  {@link ReactionEvent} carrying the message's full reaction snapshot). */
     public static final String REACTIONS_TOPIC_SUFFIX = ".reactions";
+
+    /** Appended to {@link #CHANNEL_TOPIC_PREFIX}{id} for poll pushes (body: a {@code PollEvent}
+     *  with the HEADLINE counters only — tallies travel solely in a client's own action's
+     *  answer, see {@link PollService}). */
+    public static final String POLLS_TOPIC_SUFFIX = ".poll";
 
     /** The BUILT-IN emoji catalog clients may react with, as URL/database-safe slugs (never
      *  glyphs). The client mirrors this list with slug→glyph mapping for rendering. The set
@@ -148,6 +155,11 @@ public class MessageService {
      *  directly — DiscussionService depends on THIS service for the lazy-create flow, and a
      *  back-call would close a bean cycle. */
     private final org.springframework.context.ApplicationEventPublisher eventPublisher;
+    /** The poll half of a message page's mapping (pollsByMessageId) and the poll-attach step of
+     *  {@link #createPoll}; the voting lifecycle itself lives there. */
+    private final PollService pollService;
+    /** The edit/forward gate for poll messages (existsByMessageId). */
+    private final oak.server.repository.PollRepository pollRepository;
 
     @Transactional
     public MessageResponse create(Long channelId, CreateMessageRequest request, String authorUsername) {
@@ -232,6 +244,33 @@ public class MessageService {
         return response;
     }
 
+    /**
+     * Creates a poll message (2026-11-25): the message itself carries nothing but the poll
+     * (content null — the attachment-only precedent) and lands on the channel's base topic like
+     * any new message. Gates: SEND_MESSAGES (the message must be postable at all) plus the
+     * channel-scoped CREATE_POLLS on top (user decision: @everyone does NOT carry it by
+     * default). TEXT and DISCUSSION channels only — polls are a permission-gated server
+     * feature, DMs have no permission model to gate with.
+     */
+    @Transactional
+    public MessageResponse createPoll(Long channelId, CreatePollRequest request, String authorUsername) {
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        if (channel.getType() != ChannelType.TEXT && channel.getType() != ChannelType.DISCUSSION) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "Polls are only available in text channels");
+        }
+        User author = userRepository.findByUsername(authorUsername)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Author not found"));
+        auth.requireInChannel(author, channel, Permission.SEND_MESSAGES);
+        auth.requireInChannel(author, channel, Permission.CREATE_POLLS);
+        Message message = messageRepository.save(new Message(channel, author, null));
+        PollInfo poll = pollService.attachPoll(message, request);
+        MessageResponse response = toResponse(message, List.of(), Map.of(), poll);
+        messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId, response);
+        return response;
+    }
+
     /** Returns the most recent {@code limit} messages of a channel, in chronological order. */
     @Transactional(readOnly = true)
     public List<MessageResponse> listByChannel(Long channelId, Integer limit, String viewerUsername) {
@@ -284,9 +323,11 @@ public class MessageService {
         Map<Long, List<ReactionSummary>> reactionsByMessage = reactionSummariesByMessage(
                 messages.stream().map(Message::getId).toList());
         Map<Long, Message> replyOriginals = replyOriginalsFor(messages);
+        Map<Long, PollInfo> polls = pollService.pollsByMessageId(
+                messages.stream().map(Message::getId).toList());
         return messages.stream()
                 .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
-                        replyOriginals))
+                        replyOriginals, polls.get(message.getId())))
                 .toList();
     }
 
@@ -393,9 +434,11 @@ public class MessageService {
         Map<Long, List<ReactionSummary>> reactionsByMessage = reactionSummariesByMessage(
                 page.stream().map(Message::getId).toList());
         Map<Long, Message> replyOriginals = replyOriginalsFor(page);
+        Map<Long, PollInfo> polls = pollService.pollsByMessageId(
+                page.stream().map(Message::getId).toList());
         List<MessageResponse> results = page.stream()
                 .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
-                        replyOriginals))
+                        replyOriginals, polls.get(message.getId())))
                 .toList();
         return new SearchMessagesResponse(total, results, discussionHitsFor(page, discussionCandidateIds));
     }
@@ -438,6 +481,9 @@ public class MessageService {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Message not found"));
         User actor = auth.requireUser(actorUsername);
         requireCanModify(actor, channel, message);
+        if (pollRepository.existsByMessageId(message.getId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Poll messages cannot be edited");
+        }
         // Attachment rewrite first, VALIDATED before any mutation (a 400 must leave the row and
         // editedAt untouched): null = untouched; a list = exactly that list, each key one of
         // the currently attached ones, no duplicates. A stored row never exceeds the cap, so a
@@ -593,6 +639,11 @@ public class MessageService {
             Message source = messageRepository.findById(request.sourceMessageId())
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Source message not found"));
             auth.requireInChannel(actor, source.getChannel(), Permission.READ_MESSAGE_HISTORY);
+            // A poll cannot be forwarded: the copy would be an empty husk (content null, no
+            // attachments) — the poll lives on its original message only.
+            if (pollRepository.existsByMessageId(source.getId())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Poll messages cannot be forwarded");
+            }
             // Verbatim copy: keys are shared with the source (MinIO objects are never deleted
             // with messages), no per-attachment re-sign or upload. A stored row cannot exceed
             // MAX_ATTACHMENTS, so no cap re-check here.
@@ -777,18 +828,23 @@ public class MessageService {
         Map<Long, List<ReactionSummary>> reactionsByMessage = reactionSummariesByMessage(
                 messages.stream().map(Message::getId).toList());
         Map<Long, Message> replyOriginals = replyOriginalsFor(messages);
+        Map<Long, PollInfo> polls = pollService.pollsByMessageId(
+                messages.stream().map(Message::getId).toList());
         return messages.stream()
                 .map(message -> toResponse(message, reactionsByMessage.getOrDefault(message.getId(), List.of()),
-                        replyOriginals))
+                        replyOriginals, polls.get(message.getId())))
                 .toList();
     }
 
     /** Builds the full row view and pushes it on the channel's {@code .edited} topic — the
      *  shared tail of pin/unpin (the same contract as {@link #edit}: a full-row replacement
-     *  every client can apply blindly). */
+     *  every client can apply blindly). Pin pushes MUST carry the poll too, or every client
+     *  applying the edit would wipe the rendered card. */
     private MessageResponse broadcastEdited(Long channelId, Message message) {
         MessageResponse response = toResponse(message, reactionSummaries(message.getId()),
-                replyOriginalsFor(List.of(message)));
+                replyOriginalsFor(List.of(message)),
+                pollService.pollsByMessageId(List.of(message.getId()))
+                        .getOrDefault(message.getId(), null));
         messagingTemplate.convertAndSend(CHANNEL_TOPIC_PREFIX + channelId + EDITED_TOPIC_SUFFIX, response);
         return response;
     }
@@ -878,8 +934,10 @@ public class MessageService {
      *  method never touches a repository, or a 50-message history page would fire 50 extra
      *  selects (callers batch via {@link #reactionSummariesByMessage} / {@link #replyOriginalsFor});
      *  the attachments are a CPU-only JSON parse (see {@link AttachmentListCodec}). */
+    /** The message page flavor: every list path passes the page's polls batch (one query for
+     *  the whole page — the reactions/replies discipline). */
     private MessageResponse toResponse(Message message, List<ReactionSummary> reactions,
-                                       Map<Long, Message> replyOriginals) {
+                                       Map<Long, Message> replyOriginals, PollInfo poll) {
         List<AttachmentResponse> attachments = attachmentListCodec.read(message.getAttachments()).stream()
                 .map(ref -> new AttachmentResponse(ref.fileName(),
                         attachmentUrlSigner.presignedGetUrl(ref.key()), ref.key(),
@@ -917,7 +975,14 @@ public class MessageService {
                 message.getStickerName() == null ? null : new StickerRef(
                         message.getStickerName(),
                         message.getStickerFileKey(),
-                        attachmentUrlSigner.presignedGetUrl(message.getStickerFileKey())));
+                        attachmentUrlSigner.presignedGetUrl(message.getStickerFileKey())),
+                poll);
+    }
+
+    /** The single-message flavor: no poll (create/edit/forward of ordinary messages). */
+    private MessageResponse toResponse(Message message, List<ReactionSummary> reactions,
+                                       Map<Long, Message> replyOriginals) {
+        return toResponse(message, reactions, replyOriginals, null);
     }
 
     /** The forward's origin card, or null when the message is not a forward. Any single origin

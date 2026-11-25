@@ -21,6 +21,7 @@ import oak.server.repository.ChannelRepository;
 import oak.server.repository.MessageRepository;
 import oak.server.repository.ServerProfileRepository;
 import oak.server.repository.UserRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -43,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -79,6 +81,10 @@ class MessageServiceTest {
     @Mock
     private AttachmentObjectStore objectStore;
     @Mock
+    private PollService pollService;
+    @Mock
+    private oak.server.repository.PollRepository pollRepository;
+    @Mock
     private oak.server.repository.StickerRepository stickerRepository;
     /** Existence gate for :name: custom-emoji reactions — unused by every built-in-slug
      *  test, legal under STRICT_STUBS. */
@@ -105,6 +111,13 @@ class MessageServiceTest {
 
     @InjectMocks
     private MessageService messageService;
+
+    @BeforeEach
+    void pollBatchesAreEmptyByDefault() {
+        // The poll batch rides every edit/pin/forward mapping path now; LENIENT on purpose —
+        // the many tests that never reach it must not trip Mockito's strict-stub check.
+        lenient().when(pollService.pollsByMessageId(any())).thenReturn(java.util.Map.of());
+    }
 
     @Test
     void createPersistsMessageAndPushesItToChannelTopic() {
@@ -191,7 +204,7 @@ class MessageServiceTest {
         // A retry whose first response was lost re-presents the same key: the ORIGINAL response
         // comes back, with no save and no second /topic push.
         MessageResponse original = new MessageResponse(55L, 7L, 5L, "alice", "hello", null,
-                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null, false, null, null, null);
+                java.util.List.of(), java.util.List.of(), null, java.util.List.of(), null, null, false, null, null, null, null);
         when(idempotencyCache.get("alice", "key-1")).thenReturn(original);
 
         MessageResponse response = messageService.create(7L, new CreateMessageRequest("hello", null, null, "key-1"), "alice");

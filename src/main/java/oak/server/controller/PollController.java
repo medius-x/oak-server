@@ -4,6 +4,7 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import oak.server.dto.CreatePollRequest;
 import oak.server.dto.MessageResponse;
+import oak.server.dto.MyPollVotesDto;
 import oak.server.dto.PollResults;
 import oak.server.dto.VotePollRequest;
 import oak.server.service.MessageService;
@@ -18,6 +19,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * Poll endpoints (2026-11-25). Creation posts into a channel (SEND_MESSAGES + CREATE_POLLS);
@@ -55,6 +58,14 @@ public class PollController {
     public PollResults results(@PathVariable Long pollId,
                                @AuthenticationPrincipal UserDetails principal) {
         return pollService.results(pollId, principal.getUsername());
+    }
+
+    /** The caller's own votes in a channel's polls — the client's "already voted"
+     *  seed at channel open (survives client restarts). */
+    @GetMapping("/api/channels/{channelId}/polls/my-votes")
+    public List<MyPollVotesDto> myVotes(@PathVariable Long channelId,
+                                        @AuthenticationPrincipal UserDetails principal) {
+        return pollService.myVotes(channelId, principal.getUsername());
     }
 
     /** Early finish — the author, OWNER/ADMINISTRATOR, or MANAGE_MESSAGES (idempotent). */

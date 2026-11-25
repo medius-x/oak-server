@@ -54,7 +54,8 @@ public class RoleSeeder implements ApplicationRunner {
             Permission.STREAM.bit,
             Permission.USE_VAD.bit,
             Permission.CHANGE_NICKNAME.bit,
-            Permission.VIEW_CHANNEL.bit);
+            Permission.VIEW_CHANNEL.bit,
+            Permission.VOTE_POLLS.bit);
 
     private final RoleRepository roleRepository;
     private final UserRepository userRepository;
@@ -67,6 +68,7 @@ public class RoleSeeder implements ApplicationRunner {
         ensureEveryoneChangeNickname();
         ensureEveryoneAddReactions();
         ensureEveryoneStream();
+        ensureEveryoneVotePolls();
         seedOwner();
         ensureOwnerAssigned();
     }
@@ -150,6 +152,23 @@ public class RoleSeeder implements ApplicationRunner {
             roleRepository.save(everyone);
             log.warn("[RBAC] @everyone was missing STREAM — re-granted (screen share stays "
                     + "available to ordinary members)");
+        });
+    }
+
+    /** Unconditionally re-grants {@link Permission#VOTE_POLLS} to the stored @everyone row on
+     *  every boot, mirroring {@link #ensureEveryoneStream()}. Polls (2026-11-25): voting is meant
+     *  for every ordinary member (CREATE_POLLS deliberately stays OFF the base row — the owner
+     *  grants it per-role), and databases seeded before the bit existed would otherwise lock
+     *  everyone but OWNER/ADMINISTRATOR out of voting on deploy day. */
+    public void ensureEveryoneVotePolls() {
+        roleRepository.findByKind(RoleKind.EVERYONE).ifPresent(everyone -> {
+            if ((everyone.getPermissions() & Permission.VOTE_POLLS.bit) != 0) {
+                return;
+            }
+            everyone.setPermissions(everyone.getPermissions() | Permission.VOTE_POLLS.bit);
+            roleRepository.save(everyone);
+            log.warn("[RBAC] @everyone was missing VOTE_POLLS — re-granted (voting stays available "
+                    + "to ordinary members)");
         });
     }
 

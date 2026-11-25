@@ -242,6 +242,45 @@ class PollIntegrationTest {
         assertTrue(pollRepository.findById(ids[1]).isPresent());
     }
 
+    @Test
+    void myVotesSnapshotReturnsOnlyTheCallersRows() throws Exception {
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(ownerToken, "general", "TEXT");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        String carolToken = registerAndLogin("carol", "supersecret");
+        Long[] ids = createPoll(ownerToken, channelId,
+                "{\"question\":\"Q?\",\"options\":[\"a\",\"b\"],\"allowMultiple\":true,\"allowVoteChange\":true}");
+        Long messageId = ids[0];
+        Long pollId = ids[1];
+        Long optionA = ids[2];
+        Long optionB = ids[3];
+
+        mockMvc.perform(post("/api/polls/" + pollId + "/vote")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON)
+                        .content("{\"optionIds\":[" + optionA + "]}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(post("/api/polls/" + pollId + "/vote")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON)
+                        .content("{\"optionIds\":[" + optionB + "]}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/polls/my-votes")
+                        .header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].messageId").value(messageId.intValue()))
+                .andExpect(jsonPath("$[0].pollId").value(pollId.intValue()))
+                .andExpect(jsonPath("$[0].optionIds.length()").value(1))
+                .andExpect(jsonPath("$[0].optionIds[0]").value(optionA.intValue()));
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/polls/my-votes")
+                        .header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
     // --- helpers -----------------------------------------------------------
 
     /** The first registrant of the @Transactional test is the OWNER bootstrap. */

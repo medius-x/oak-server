@@ -36,6 +36,21 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
+    /** A malformed/unparseable body — overrides the parent hook (a second @ExceptionHandler
+     *  mapping is an AmbiguousMapping at startup) because the DEFAULT ProblemDetail hides the
+     *  cause, which once cost a debugging round; logs the Jackson reason at WARN with the URI. */
+    @Override
+    protected ResponseEntity<Object> handleHttpMessageNotReadable(org.springframework.http.converter.HttpMessageNotReadableException ex,
+                                                                   HttpHeaders headers, HttpStatusCode status,
+                                                                   WebRequest request) {
+        ServletWebRequest servletRequest = (ServletWebRequest) request;
+        log.warn("[api] {} {} -> 400 Bad Request: unreadable body: {}",
+                servletRequest.getHttpMethod(), servletRequest.getRequest().getRequestURI(),
+                ex.getCause() == null ? ex.getMessage() : ex.getCause().getMessage());
+        return response(HttpStatus.BAD_REQUEST.value(), HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                "Failed to read request");
+    }
+
     @ExceptionHandler(ResponseStatusException.class)
     public ResponseEntity<Object> handleResponseStatus(ResponseStatusException ex,
                                                        HttpServletRequest request) {

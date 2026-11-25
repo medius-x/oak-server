@@ -21,9 +21,12 @@ import java.util.List;
  * the pin moment — both null while unpinned. Pin/unpin pushes ride the existing {@code .edited}
  * topic with the full row. {@code sticker} (16th, appended) is the sticker this message carries
  * — a DENORMALIZED copy stamped at send time; null = no sticker (see {@link StickerRef}).
- * Field order is wire-stable — new fields append at the end only, paired with the client
- * mirror. (The former scalar {@code attachmentFileName}/{@code attachmentUrl} pair was REPLACED
- * by {@code attachments} in a paired client+server pass — dev deploys are always paired.)
+ * {@code poll} (17th, appended 2026-11-25) is the poll this message carries — null = no poll
+ * (see {@link PollInfo}); a poll message's {@code content} is null, the poll is its sole
+ * payload. Field order is wire-stable — new fields append at the end only, paired with the
+ * client mirror. (The former scalar {@code attachmentFileName}/{@code attachmentUrl} pair was
+ * REPLACED by {@code attachments} in a paired client+server pass — dev deploys are always
+ * paired.)
  */
 public record MessageResponse(
         Long id,
@@ -41,6 +44,7 @@ public record MessageResponse(
         boolean pinned,
         String pinnedBy,
         Instant pinnedAt,
-        StickerRef sticker
+        StickerRef sticker,
+        PollInfo poll
 ) {
 }

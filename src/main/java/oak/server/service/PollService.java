@@ -3,6 +3,7 @@ package oak.server.service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import oak.server.dto.CreatePollRequest;
+import oak.server.dto.MyPollVotesDto;
 import oak.server.dto.PollEvent;
 import oak.server.dto.PollInfo;
 import oak.server.dto.PollResults;
@@ -25,6 +26,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,6 +57,7 @@ public class PollService {
     private final PollRepository pollRepository;
     private final PollOptionRepository pollOptionRepository;
     private final PollVoteRepository pollVoteRepository;
+    private final oak.server.repository.ChannelRepository channelRepository;
     private final AuthorizationService auth;
     private final SimpMessagingTemplate messagingTemplate;
 
@@ -207,6 +210,32 @@ public class PollService {
                 poll.getId(), message.getAuthor().getUsername(), options.size(),
                 poll.isAllowMultiple(), poll.isAnonymous());
         return pollInfo(poll, options);
+    }
+
+    /**
+     * The caller's "already voted" snapshot for a channel (2026-11-25, fix round 4):
+     * the client seeds its poll cards from this at channel open, so a client restart
+     * no longer re-offers votes the server would 409 — the honest fix for the
+     * restart-amnesia loop. Gate: READ_MESSAGE_HISTORY (the cards are visible to
+     * anyone who can read the channel; the votes returned are the CALLER's own).
+     */
+    @Transactional(readOnly = true)
+    public List<MyPollVotesDto> myVotes(Long channelId, String viewerUsername) {
+        User viewer = auth.requireUser(viewerUsername);
+        Channel channel = channelRepository.findById(channelId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Channel not found"));
+        auth.requireInChannel(viewer, channel, Permission.READ_MESSAGE_HISTORY);
+        Map<Long, List<Long>> optionsByPoll = new LinkedHashMap<>();
+        Map<Long, Long> messageByPoll = new HashMap<>();
+        for (PollVote vote : pollVoteRepository
+                .findByPollMessageChannelIdAndUsername(channelId, viewer.getUsername())) {
+            optionsByPoll.computeIfAbsent(vote.getPoll().getId(), pollId -> new ArrayList<>())
+                    .add(vote.getOption().getId());
+            messageByPoll.putIfAbsent(vote.getPoll().getId(), vote.getPoll().getMessage().getId());
+        }
+        return optionsByPoll.entrySet().stream()
+                .map(entry -> new MyPollVotesDto(messageByPoll.get(entry.getKey()), entry.getKey(), entry.getValue()))
+                .toList();
     }
 
     // --- internals ---------------------------------------------------------

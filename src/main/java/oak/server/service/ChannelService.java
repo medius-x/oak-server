@@ -318,7 +318,10 @@ public class ChannelService {
         return new ChannelMyPermissions(
                 auth.hasInChannel(user, channel, Permission.SEND_MESSAGES),
                 auth.hasInChannel(user, channel, Permission.ATTACH_FILES),
-                auth.hasInChannel(user, channel, Permission.STREAM));
+                auth.hasInChannel(user, channel, Permission.STREAM),
+                auth.hasInChannel(user, channel, Permission.VOTE_POLLS),
+                auth.hasInChannel(user, channel, Permission.SEND_MESSAGES)
+                        && auth.hasInChannel(user, channel, Permission.CREATE_POLLS));
     }
 
     /** Deletes a channel and everything tied to it (messages + per-channel overrides), then broadcasts

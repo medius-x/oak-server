@@ -8,7 +8,11 @@ package oak.server.dto;
  * Resolved through {@link oak.server.service.AuthorizationService#hasInChannel} with
  * {@link oak.server.entity.Permission#SEND_MESSAGES}, {@link oak.server.entity.Permission#ATTACH_FILES}
  * and {@link oak.server.entity.Permission#STREAM}; ADMINISTRATOR / OWNER bypass overrides as usual.
+ * {@code votePolls} (4th, appended 2026-11-25) drives the poll card's Vote button;
+ * {@code createPolls} (5th) = SEND_MESSAGES AND CREATE_POLLS — the composer button's gate (user
+ * decision: the button hides entirely when the member cannot write, even with the create bit).
  * WIRE: fields are append-only; both mirrors change in one pass (paired deploy).
  */
-public record ChannelMyPermissions(boolean sendMessages, boolean attachFiles, boolean stream) {
+public record ChannelMyPermissions(boolean sendMessages, boolean attachFiles, boolean stream,
+                                   boolean votePolls, boolean createPolls) {
 }

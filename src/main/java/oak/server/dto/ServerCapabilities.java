@@ -54,8 +54,14 @@ public final class ServerCapabilities {
      *  + the 403 full-room gate on {@code GET /room} + the JOIN_FULL_ROOMS bypass
      *  permission (rides the regular /api/permissions catalog). Without the flag the
      *  client hides the limit editor — the 403 of an old client hitting a full room
-     *  is handled by its generic error path anyway. */
-    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings", "video-codec-setting");
+     *  is handled by its generic error path anyway.
+     *  {@code polls} — the polls feature (2026-11-25): MessageResponse.poll, the
+     *  poll endpoints (/api/channels/{id}/polls, /api/polls/{id}/vote|results|close),
+     *  the /topic/channel.{id}.poll push and the CREATE_POLLS/VOTE_POLLS permission
+     *  pair (riding the regular /api/permissions catalog). Without the flag the
+     *  client hides the composer button and the card renders as an empty
+     *  content-less message (the attachment-only degradation). */
+    public static final List<String> FEATURES = List.of("backups", "server-migration", "afk-roster", "presence-activity", "share-congestion", "share-source-state", "roster-status", "voice-user-limit", "igdb-settings", "video-codec-setting", "polls");
 
     /** CONDITIONAL flag — deliberately NOT a member of {@link #FEATURES}: the IGDB
      *  game auto-detect ladder (2026-11-19): {@code GET /api/games/lookup} +

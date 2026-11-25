@@ -79,7 +79,7 @@ public enum Permission {
                                            // (/api/server/storage — the "Server" settings screen)
 
     // --- Private-message restriction (appended at the very END — the bit-stability rule) ---
-    RESTRICT_PRIVATE_MESSAGES(Group.GENERAL);  // the ONE subtractive permission: a role carrying this
+    RESTRICT_PRIVATE_MESSAGES(Group.GENERAL),  // the ONE subtractive permission: a role carrying this
                                                // bit takes direct messages AWAY from its holders —
                                                // they can neither send nor receive (a 1:1 with a
                                                // restricted member freezes for BOTH sides; existing
@@ -90,6 +90,15 @@ public enum Permission {
                                                // short-circuit OWNER/ADMINISTRATOR into ALL (an
                                                // admin would appear "restricted" without any role).
                                                // @everyone's copy of the bit is ignored by design.
+
+    // --- Polls (appended at the very END, ADJACENT to each other — the user's
+    //     2026-11-25 decision: two FRESH bits rather than repurposing reserved
+    //     bit 17; that one stays reserved for a future need) ---
+    CREATE_POLLS(Group.GENERAL),               // post a poll message into a channel (channel-scoped;
+                                               // default: OWNER/ADMINISTRATOR only — @everyone does
+                                               // NOT carry it)
+    VOTE_POLLS(Group.GENERAL);                 // cast a vote in a channel's polls (channel-scoped;
+                                               // default: granted to @everyone)
 
     public enum Group { GENERAL, TEXT, VOICE }
 

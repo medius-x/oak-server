@@ -16,7 +16,7 @@ import java.util.List;
  */
 public record CreatePollRequest(
         @NotBlank @Size(max = 300) String question,
-        @NotNull @Size(min = 2, max = 10) List<@NotBlank @Size(max = 100) String> options,
+        @NotNull @Size(min = 1, max = 10) List<@NotBlank @Size(max = 100) String> options,
         Boolean allowMultiple,
         Boolean anonymous,
         Boolean allowVoteChange,

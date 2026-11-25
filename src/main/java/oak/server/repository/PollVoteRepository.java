@@ -23,6 +23,10 @@ public interface PollVoteRepository extends JpaRepository<PollVote, Long> {
     /** The voter's current rows in one poll (empty = has not voted; several = multi-choice). */
     List<PollVote> findByPollIdAndUsername(Long pollId, String username);
 
+    /** The voter's whole footprint in a CHANNEL's polls — the client's
+     *  "already voted" snapshot at channel open (survives client restarts). */
+    List<PollVote> findByPollMessageChannelIdAndUsername(Long channelId, String username);
+
     /** A re-vote's replace step: the voter's whole selection goes, then the new set lands. */
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("delete from PollVote v where v.poll.id = :pollId and v.username = :username")
