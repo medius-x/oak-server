@@ -77,7 +77,7 @@ class ServerProfileIntegrationTest {
                 // credentials and lights up in the IgdbGamesIntegrationTest).
                 .andExpect(jsonPath("$.version").isNotEmpty())
                 .andExpect(jsonPath("$.capabilities").isArray())
-                .andExpect(jsonPath("$.capabilities.length()").value(11))
+                .andExpect(jsonPath("$.capabilities.length()").value(12))
                 .andExpect(jsonPath("$.capabilities[0]").value("backups"))
                 .andExpect(jsonPath("$.capabilities[1]").value("server-migration"))
                 .andExpect(jsonPath("$.capabilities[2]").value("afk-roster"))

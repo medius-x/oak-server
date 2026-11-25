@@ -67,6 +67,10 @@ class IgdbGamesIntegrationTest {
     @Autowired
     private IgdbGameRepository igdbGamesCache;
 
+    /** The merge test seeds session rows directly (no tracker detour needed). */
+    @Autowired
+    private oak.server.repository.GameSessionRepository gameSessions;
+
     @MockitoBean
     private IgdbClient igdbClient;
 
@@ -512,6 +516,126 @@ class IgdbGamesIntegrationTest {
         mockMvc.perform(post("/api/games/confirm").contentType(JSON)
                         .content("{\"exeName\":\"a.exe\",\"igdbId\":1}"))
                 .andExpect(status().isUnauthorized());
+    }
+
+    // --- the manual-rule IGDB binding (2026-11-25) ---
+
+    @Test
+    void freeTextSearchServesCardsAndNeverPinsTheMatchCache() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), contains("search")))
+                .thenReturn(igdb("[{\"id\":103020,\"name\":\"Escape from Tarkov\",\"cover\":{\"image_id\":\"co1\"},\"genres\":[]},"
+                        + "{\"id\":103021,\"name\":\"Escape from Tarkov: Arena\",\"genres\":[]}]"));
+
+        mockMvc.perform(get("/api/games/search").header("Authorization", "Bearer " + memberToken)
+                        .param("q", "escape from tarkov"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].igdbId").value(103020))
+                .andExpect(jsonPath("$[0].name").value("Escape from Tarkov"))
+                .andExpect(jsonPath("$[0].coverImageId").value("co1"));
+
+        // a human query never pins exe-matching keys: a repeat goes UPSTREAM again
+        mockMvc.perform(get("/api/games/search").header("Authorization", "Bearer " + memberToken)
+                        .param("q", "escape from tarkov"))
+                .andExpect(status().isOk());
+        verify(igdbClient, times(2)).query(anyString(), contains("search"));
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(igdbClient, times(2)).query(anyString(), body.capture());
+        assertTrue(body.getValue().startsWith("search \"escape from tarkov\";"));
+
+        // an Apicalypse injection attempt in the free-text query is neutralized
+        mockMvc.perform(get("/api/games/search").header("Authorization", "Bearer " + memberToken)
+                        .param("q", "tarkov\"; limit 500; where id = 1"))
+                .andExpect(status().isOk());
+        ArgumentCaptor<String> injected = ArgumentCaptor.forClass(String.class);
+        verify(igdbClient, times(3)).query(anyString(), injected.capture());
+        String lastSent = injected.getAllValues().get(2);
+        assertTrue(lastSent.startsWith("search \"tarkov limit 500 where id = 1\";"));
+        assertFalse(lastSent.contains("\"; limit")); // the injected statement boundary never forms
+    }
+
+    @Test
+    void aGluedSearchQueryRidesTheLadderNormalization() throws Exception {
+        String memberToken = memberToken();
+        configure();
+        when(igdbClient.query(anyString(), anyString())).thenReturn(igdb("[]"));
+
+        mockMvc.perform(get("/api/games/search").header("Authorization", "Bearer " + memberToken)
+                        .param("q", "Cyberpunk2077.exe"))
+                .andExpect(status().isOk());
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(igdbClient).query(anyString(), body.capture());
+        assertTrue(body.getValue().startsWith("search \"cyberpunk 2077\";")); // humps split, .exe gone
+    }
+
+    @Test
+    void searchAnswers503WhileUnconfiguredButTheCapabilityIsUnconditional() throws Exception {
+        String memberToken = memberToken();
+        mockMvc.perform(get("/api/games/search").header("Authorization", "Bearer " + memberToken)
+                        .param("q", "tarkov"))
+                .andExpect(status().isServiceUnavailable());
+        mockMvc.perform(get("/api/games/search").header("Authorization", "Bearer " + memberToken)
+                        .param("q", "   "))
+                .andExpect(status().isBadRequest()); // blank
+        String capabilities = mockMvc
+                .perform(get("/api/server").header("Authorization", "Bearer " + memberToken))
+                .andReturn().getResponse().getContentAsString();
+        assertTrue(capabilities.contains("igdb-search")); // unconditional, like igdb-settings
+        mockMvc.perform(get("/api/games/search").param("q", "tarkov"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void mergeManualMovesOnlyTheCallersHoursOntoTheRealGame() throws Exception {
+        // The EFT model: hours accumulated under the manual virtual card while the
+        // game was bound by hand; the Steam-detected real card takes them over.
+        String bobToken = registerAndLogin("bob", "supersecret");
+        String carolToken = registerAndLogin("carol", "supersecret");
+        java.time.Instant now = java.time.Instant.now();
+        igdbGamesCache.save(new IgdbGame(103020L, "Escape from Tarkov", "co1", "[]", null, now));
+        igdbGamesCache.save(new IgdbGame(-1L, "escape from tarkov", null, "[]", null, now)); // the virtual card, other case
+
+        oak.server.repository.GameSessionRepository sessionRows = gameSessions;
+        oak.server.entity.GameSession bobFirst = new oak.server.entity.GameSession("bob", -1L, now.minusSeconds(7200));
+        bobFirst.setEndedAt(now.minusSeconds(3600));
+        sessionRows.save(bobFirst);
+        oak.server.entity.GameSession bobSecond = new oak.server.entity.GameSession("bob", -1L, now.minusSeconds(3600));
+        bobSecond.setEndedAt(now);
+        sessionRows.save(bobSecond);
+        oak.server.entity.GameSession carolRow = new oak.server.entity.GameSession("carol", -1L, now.minusSeconds(1800));
+        carolRow.setEndedAt(now);
+        sessionRows.save(carolRow);
+
+        mockMvc.perform(post("/api/games/merge-manual").header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON).content("{\"igdbId\":103020}"))
+                .andExpect(status().isOk());
+
+        // bob's two sessions are ONE real-game entry now; carol's row never moved
+        mockMvc.perform(get("/api/games/my").header("Authorization", "Bearer " + bobToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].igdbId").value(103020))
+                .andExpect(jsonPath("$[0].totalSeconds").value(7200));
+        mockMvc.perform(get("/api/games/my").header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].igdbId").value(-1)); // the shared card lives on
+
+        // the last holder merges → the emptied virtual card disappears
+        mockMvc.perform(post("/api/games/merge-manual").header("Authorization", "Bearer " + carolToken)
+                        .contentType(JSON).content("{\"igdbId\":103020}"))
+                .andExpect(status().isOk());
+        assertFalse(igdbGamesCache.findById(-1L).isPresent());
+        mockMvc.perform(get("/api/games/my").header("Authorization", "Bearer " + carolToken))
+                .andExpect(jsonPath("$[0].igdbId").value(103020));
+
+        // an unknown target is a clean 404; nobody else's hours were touched
+        mockMvc.perform(post("/api/games/merge-manual").header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON).content("{\"igdbId\":999999}"))
+                .andExpect(status().isNotFound());
     }
 
     // --- helpers ---

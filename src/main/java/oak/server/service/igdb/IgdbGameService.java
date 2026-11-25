@@ -48,6 +48,10 @@ public class IgdbGameService {
     /** Upstream search width — also the candidates cap of one lookup response. */
     private static final int SEARCH_LIMIT = 5;
 
+    /** The manual form's dropdown width (2026-11-25): wider than the ladder's —
+     *  a human skims further down a name they half-remember. */
+    private static final int MANUAL_SEARCH_LIMIT = 8;
+
     private static final String CARD_FIELDS = "fields name,cover.image_id,genres.name,first_release_date;";
 
     /** The lazy refresh lane: one daemon thread — refreshes are rare (a day per
@@ -118,6 +122,34 @@ public class IgdbGameService {
         }
         return candidates == null ? GameLookupResponse.empty()
                 : GameLookupResponse.candidates(candidates);
+    }
+
+    /** A FREE-TEXT catalogue search (the manual-rule IGDB binding, 2026-11-25):
+     *  the "add activity" form's dropdown — top cards for the typed name (or the
+     *  picked exe's name). Cards cache as usual, but the MATCH cache stays
+     *  deliberately UNTOUCHED: a human-typed query (typos included) must never
+     *  pin the exe-matching keys the ladder reads. A glued/exe-like query (no
+     *  spaces, "Cyberpunk2077.exe") rides the ladder's own normalization, a
+     *  spaced human phrase searches as typed. */
+    @Transactional
+    public List<GameCard> search(String query) {
+        requireConfigured();
+        String searchable = query.contains(" ")
+                ? IgdbNames.sanitizeSearchQuery(query)
+                : IgdbNames.normalizeTitle(query);
+        if (searchable == null) {
+            return List.of(); // only stripped metacharacters — nothing to search
+        }
+        JsonNode results = igdbClient.query("games",
+                "search \"" + searchable + "\"; " + CARD_FIELDS
+                        + " where version_parent = null; limit " + MANUAL_SEARCH_LIMIT + ";");
+        List<GameCard> found = new ArrayList<>();
+        if (results.isArray()) {
+            for (JsonNode node : results) {
+                found.add(GameCard.from(saveCard(node)));
+            }
+        }
+        return found;
     }
 
     /** Serves a card by IGDB id — the cache first, IGDB once when never seen. */

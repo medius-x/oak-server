@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.util.List;
 import java.util.Optional;
 
 /** Cached IGDB game cards; the id IS the IGDB game id (see {@link IgdbGame}).
@@ -19,4 +20,7 @@ public interface IgdbGameRepository extends JpaRepository<IgdbGame, Long> {
     /** The lowest manual id (absent when no manual card exists yet). */
     @Query("SELECT MIN(g.igdbId) FROM IgdbGame g WHERE g.igdbId < 0")
     Optional<Long> lowestManualId();
+
+    /** Every virtual manual card (the manual-hours merge's scan, 2026-11-25). */
+    List<IgdbGame> findByIgdbIdLessThan(long manualBoundary);
 }

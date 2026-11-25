@@ -174,6 +174,51 @@ public class GameController {
         }
     }
 
+    /**
+     * A FREE-TEXT catalogue search (the manual-rule IGDB binding, 2026-11-25):
+     * the "add activity" form's dropdown — top cards for the typed name (or
+     * the picked exe's name). Behind the {@code igdb-search} capability;
+     * cards cache as usual while the MATCH cache stays untouched (a human
+     * query must never pin exe-matching keys).
+     */
+    @GetMapping("/search")
+    public List<GameCard> search(@AuthenticationPrincipal UserDetails principal,
+                                 @RequestParam String q) {
+        auth.requireUser(principal.getUsername());
+        if (!rateLimiter.tryAcquire(principal.getUsername())) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "Too many game requests");
+        }
+        String query = requireShort(trimToNull(q), "q");
+        if (query == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Nothing to search");
+        }
+        try {
+            return gameService.search(query);
+        } catch (IgdbNotConfiguredException notConfigured) {
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE, "IGDB is not configured");
+        } catch (IgdbException upstream) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, upstream.getMessage());
+        }
+    }
+
+    /**
+     * The manual-hours merge (the manual-rule IGDB binding, 2026-11-25): the
+     * CALLER's sessions on virtual manual cards whose (normalized) name equals
+     * the chosen game's move onto the real game — the EFT model: played from
+     * the native installer first, Steam-detected later, ONE game and one
+     * counter. Others' rows on the same shared card never move.
+     */
+    @PostMapping("/merge-manual")
+    public void mergeManual(@AuthenticationPrincipal UserDetails principal,
+                            @RequestBody @Valid oak.server.dto.MergeManualGamesRequest request) {
+        auth.requireUser(principal.getUsername());
+        try {
+            gameSessions.mergeManualSessions(principal.getUsername(), request.igdbId());
+        } catch (IllegalArgumentException unknown) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, unknown.getMessage());
+        }
+    }
+
     private static String trimToNull(String raw) {
         if (raw == null) {
             return null;

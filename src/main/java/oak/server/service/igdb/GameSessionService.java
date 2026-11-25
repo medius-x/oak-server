@@ -120,6 +120,43 @@ public class GameSessionService {
         sessions.save(session);
     }
 
+    /**
+     * The manual-hours merge (the manual-rule IGDB binding, 2026-11-25): moves
+     * the CALLER's sessions off the virtual manual cards onto a real game.
+     * Match key: the chosen GAME's normalized name (NOT the rule's text — a
+     * rule may be re-created under a different label while the hours live here,
+     * on the server); exact equality only, deliberately no fuzzy matching (a
+     * wrong merge is unmergeable). Only the CALLER's rows move — another user
+     * gaming on the same shared virtual card keeps theirs; a card left with no
+     * sessions at all disappears from the list.
+     */
+    @org.springframework.transaction.annotation.Transactional
+    public int mergeManualSessions(String username, long toIgdbId) {
+        IgdbGame target = games.findById(toIgdbId).orElse(null);
+        if (target == null || target.getIgdbId() <= 0) {
+            throw new IllegalArgumentException("Unknown game");
+        }
+        String targetName = IgdbNames.normalizeTitle(target.getName());
+        if (targetName == null) {
+            throw new IllegalArgumentException("Unnamed game");
+        }
+        int moved = 0;
+        for (IgdbGame card : games.findByIgdbIdLessThan(0)) {
+            if (!targetName.equals(IgdbNames.normalizeTitle(card.getName()))) {
+                continue;
+            }
+            moved += sessions.moveSessions(username, card.getIgdbId(), toIgdbId);
+            if (!sessions.existsByIgdbGameIgdbId(card.getIgdbId())) {
+                games.delete(card); // nobody's hours reference it anymore
+                log.info("manual game card #{} \"{}\" emptied and removed by the merge", card.getIgdbId(), card.getName());
+            }
+        }
+        if (moved > 0) {
+            log.info("merged {} manual session row(s) of {} into IGDB #{}", moved, username, toIgdbId);
+        }
+        return moved;
+    }
+
     /** The user's play history aggregate (newest first, capped): card + summed
      *  playtime (an open session counts up to now) + last played. Games whose
      *  card left the cache are skipped — sessions only ever open for resolved
