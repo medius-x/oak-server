@@ -160,21 +160,27 @@ public class PollService {
         for (PollOption option : pollOptionRepository.findByPollIdInOrderByPositionAsc(pollIds)) {
             optionsByPoll.computeIfAbsent(option.getPoll().getId(), id -> new ArrayList<>()).add(option);
         }
+        Map<Long, Integer> votersByPoll = new HashMap<>();
+        for (Object[] row : pollVoteRepository.countVotersByPollIdIn(pollIds)) {
+            votersByPoll.put((Long) row[0], ((Number) row[1]).intValue());
+        }
         Map<Long, PollInfo> byMessage = new LinkedHashMap<>();
         for (Poll poll : polls) {
             byMessage.put(poll.getMessage().getId(), pollInfo(poll,
-                    optionsByPoll.getOrDefault(poll.getId(), List.of())));
+                    optionsByPoll.getOrDefault(poll.getId(), List.of()),
+                    votersByPoll.getOrDefault(poll.getId(), 0)));
         }
         return byMessage;
     }
 
-    /** The wire shape of one poll (options in creation order). */
-    public PollInfo pollInfo(Poll poll, List<PollOption> options) {
+    /** The wire shape of one poll (options in creation order) with its headline voter count. */
+    public PollInfo pollInfo(Poll poll, List<PollOption> options, int totalVoters) {
         return new PollInfo(poll.getId(), poll.getQuestion(), poll.isAllowMultiple(), poll.isAnonymous(),
                 poll.isAllowVoteChange(), poll.getEndsAt(), poll.getClosedAt(),
                 options.stream()
                         .map(option -> new PollInfo.PollOptionInfo(option.getId(), option.getText()))
-                        .toList());
+                        .toList(),
+                totalVoters);
     }
 
     /**
@@ -209,7 +215,7 @@ public class PollService {
         log.info("[poll] poll {} created by {} ({} options, multiple={}, anonymous={})",
                 poll.getId(), message.getAuthor().getUsername(), options.size(),
                 poll.isAllowMultiple(), poll.isAnonymous());
-        return pollInfo(poll, options);
+        return pollInfo(poll, options, 0);
     }
 
     /**
@@ -263,7 +269,7 @@ public class PollService {
                 })
                 .toList();
         int totalVoters = (int) votes.stream().map(PollVote::getUsername).distinct().count();
-        return new PollResults(pollInfo(poll, options), totalVoters, rows);
+        return new PollResults(pollInfo(poll, options, totalVoters), totalVoters, rows);
     }
 
     /** Lazily finishes a poll whose deadline has passed (the sweeper mops up the rest). */

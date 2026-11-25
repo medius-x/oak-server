@@ -68,7 +68,44 @@ class PollIntegrationTest {
                 .andExpect(jsonPath("$[0].poll.allowMultiple").value(true))
                 .andExpect(jsonPath("$[0].poll.allowVoteChange").value(true))
                 .andExpect(jsonPath("$[0].poll.options.length()").value(3))
-                .andExpect(jsonPath("$[0].poll.options[0].text").value("Iced"));
+                .andExpect(jsonPath("$[0].poll.options[0].text").value("Iced"))
+                .andExpect(jsonPath("$[0].poll.totalVoters").value(0));
+    }
+
+    @Test
+    void spectatorSeesVoterCountInTheHistorySnapshot() throws Exception {
+        // The 2026-11-25 fix: the history snapshot carries the headline voter
+        // count, so a member who just entered the channel (and never voted)
+        // sees the real "N votes" without waiting for a live push.
+        String ownerToken = registerAndLogin("alice", "supersecret");
+        Long channelId = createChannel(ownerToken, "general", "TEXT");
+        String bobToken = registerAndLogin("bob", "supersecret");
+        String carolToken = registerAndLogin("carol", "supersecret");
+        Long[] ids = createPoll(ownerToken, channelId,
+                "{\"question\":\"Q?\",\"options\":[\"a\",\"b\"],\"allowMultiple\":true}");
+        Long pollId = ids[1];
+
+        mockMvc.perform(post("/api/polls/" + pollId + "/vote")
+                        .header("Authorization", "Bearer " + bobToken)
+                        .contentType(JSON)
+                        .content("{\"optionIds\":[" + ids[2] + "," + ids[3] + "]}")) // one PERSON, two options
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].poll.totalVoters").value(1));
+
+        mockMvc.perform(post("/api/polls/" + pollId + "/vote")
+                        .header("Authorization", "Bearer " + ownerToken)
+                        .contentType(JSON)
+                        .content("{\"optionIds\":[" + ids[2] + "]}"))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/api/channels/" + channelId + "/messages")
+                        .header("Authorization", "Bearer " + carolToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].poll.totalVoters").value(2));
     }
 
     @Test

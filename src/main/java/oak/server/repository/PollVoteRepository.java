@@ -35,4 +35,9 @@ public interface PollVoteRepository extends JpaRepository<PollVote, Long> {
     /** The poll's headline number: DISTINCT people, not raw rows (a multi-choice voter counts once). */
     @Query("select count(distinct v.username) from PollVote v where v.poll.id = :pollId")
     int countVoters(@Param("pollId") Long pollId);
+
+    /** The message-page batch of the headline numbers (the history snapshot fix,
+     *  2026-11-25): DISTINCT people per poll id, one query for the whole page. */
+    @Query("select v.poll.id, count(distinct v.username) from PollVote v where v.poll.id in :pollIds group by v.poll.id")
+    List<Object[]> countVotersByPollIdIn(@Param("pollIds") java.util.Collection<Long> pollIds);
 }
