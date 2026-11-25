@@ -92,7 +92,7 @@ Capability `e2ee-*`; включение — явное действие влад
 `../../../space-client/docs/claude/research-backlog.md` «Ачивки: сбор телеметрии».
 
 - Уже покрыто: `game_sessions` (V21) + `igdb_games.genres` → 12/31 ачивок бесплатно.
-- V28 (7 таблиц): `voice_sessions`, `voice_mute_intervals` (SELF-mute only), `share_intervals`,
+- V29 (7 таблиц; V28 занял polls 2026-11-25): `voice_sessions`, `voice_mute_intervals` (SELF-mute only), `share_intervals`,
   `watch_intervals`, `presence_days`, `moderation_events`, `process_coincidence_episodes`.
 - Пассивные хуки (основная логика не трогается, ошибки не роняют путь): voice join/leave/
   дисконнект; self-mute флипы; `UserCameOnlineEvent` → upsert дня; ban/unban → события.
